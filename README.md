@@ -34,6 +34,20 @@ I work better when I don't have to organize. The cognitive overhead of maintaini
 | Task store | TBD | Deferred until v1 implementation |
 | Agent interface | Provider-agnostic conversation | Claude/Codex/other; no lock-in |
 
+## Prioritization Criteria
+
+When surfacing the top 3 tasks, the agent reasons over these factors:
+
+| Factor | Source |
+|--------|--------|
+| Due date | Provided by user at validation (optional) |
+| Importance | Provided by user at validation (low / medium / high) |
+| Urgency | Inferred by agent — how time-sensitive is this right now |
+| Impact on others | Inferred by agent — does someone else depend on this |
+| Task impact | Inferred by agent — how much does completing this unblock or change things |
+
+The agent must explain which factors drove each recommendation so the user can override with context the agent lacks.
+
 ## Versioned Roadmap
 
 ### v1 — Capture & Execute
@@ -46,7 +60,7 @@ The core loop.
 - **Validation**: Pull-on-demand agent conversation
   - Pre-filled fields (title, importance, due date)
   - Approve / light-edit / reject per item
-- **Prioritization**: "What's next?" → top 3 tasks with reasoning
+- **Prioritization**: "What's next?" → top 3 tasks with reasoning per factor
 - **Task breakdown**: On-demand when facing a large task ("break this down for me")
 
 ### v2 — Clean Inbox

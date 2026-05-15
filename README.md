@@ -4,7 +4,7 @@ Local-first memory substrate for agent work: replayable traces, memory proposals
 
 This repository is currently focused on the memory layer only. Broader Overmind orchestration plans are kept as future context in [docs/overmind-future-plan.md](docs/overmind-future-plan.md), but they are not the short-term implementation target.
 
-The project direction is captured in [PROJECT_DIRECTION.md](PROJECT_DIRECTION.md). In short: own the trace and approved-memory ledger; treat search indexes, embeddings, wiki exports, and graph views as derived projections.
+The project direction is captured in [PROJECT_DIRECTION.md](PROJECT_DIRECTION.md). The detailed design doctrine is in [docs/architecture/memory-ledger-principles.md](docs/architecture/memory-ledger-principles.md). In short: own the trace and approved-memory ledger; treat search indexes, embeddings, wiki exports, and graph views as derived projections.
 
 ## Current Target
 

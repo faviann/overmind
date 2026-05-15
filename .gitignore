@@ -8,6 +8,8 @@ htmlcov/
 # Local environment files
 .env
 .env.*
+NEXT_STEPS.local.md
+.local/
 
 # OS/editor noise
 .DS_Store

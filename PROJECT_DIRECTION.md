@@ -1,5 +1,7 @@
 # Memory Substrate Project Direction
 
+We are not building "RAG for agents"; we are building a replayable memory ledger whose approved knowledge can be projected into RAG, wiki, graph, and trace/debug systems.
+
 This project is a self-hosted memory substrate for a future multi-agent development assistant/harness.
 
 This is **not** yet a full agent harness. Do not drift into building the full orchestrator, chat UI, agent runtime, or workflow automation platform. The current goal is to build the memory substrate and lifecycle primitives that will later allow multiple agents/tools to share durable context safely.
@@ -109,3 +111,5 @@ After V0a, prioritize the missing source-of-truth primitives before building bro
 4. then MCP/API tools over the proven lifecycle
 
 This keeps the project focused on replayable, auditable memory rather than drifting into a generic agent platform or opaque retrieval product.
+
+For the detailed design doctrine and milestone framing, see [docs/architecture/memory-ledger-principles.md](docs/architecture/memory-ledger-principles.md).

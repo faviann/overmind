@@ -4,7 +4,7 @@ Local-first memory substrate for agent work: replayable traces, memory proposals
 
 This repository is currently focused on the memory layer only. Broader Overmind orchestration plans are kept as future context in [docs/overmind-future-plan.md](docs/overmind-future-plan.md), but they are not the short-term implementation target.
 
-The project direction is captured in [PROJECT_DIRECTION.md](PROJECT_DIRECTION.md). The detailed design doctrine is in [docs/architecture/memory-ledger-principles.md](docs/architecture/memory-ledger-principles.md). In short: own the trace and approved-memory ledger; treat search indexes, embeddings, wiki exports, and graph views as derived projections.
+The project direction is captured in [PROJECT_DIRECTION.md](PROJECT_DIRECTION.md). The detailed design doctrine is in [docs/architecture/memory-ledger-principles.md](docs/architecture/memory-ledger-principles.md), and the harness boundary is explicit in [docs/architecture/harness-seam.md](docs/architecture/harness-seam.md). In short: own the trace, proposal, and approved-memory ledgers; treat search indexes, embeddings, wiki exports, graph views, and future harnesses as derived projections, adapters, or clients.
 
 ## Current Target
 
@@ -14,7 +14,7 @@ V0a proves the smallest useful memory loop:
 manual proposal -> approve/reject -> approved knowledge -> plain text retrieval
 ```
 
-V0a is intentionally direct CLI-to-Postgres. No REST API, MCP server, async worker, embeddings, graph memory, dashboard, or production deployment yet.
+V0a is intentionally direct CLI-to-Postgres. No REST API, MCP server, async worker, embeddings, graph memory, dashboard, production deployment, or full agent harness yet. The next alignment step is the minimal harness seam: append-only trace events and provenance links from proposals and approved knowledge back to source events.
 
 ## Local Development
 
@@ -37,6 +37,13 @@ UV_CACHE_DIR=/tmp/uv-cache uv run memory propose --namespace repo/memorySubsyste
 UV_CACHE_DIR=/tmp/uv-cache uv run memory proposals list --namespace repo/memorySubsystem
 UV_CACHE_DIR=/tmp/uv-cache uv run memory proposals approve <proposal-id>
 UV_CACHE_DIR=/tmp/uv-cache uv run memory search --namespace repo/memorySubsystem --query "embeddings"
+```
+
+Append a source event and create a proposal linked to that event:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run memory trace append --session local-demo --project repo/memorySubsystem --agent codex --type decision --content "Decided event-backed proposals are the next V0b slice." --metadata-json '{"repo":"memorySubsystem"}' --json
+UV_CACHE_DIR=/tmp/uv-cache uv run memory propose --namespace repo/memorySubsystem --type decision --content "Event-backed proposals are the next V0b slice." --from-event <event-id>
 ```
 
 Default database URL:
@@ -88,4 +95,4 @@ Use `UV_CACHE_DIR=/tmp/uv-cache` in sandboxed sessions because the default uv ca
 
 ## Next Slice
 
-The likely V0b candidate is the raw trace/provenance foundation that lets proposals and approved knowledge point back to what actually happened. MCP/API tools should wrap the proven lifecycle after that source-of-truth boundary is clear.
+The likely V0b candidate is the raw trace/provenance foundation that lets proposals and approved knowledge point back to what actually happened. MCP/API tools and future harness adapters should wrap the proven lifecycle after that source-of-truth boundary is clear.

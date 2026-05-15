@@ -64,7 +64,9 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/seed_repo_memories.py
 
 ### V0b Candidate
 
-The next vertical slice should be **MCP tools around the same approved-memory operations**. That keeps the proven CLI/Postgres behavior intact while giving agents a narrow integration surface for `propose_memory`, `list_proposals`, `approve_proposal`, `reject_proposal`, and `search_knowledge`.
+The next vertical slice should be **the raw trace/provenance foundation** that lets proposals and approved knowledge point back to what actually happened. MCP tools should come after that boundary is clear, wrapping the proven lifecycle rather than bypassing it.
+
+The memory subsystem is not a full harness, but it must not be harness-blind. The explicit seam is documented in [architecture/harness-seam.md](architecture/harness-seam.md): future Codex, Claude Code, Pi.dev-style, Hermes/OpenClaw-style, MCP, and CLIProxyAPI-backed systems should append trace events and consume approved memory as clients/adapters.
 
 ## 1. High-Level Objective
 

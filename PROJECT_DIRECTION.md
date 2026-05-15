@@ -4,7 +4,7 @@ We are not building "RAG for agents"; we are building a replayable memory ledger
 
 This project is a self-hosted memory substrate for a future multi-agent development assistant/harness.
 
-This is **not** yet a full agent harness. Do not drift into building the full orchestrator, chat UI, agent runtime, or workflow automation platform. The current goal is to build the memory substrate and lifecycle primitives that will later allow multiple agents/tools to share durable context safely.
+This is **not** yet a full agent harness. Do not drift into building the full orchestrator, chat UI, agent runtime, or workflow automation platform. The current goal is to build the memory substrate, the minimal harness/event seam, and the lifecycle primitives that will later allow multiple agents/tools to share durable context safely.
 
 ## High-Level Goal
 
@@ -73,7 +73,7 @@ They are not the source of truth.
 
 ## Source Of Truth
 
-The source of truth should be the trace plus approved memory ledger.
+The source of truth should be the trace ledger, proposal ledger, and approved memory ledger.
 
 The source of truth is not:
 
@@ -99,7 +99,7 @@ The current spike is:
 manual proposal -> approve/reject -> approved knowledge -> text search
 ```
 
-This proves the approval-gated memory lifecycle before adding trace capture, provenance, MCP, REST, embeddings, graph memory, dashboard, or agent orchestration.
+This proves the approval-gated memory lifecycle before adding broad integration surfaces, embeddings, graph memory, dashboard, or agent orchestration. It does not mean trace/provenance is a later plugin; the next slice should add the harness seam that lets proposals and approved knowledge point back to source events.
 
 ## Near-Term Direction
 
@@ -112,4 +112,4 @@ After V0a, prioritize the missing source-of-truth primitives before building bro
 
 This keeps the project focused on replayable, auditable memory rather than drifting into a generic agent platform or opaque retrieval product.
 
-For the detailed design doctrine and milestone framing, see [docs/architecture/memory-ledger-principles.md](docs/architecture/memory-ledger-principles.md).
+For the detailed design doctrine and milestone framing, see [docs/architecture/memory-ledger-principles.md](docs/architecture/memory-ledger-principles.md). For the explicit boundary between memory substrate and future harnesses, see [docs/architecture/harness-seam.md](docs/architecture/harness-seam.md).

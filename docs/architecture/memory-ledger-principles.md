@@ -2,7 +2,7 @@
 
 We are not building "RAG for agents"; we are building a replayable memory ledger whose approved knowledge can be projected into RAG, wiki, graph, and trace/debug systems.
 
-This project should not accidentally become a homemade monolithic memory system. The intent is to grow it into a small memory control plane and ledger that can later feed existing memory systems.
+This project should not accidentally become a homemade monolithic memory system. The intent is to grow it into a small memory control plane and ledger that can later feed existing memory systems and future harnesses through a minimal event contract. See [harness-seam.md](harness-seam.md) for the explicit boundary.
 
 ## Directional Target
 
@@ -121,6 +121,8 @@ trace + proposal + approval + provenance + export/projection APIs
 ```
 
 Then evaluate external/open-source tools as projections or adapters.
+
+This is memory-substrate-first, not harness-blind. Build the trace/event seam now so future harnesses can append events and consume approved memory without owning canonical truth. Defer the full harness/runtime/orchestrator.
 
 ## Near-Term Milestones
 

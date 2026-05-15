@@ -1,33 +1,39 @@
 # Agent Operating Instructions
 
-**Project**: Cortex — self-hosted personal AI assistant for task capture, triage, and execution  
-**Full brief**: README.md  
-**v1 PRD**: https://github.com/faviann/cortex/issues/1
+**Project**: Cortex Memory — local-first memory substrate for agent work
+**Current focus**: V0a memory loop in README.md
+**Future orchestration context**: docs/overmind-future-plan.md
 
 ## Stack
 
 | Component | Role | Deployed on |
 |-----------|------|-------------|
-| n8n (self-hosted) | Integration, ingestion, event handling, external API calls | `workstation` LXC |
-| Hermes (self-hosted) | On-demand reasoning agent, skills execution | `workstation` LXC |
-| Postgres | Pre-validation queue (managed by n8n) | `workstation` LXC |
-| OB1 | Personal knowledge graph — **v3, not yet built** | TBD |
+| CLI | Local V0a memory workflow | local dev |
+| Postgres | Memory proposals and approved knowledge | local dev |
+| n8n (future) | Integration, ingestion, event handling | `workstation` LXC |
+| Hermes/MCP (future) | Agent access to approved memory tools | `workstation` LXC |
 
-LLM workloads route through external APIs (OpenAI, OpenRouter, Anthropic). No local model required.
+No local model is required for V0a.
 
 ## Companion Repos
 
-- `faviann/cortex` — this repo. Architecture, PRDs, stack definitions, Hermes skills
+- `faviann/cortex` — this repo. Memory substrate and future architecture notes
 - `faviann/cortex-tasks` — validated task list as GitHub Issues. Labels: `source:discord`, `source:email`, `importance:low/medium/high`, `status:parked`
 
 ## Key Constraints
 
-- Everything self-hosted. No cloud dependencies beyond LLM API calls
-- n8n is the only always-on process. Hermes activates on user request only
-- Never expose gateway ports publicly without authentication
-- Hermes connects to n8n via n8n's MCP server — no custom bridge code
-- Do not build OB1 integration until v3 is explicitly scoped
+- V0a is CLI-to-Postgres only.
+- Do not add REST, MCP, embeddings, graph memory, dashboards, or production deployment until V0a is stable.
+- Never expose gateway ports publicly without authentication.
+- Do not build OB1 integration until it is explicitly scoped.
+
+## Local Development Notes
+
+- Use `UV_CACHE_DIR=/tmp/uv-cache` when running `uv` in sandboxed agent sessions. The default uv cache under `$HOME` may be read-only.
+- Local Postgres smoke tests connect to the Compose-published port on `localhost:55432`; sandboxed agents may need local network escalation for those commands.
+- Prefer `docker compose -f docker-compose.yml up -d postgres` for the V0a development database, and stop it after verification unless continued use is needed.
+- A persistent local Postgres volume is acceptable for speed, but tests must not depend on accumulated state. Use unique namespaces in tests and `memory dev reset --yes` when a clean schema is needed.
 
 ## Versioning
 
-Current target: **v1 — Capture & Execute**. See README.md for full roadmap. Do not implement v2+ features in v1 work.
+Current target: **V0a — local vertical memory loop**. See README.md and NEXT_STEPS.md. Do not implement future Overmind orchestration features in this slice.

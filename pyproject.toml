@@ -1,0 +1,27 @@
+[project]
+name = "cortex-memory"
+version = "0.1.0"
+description = "Local Postgres-backed memory loop for Cortex V0a."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.2",
+]
+
+[project.scripts]
+memory = "cortex_memory.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that require local services such as Postgres",
+]

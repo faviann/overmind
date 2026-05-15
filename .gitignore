@@ -1,0 +1,14 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.coverage
+htmlcov/
+
+# Local environment files
+.env
+.env.*
+
+# OS/editor noise
+.DS_Store
+*.swp

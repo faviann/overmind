@@ -21,12 +21,31 @@ def build_parser() -> argparse.ArgumentParser:
     init = subparsers.add_parser("init", help="Apply local database migrations.")
     add_output_argument(init)
 
+    trace = subparsers.add_parser("trace", help="Append and inspect trace events.")
+    trace_subparsers = trace.add_subparsers(dest="trace_command", required=True)
+
+    trace_append = trace_subparsers.add_parser("append", help="Append a trace event.")
+    trace_append.add_argument("--session", required=True, dest="session_id")
+    trace_append.add_argument("--project", default=db.default_namespace(), dest="project_id")
+    trace_append.add_argument("--agent", required=True, dest="agent_id")
+    trace_append.add_argument("--type", required=True, choices=sorted(service.TRACE_EVENT_TYPES), dest="event_type")
+    trace_append.add_argument("--content", required=True)
+    trace_append.add_argument("--metadata-json", default="{}", help="JSON object with event metadata.")
+    trace_append.add_argument("--timestamp", help="ISO-8601 event timestamp. Defaults to database time.")
+    add_output_argument(trace_append)
+
+    trace_list = trace_subparsers.add_parser("list", help="List trace events for a session.")
+    trace_list.add_argument("--session", required=True, dest="session_id")
+    trace_list.add_argument("--project", dest="project_id")
+    add_output_argument(trace_list)
+
     propose = subparsers.add_parser("propose", help="Create a pending memory proposal.")
     propose.add_argument("--namespace", default=db.default_namespace())
     propose.add_argument("--type", required=True, dest="memory_type")
     propose.add_argument("--content", required=True)
     propose.add_argument("--source-text")
     propose.add_argument("--rationale")
+    propose.add_argument("--from-event", dest="source_event_id")
     add_output_argument(propose)
 
     proposals = subparsers.add_parser("proposals", help="Review memory proposals.")
@@ -109,6 +128,31 @@ def main(argv: list[str] | None = None) -> int:
                 print("database already initialized")
             return 0
 
+        if args.command == "trace":
+            if args.trace_command == "append":
+                row = service.append_trace_event(
+                    service.TraceEvent(
+                        session_id=args.session_id,
+                        project_id=args.project_id,
+                        agent_id=args.agent_id,
+                        event_type=args.event_type,
+                        content=args.content,
+                        metadata=parse_json_object(args.metadata_json, "metadata-json"),
+                        timestamp=args.timestamp,
+                    )
+                )
+                emit(row, args.json, ["id", "session_id", "project_id", "agent_id", "event_type", "content"])
+                return 0
+            if args.trace_command == "list":
+                rows = service.list_trace_events(args.session_id, args.project_id)
+                emit(
+                    rows,
+                    args.json,
+                    ["id", "session_id", "project_id", "agent_id", "event_type", "content"],
+                    "no trace events",
+                )
+                return 0
+
         if args.command == "propose":
             row = service.propose_memory(
                 service.MemoryProposal(
@@ -117,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
                     content=args.content,
                     source_text=args.source_text,
                     rationale=args.rationale,
+                    source_event_id=args.source_event_id,
                 )
             )
             emit(row, args.json, ["id", "memory_type", "status", "content"])
@@ -161,3 +206,10 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error("unhandled command")
     return 2
+
+
+def parse_json_object(value: str, name: str) -> dict:
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return parsed

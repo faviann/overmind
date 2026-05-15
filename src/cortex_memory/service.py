@@ -7,6 +7,7 @@ from cortex_memory import db
 
 
 ProposalStatus = Literal["pending", "approved", "rejected", "all"]
+TRACE_EVENT_TYPES = db.TRACE_EVENT_TYPES
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,18 @@ class MemoryProposal:
     content: str
     source_text: str | None = None
     rationale: str | None = None
+    source_event_id: str | None = None
+
+
+@dataclass(frozen=True)
+class TraceEvent:
+    session_id: str
+    project_id: str
+    agent_id: str
+    event_type: str
+    content: str
+    metadata: dict | None = None
+    timestamp: str | None = None
 
 
 def initialize_database() -> dict:
@@ -35,8 +48,27 @@ def propose_memory(proposal: MemoryProposal) -> dict:
             content=proposal.content,
             source_text=proposal.source_text,
             rationale=proposal.rationale,
+            source_event_id=proposal.source_event_id,
         )
     )
+
+
+def append_trace_event(event: TraceEvent) -> dict:
+    return db.create_trace_event(
+        db.TraceEventInput(
+            session_id=event.session_id,
+            project_id=event.project_id,
+            agent_id=event.agent_id,
+            event_type=event.event_type,
+            content=event.content,
+            metadata=event.metadata,
+            timestamp=event.timestamp,
+        )
+    )
+
+
+def list_trace_events(session_id: str, project_id: str | None = None) -> list[dict]:
+    return db.list_trace_events(session_id, project_id)
 
 
 def list_proposals(namespace: str, status: ProposalStatus = "pending") -> list[dict]:

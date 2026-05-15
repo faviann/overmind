@@ -8,11 +8,11 @@ NAMESPACE = "repo/memorySubsystem"
 SEED_MEMORIES = [
     (
         "decision",
-        "V0a is intentionally CLI-to-Postgres only; REST and MCP are deferred until the vertical loop is proven.",
+        "V0a is intentionally CLI-to-Postgres only; REST, MCP, and full harness runtime are deferred until the trace/provenance seam is proven.",
     ),
     (
         "decision",
-        "V0a stores manual proposals first and only creates durable knowledge after explicit approval.",
+        "V0a began with manual proposals, but the next substrate slice is event-backed proposals with source-event provenance.",
     ),
     (
         "convention",

@@ -140,3 +140,73 @@ def test_cli_memory_loop_enforces_approval_and_namespace_isolation():
         run_memory("proposals", "list", "--namespace", namespace, "--status", "all", "--json")
     )
     assert {proposal["status"] for proposal in all_proposals} == {"approved", "rejected"}
+
+
+def test_cli_event_backed_proposal_preserves_provenance():
+    namespace = f"repo/memorySubsystem/integration/{uuid.uuid4()}"
+    session_id = f"session-{uuid.uuid4()}"
+
+    run_memory("init", "--json")
+
+    event = parse_json(
+        run_memory(
+            "trace",
+            "append",
+            "--session",
+            session_id,
+            "--project",
+            namespace,
+            "--agent",
+            "codex",
+            "--type",
+            "decision",
+            "--content",
+            "Decided event-backed proposals should preserve source event IDs.",
+            "--metadata-json",
+            '{"repo":"memorySubsystem","files":["src/cortex_memory/db.py"]}',
+            "--json",
+        )
+    )
+    assert event["session_id"] == session_id
+    assert event["project_id"] == namespace
+    assert event["agent_id"] == "codex"
+    assert event["event_type"] == "decision"
+    assert event["metadata"]["repo"] == "memorySubsystem"
+
+    trace = parse_json(run_memory("trace", "list", "--session", session_id, "--json"))
+    assert [row["id"] for row in trace] == [event["id"]]
+
+    pending = parse_json(
+        run_memory(
+            "propose",
+            "--namespace",
+            namespace,
+            "--type",
+            "decision",
+            "--content",
+            "Event-backed proposals preserve source event IDs.",
+            "--from-event",
+            event["id"],
+            "--json",
+        )
+    )
+    assert pending["status"] == "pending"
+    assert pending["source_event_id"] == event["id"]
+
+    approved = parse_json(run_memory("proposals", "approve", pending["id"], "--json"))
+    assert approved["proposal_id"] == pending["id"]
+    assert approved["source_event_id"] == event["id"]
+
+    results = parse_json(
+        run_memory(
+            "search",
+            "--namespace",
+            namespace,
+            "--query",
+            "source event IDs",
+            "--json",
+        )
+    )
+    assert len(results) == 1
+    assert results[0]["proposal_id"] == pending["id"]
+    assert results[0]["source_event_id"] == event["id"]

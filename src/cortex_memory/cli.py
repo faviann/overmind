@@ -56,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
     proposals_list.add_argument("--status", default="pending", choices=["pending", "approved", "rejected", "all"])
     add_output_argument(proposals_list)
 
+    proposals_show = proposal_subparsers.add_parser("show", help="Show a proposal with provenance.")
+    proposals_show.add_argument("proposal_id")
+    add_output_argument(proposals_show)
+
     proposals_approve = proposal_subparsers.add_parser("approve", help="Approve a proposal.")
     proposals_approve.add_argument("proposal_id")
     add_output_argument(proposals_approve)
@@ -172,6 +176,13 @@ def main(argv: list[str] | None = None) -> int:
                 rows = service.list_proposals(args.namespace, args.status)
                 emit(rows, args.json, ["id", "namespace", "memory_type", "status", "content"], "no proposals")
                 return 0
+            if args.proposal_command == "show":
+                payload = service.get_proposal_inspection(args.proposal_id)
+                if args.json:
+                    emit(payload, True)
+                else:
+                    print(format_proposal_inspection(payload))
+                return 0
             if args.proposal_command == "approve":
                 row = service.approve_proposal(args.proposal_id)
                 emit(row, args.json, ["id", "proposal_id", "memory_type", "content"])
@@ -213,3 +224,41 @@ def parse_json_object(value: str, name: str) -> dict:
     if not isinstance(parsed, dict):
         raise ValueError(f"{name} must be a JSON object")
     return parsed
+
+
+def format_proposal_inspection(payload: dict) -> str:
+    proposal = payload["proposal"]
+    lines = [
+        "proposal:",
+        f"  id={proposal['id']}",
+        f"  namespace={proposal['namespace']}",
+        f"  memory_type={proposal['memory_type']}",
+        f"  status={proposal['status']}",
+        f"  provenance_status={payload['provenance_status']}",
+        f"  source_event_id={proposal['source_event_id'] or 'missing'}",
+        f"  content={proposal['content']}",
+    ]
+    if proposal.get("rationale"):
+        lines.append(f"  rationale={proposal['rationale']}")
+    if proposal.get("source_text"):
+        lines.append(f"  source_text={proposal['source_text']}")
+
+    source_event = payload["source_event"]
+    lines.append("source_event:")
+    if source_event is None:
+        lines.append("  missing")
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            f"  id={source_event['id']}",
+            f"  event_type={source_event['event_type']}",
+            f"  timestamp={json_default(source_event['timestamp'])}",
+            f"  session_id={source_event['session_id']}",
+            f"  project_id={source_event['project_id']}",
+            f"  agent_id={source_event['agent_id']}",
+            f"  content={source_event['content']}",
+            f"  metadata={json.dumps(source_event['metadata'], default=json_default, sort_keys=True)}",
+        ]
+    )
+    return "\n".join(lines)

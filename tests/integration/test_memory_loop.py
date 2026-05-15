@@ -68,6 +68,16 @@ def test_cli_memory_loop_enforces_approval_and_namespace_isolation():
     )
     assert pending["status"] == "pending"
 
+    pending_show = parse_json(run_memory("proposals", "show", pending["id"], "--json"))
+    assert pending_show["proposal"]["id"] == pending["id"]
+    assert pending_show["provenance_status"] == "missing_source_event"
+    assert pending_show["source_event"] is None
+
+    pending_show_text = run_memory("proposals", "show", pending["id"])
+    assert "provenance_status=missing_source_event" in pending_show_text
+    assert "source_event:" in pending_show_text
+    assert "missing" in pending_show_text
+
     pending_search = parse_json(
         run_memory(
             "search",
@@ -96,6 +106,7 @@ def test_cli_memory_loop_enforces_approval_and_namespace_isolation():
     )
     assert len(approved_search) == 1
     assert approved_search[0]["content"] == pending["content"]
+    assert approved_search[0]["provenance_status"] == "missing_source_event"
 
     other_namespace_search = parse_json(
         run_memory(
@@ -140,6 +151,7 @@ def test_cli_memory_loop_enforces_approval_and_namespace_isolation():
         run_memory("proposals", "list", "--namespace", namespace, "--status", "all", "--json")
     )
     assert {proposal["status"] for proposal in all_proposals} == {"approved", "rejected"}
+    assert {proposal["provenance_status"] for proposal in all_proposals} == {"missing_source_event"}
 
 
 def test_cli_event_backed_proposal_preserves_provenance():
@@ -193,6 +205,23 @@ def test_cli_event_backed_proposal_preserves_provenance():
     assert pending["status"] == "pending"
     assert pending["source_event_id"] == event["id"]
 
+    proposal_show = parse_json(run_memory("proposals", "show", pending["id"], "--json"))
+    assert proposal_show["proposal"]["id"] == pending["id"]
+    assert proposal_show["provenance_status"] == "linked_source_event"
+    assert proposal_show["source_event"]["id"] == event["id"]
+    assert proposal_show["source_event"]["content"] == event["content"]
+    assert proposal_show["source_event"]["metadata"]["files"] == ["src/cortex_memory/db.py"]
+
+    proposal_show_text = run_memory("proposals", "show", pending["id"])
+    assert "provenance_status=linked_source_event" in proposal_show_text
+    assert f"id={event['id']}" in proposal_show_text
+    assert "metadata=" in proposal_show_text
+
+    proposals = parse_json(
+        run_memory("proposals", "list", "--namespace", namespace, "--status", "pending", "--json")
+    )
+    assert proposals[0]["provenance_status"] == "linked_source_event"
+
     approved = parse_json(run_memory("proposals", "approve", pending["id"], "--json"))
     assert approved["proposal_id"] == pending["id"]
     assert approved["source_event_id"] == event["id"]
@@ -210,3 +239,4 @@ def test_cli_event_backed_proposal_preserves_provenance():
     assert len(results) == 1
     assert results[0]["proposal_id"] == pending["id"]
     assert results[0]["source_event_id"] == event["id"]
+    assert results[0]["provenance_status"] == "linked_source_event"

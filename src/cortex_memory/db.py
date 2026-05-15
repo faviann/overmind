@@ -255,7 +255,18 @@ def list_proposals(namespace: str, status: Literal["pending", "approved", "rejec
                 params.append(status)
             cur.execute(
                 f"""
-                SELECT p.id, n.name AS namespace, p.memory_type, p.content, p.status, p.source_event_id, p.created_at
+                SELECT
+                    p.id,
+                    n.name AS namespace,
+                    p.memory_type,
+                    p.content,
+                    p.status,
+                    p.source_event_id,
+                    CASE
+                        WHEN p.source_event_id IS NULL THEN 'missing_source_event'
+                        ELSE 'linked_source_event'
+                    END AS provenance_status,
+                    p.created_at
                 FROM memory_proposals p
                 JOIN namespaces n ON n.id = p.namespace_id
                 WHERE {' AND '.join(filters)}
@@ -264,6 +275,78 @@ def list_proposals(namespace: str, status: Literal["pending", "approved", "rejec
                 params,
             )
             return list(cur.fetchall())
+
+
+def get_proposal_inspection(proposal_id: str) -> dict:
+    validate_required_text("proposal", proposal_id)
+
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.id,
+                    n.name AS namespace,
+                    p.memory_type,
+                    p.content,
+                    p.source_text,
+                    p.rationale,
+                    p.status,
+                    p.source_event_id,
+                    p.created_at,
+                    p.reviewed_at,
+                    CASE
+                        WHEN p.source_event_id IS NULL THEN 'missing_source_event'
+                        ELSE 'linked_source_event'
+                    END AS provenance_status,
+                    e.id AS event_id,
+                    e.session_id AS event_session_id,
+                    e.project_id AS event_project_id,
+                    e.agent_id AS event_agent_id,
+                    e.event_type AS event_type,
+                    e.occurred_at AS event_timestamp,
+                    e.content AS event_content,
+                    e.metadata AS event_metadata
+                FROM memory_proposals p
+                JOIN namespaces n ON n.id = p.namespace_id
+                LEFT JOIN trace_events e ON e.id = p.source_event_id
+                WHERE p.id = %s
+                """,
+                (proposal_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"proposal not found: {proposal_id}")
+
+    source_event = None
+    if row["event_id"] is not None:
+        source_event = {
+            "id": row["event_id"],
+            "session_id": row["event_session_id"],
+            "project_id": row["event_project_id"],
+            "agent_id": row["event_agent_id"],
+            "event_type": row["event_type"],
+            "timestamp": row["event_timestamp"],
+            "content": row["event_content"],
+            "metadata": row["event_metadata"],
+        }
+
+    return {
+        "proposal": {
+            "id": row["id"],
+            "namespace": row["namespace"],
+            "memory_type": row["memory_type"],
+            "content": row["content"],
+            "source_text": row["source_text"],
+            "rationale": row["rationale"],
+            "status": row["status"],
+            "source_event_id": row["source_event_id"],
+            "created_at": row["created_at"],
+            "reviewed_at": row["reviewed_at"],
+        },
+        "provenance_status": row["provenance_status"],
+        "source_event": source_event,
+    }
 
 
 def approve_proposal(proposal_id: str) -> dict:
@@ -366,6 +449,10 @@ def search_knowledge(
                     n.name AS namespace,
                     k.proposal_id,
                     k.source_event_id,
+                    CASE
+                        WHEN k.source_event_id IS NULL THEN 'missing_source_event'
+                        ELSE 'linked_source_event'
+                    END AS provenance_status,
                     k.memory_type,
                     k.title,
                     k.content,

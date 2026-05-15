@@ -75,6 +75,10 @@ def list_proposals(namespace: str, status: ProposalStatus = "pending") -> list[d
     return db.list_proposals(namespace, status)
 
 
+def get_proposal_inspection(proposal_id: str) -> dict:
+    return db.get_proposal_inspection(proposal_id)
+
+
 def approve_proposal(proposal_id: str) -> dict:
     return db.approve_proposal(proposal_id)
 

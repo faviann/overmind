@@ -68,6 +68,17 @@ def test_proposals_approve_shape():
     assert args.proposal_id == "proposal-1"
 
 
+def test_proposals_show_shape():
+    parser = build_parser()
+
+    args = parser.parse_args(["proposals", "show", "proposal-1", "--json"])
+
+    assert args.command == "proposals"
+    assert args.proposal_command == "show"
+    assert args.proposal_id == "proposal-1"
+    assert args.json is True
+
+
 def test_proposals_list_supports_all_status_and_json():
     parser = build_parser()
 

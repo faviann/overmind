@@ -7,7 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from cortex_memory import db
+from cortex_memory import db, service
 
 
 def add_output_argument(parser: argparse.ArgumentParser) -> None:
@@ -98,21 +98,20 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "init":
-            applied = db.apply_migrations()
-            payload = {"applied": applied}
+            payload = service.initialize_database()
             if args.json:
                 emit(payload, True)
-            elif applied:
+            elif payload["applied"]:
                 print("applied migrations:")
-                for version in applied:
+                for version in payload["applied"]:
                     print(f"- {version}")
             else:
                 print("database already initialized")
             return 0
 
         if args.command == "propose":
-            row = db.create_proposal(
-                db.ProposalInput(
+            row = service.propose_memory(
+                service.MemoryProposal(
                     namespace=args.namespace,
                     memory_type=args.memory_type,
                     content=args.content,
@@ -125,20 +124,20 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "proposals":
             if args.proposal_command == "list":
-                rows = db.list_proposals(args.namespace, args.status)
+                rows = service.list_proposals(args.namespace, args.status)
                 emit(rows, args.json, ["id", "namespace", "memory_type", "status", "content"], "no proposals")
                 return 0
             if args.proposal_command == "approve":
-                row = db.approve_proposal(args.proposal_id)
+                row = service.approve_proposal(args.proposal_id)
                 emit(row, args.json, ["id", "proposal_id", "memory_type", "content"])
                 return 0
             if args.proposal_command == "reject":
-                row = db.reject_proposal(args.proposal_id)
+                row = service.reject_proposal(args.proposal_id)
                 emit(row, args.json, ["id", "status"])
                 return 0
 
         if args.command == "search":
-            rows = db.search_knowledge(args.namespace, args.query, args.memory_type, args.limit)
+            rows = service.search_knowledge(args.namespace, args.query, args.memory_type, args.limit)
             emit(rows, args.json, ["id", "namespace", "memory_type", "content"], "no knowledge")
             return 0
 
@@ -146,9 +145,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.dev_command == "reset":
                 if not args.yes:
                     raise ValueError("dev reset requires --yes")
-                db.reset_dev_database()
-                applied = db.apply_migrations()
-                emit({"reset": True, "applied": applied}, args.json)
+                payload = service.reset_development_database()
+                if args.json:
+                    emit(payload, True)
+                else:
+                    print("development database reset")
+                    if payload["applied"]:
+                        print("applied migrations:")
+                        for version in payload["applied"]:
+                            print(f"- {version}")
                 return 0
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

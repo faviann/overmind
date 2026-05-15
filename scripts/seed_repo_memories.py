@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cortex_memory import db
+from cortex_memory import service
 
 
 NAMESPACE = "repo/memorySubsystem"
@@ -22,12 +22,11 @@ SEED_MEMORIES = [
 
 
 def approved_content_exists(content: str) -> bool:
-    results = db.search_knowledge(NAMESPACE, content[:40])
-    return any(row["content"] == content for row in results)
+    return service.approved_content_exists(NAMESPACE, content)
 
 
 def main() -> int:
-    db.apply_migrations()
+    service.initialize_database()
     created = 0
     skipped = 0
 
@@ -37,8 +36,8 @@ def main() -> int:
             skipped += 1
             continue
 
-        proposal = db.create_proposal(
-            db.ProposalInput(
+        proposal = service.propose_memory(
+            service.MemoryProposal(
                 namespace=NAMESPACE,
                 memory_type=memory_type,
                 content=content,
@@ -46,7 +45,7 @@ def main() -> int:
                 rationale="Seed V0a repo-local memory after the first vertical loop.",
             )
         )
-        knowledge = db.approve_proposal(proposal["id"])
+        knowledge = service.approve_proposal(proposal["id"])
         print(f"created {knowledge['id']}: {content}")
         created += 1
 

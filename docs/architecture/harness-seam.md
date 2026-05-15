@@ -142,7 +142,43 @@ manual or synthetic event -> proposal linked to event -> approve/reject
 
 ## Near-Term Deferral
 
-Approval and rejection events are part of the event contract, but the next
+Review events are part of the event contract, but the next
 proposal-review slice should not append `memory_approved` or `memory_rejected`
-events until reviewer identity is explicit. Anonymous approval events would look
+events until reviewer identity is explicit. Anonymous review events would look
 like stronger provenance than they are.
+
+## Review Event Convention
+
+When review events are introduced, do not reuse the source
+event's session or agent identity for the review decision. The source event says
+what produced the candidate memory; the review event says who accepted or
+rejected it.
+
+For V0, use a synthetic review session:
+
+```text
+session_id: review:<proposal_id>
+project_id: <proposal namespace>
+agent_id: <reviewer identity, e.g. human:faviann>
+event_type: memory_approved | memory_rejected
+```
+
+Approval event metadata should stay minimal:
+
+```text
+memory_approved:
+  reviewer
+  proposal_id
+  source_event_id
+  knowledge_id
+
+memory_rejected:
+  reviewer
+  proposal_id
+  source_event_id
+```
+
+This is a trace convention, not a permanent review workflow model. A future
+review system can evolve this into richer review sessions or authenticated
+actors while preserving the recorded reviewer, proposal, source event, and
+approved-memory identifiers.

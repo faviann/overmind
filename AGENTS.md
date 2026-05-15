@@ -2,6 +2,7 @@
 
 **Project**: Cortex Memory — local-first memory substrate for agent work
 **Current focus**: V0a memory loop in README.md
+**Direction**: PROJECT_DIRECTION.md
 **Future orchestration context**: docs/overmind-future-plan.md
 
 ## Stack
@@ -23,6 +24,8 @@ No local model is required for V0a.
 ## Key Constraints
 
 - V0a is CLI-to-Postgres only.
+- Preserve the distinction between raw trace, memory proposals, approved knowledge, and derived indexes.
+- Treat trace plus approved memory ledger as the source of truth.
 - Do not add REST, MCP, embeddings, graph memory, dashboards, or production deployment until V0a is stable.
 - Never expose gateway ports publicly without authentication.
 - Do not build OB1 integration until it is explicitly scoped.

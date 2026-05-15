@@ -19,8 +19,22 @@ No local model is required for V0a.
 
 ## Companion Repos
 
-- `faviann/cortex` — this repo. Memory substrate and future architecture notes
-- `faviann/cortex-tasks` — validated task list as GitHub Issues. Labels: `source:discord`, `source:email`, `importance:low/medium/high`, `status:parked`
+- `faviann/overmind` — this repo. Memory substrate and future architecture notes
+- `faviann/overmind-tasks` — validated task list as GitHub Issues. `faviann/cortex-tasks` is deprecated and should not be used.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `faviann/overmind-tasks`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default mattpocock/skills triage label vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo uses a single-context domain-doc layout. See `docs/agents/domain.md`.
 
 ## Key Constraints
 
@@ -38,6 +52,7 @@ No local model is required for V0a.
 - Local Postgres smoke tests connect to the Compose-published port on `localhost:55432`; sandboxed agents may need local network escalation for those commands.
 - Prefer `docker compose -f docker-compose.yml up -d postgres` for the V0a development database, and stop it after verification unless continued use is needed.
 - A persistent local Postgres volume is acceptable for speed, but tests must not depend on accumulated state. Use unique namespaces in tests and `memory dev reset --yes` when a clean schema is needed.
+- When clarifying architecture decisions, prefer concrete lifecycle examples and explicitly contrast the target slice with nearby non-goals. This helped clarify that V0 approval means source-event-backed review, not full replay.
 
 ## Versioning
 

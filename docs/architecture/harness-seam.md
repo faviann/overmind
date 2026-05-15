@@ -139,3 +139,10 @@ manual or synthetic event -> proposal linked to event -> approve/reject
   and consume approved memory through documented boundaries.
 - Existing memory tools should be evaluated as projections or query engines, not
   canonical truth stores.
+
+## Near-Term Deferral
+
+Approval and rejection events are part of the event contract, but the next
+proposal-review slice should not append `memory_approved` or `memory_rejected`
+events until reviewer identity is explicit. Anonymous approval events would look
+like stronger provenance than they are.

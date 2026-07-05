@@ -1,0 +1,145 @@
+using MemSrv.Core;
+
+var root = Directory.GetCurrentDirectory();
+var options = Configuration.Load(root);
+
+try
+{
+    if (args.Length == 0)
+    {
+        Usage();
+        return 2;
+    }
+
+    var command = args[0];
+    switch (command)
+    {
+        case "migrate":
+            DatabaseMigrator.Migrate(options.AdminConnectionString, Path.Combine(root, "migrations"));
+            Console.WriteLine("migrations applied");
+            return 0;
+
+        case "pending":
+            await PendingAsync(options, args.Skip(1).FirstOrDefault());
+            return 0;
+
+        case "show":
+            RequireArgs(args, 2);
+            await ShowAsync(options, Guid.Parse(args[1]));
+            return 0;
+
+        case "approve":
+            RequireArgs(args, 2);
+            await ApproveAsync(options, Guid.Parse(args[1]), RequireOption(args, "--by"));
+            return 0;
+
+        case "reject":
+            RequireArgs(args, 2);
+            await RejectAsync(options, Guid.Parse(args[1]), RequireOption(args, "--by"), RequireOption(args, "--reason"));
+            return 0;
+
+        case "trace":
+            RequireArgs(args, 2);
+            await TraceAsync(options, args[1]);
+            return 0;
+
+        default:
+            Usage();
+            return 2;
+    }
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    return 1;
+}
+
+static MemoryService Service(MemSrvOptions options) =>
+    new(options.ConnectionString, new NeverStoreGate(options.NeverStorePath));
+
+static async Task PendingAsync(MemSrvOptions options, string? @namespace)
+{
+    var rows = await Service(options).PendingAsync(@namespace);
+    foreach (var row in rows)
+    {
+        Console.WriteLine($"{row.Uuid} {row.Namespace} {row.Type} source={row.SourceType}:{row.SourceId ?? "<none>"}");
+        Console.WriteLine(row.Content);
+        Console.WriteLine();
+    }
+}
+
+static async Task ShowAsync(MemSrvOptions options, Guid uuid)
+{
+    var row = await Service(options).ShowAsync(uuid);
+    Console.WriteLine($"{row.Uuid} {row.Namespace} {row.Type} {row.Visibility}/{row.Status} tier={row.Tier} v{row.Version}");
+    Console.WriteLine($"source={row.SourceType}:{row.SourceId ?? "<none>"} agent={row.AgentId} session={row.SessionId ?? "<none>"}");
+    Console.WriteLine($"created={row.CreatedAt:O} approved_by={row.ApprovedBy ?? "<none>"} approved_at={row.ApprovedAt?.ToString("O") ?? "<none>"}");
+    if (row.Supersedes.HasValue)
+    {
+        Console.WriteLine($"supersedes={row.Supersedes}");
+    }
+
+    if (row.SupersededBy.HasValue)
+    {
+        Console.WriteLine($"superseded_by={row.SupersededBy}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine(row.Content);
+}
+
+static async Task ApproveAsync(MemSrvOptions options, Guid uuid, string by)
+{
+    await Service(options).ApproveAsync(uuid, by);
+    Console.WriteLine($"approved {uuid} by {by}");
+}
+
+static async Task RejectAsync(MemSrvOptions options, Guid uuid, string by, string reason)
+{
+    await Service(options).RejectAsync(uuid, by, reason);
+    Console.WriteLine($"rejected {uuid} by {by}");
+}
+
+static async Task TraceAsync(MemSrvOptions options, string sessionId)
+{
+    var rows = await Service(options).TraceAsync(sessionId);
+    foreach (var row in rows)
+    {
+        Console.WriteLine($"{row.Ts:O} {row.EventType} {row.TraceUuid} agent={row.AgentId} ns={row.Namespace}");
+        Console.WriteLine(row.Content);
+    }
+}
+
+static string? FindOption(string[] args, string name)
+{
+    for (var i = 0; i < args.Length - 1; i++)
+    {
+        if (args[i] == name)
+        {
+            return args[i + 1];
+        }
+    }
+
+    return null;
+}
+
+static string RequireOption(string[] args, string name) =>
+    FindOption(args, name) ?? throw new ArgumentException($"{name} is required.");
+
+static void RequireArgs(string[] args, int count)
+{
+    if (args.Length < count)
+    {
+        throw new ArgumentException("Missing required argument.");
+    }
+}
+
+static void Usage()
+{
+    Console.Error.WriteLine("memctl migrate");
+    Console.Error.WriteLine("memctl pending [namespace]");
+    Console.Error.WriteLine("memctl show <uuid>");
+    Console.Error.WriteLine("memctl approve <uuid> --by name");
+    Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
+    Console.Error.WriteLine("memctl trace <session_id>");
+}

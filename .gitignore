@@ -1,0 +1,6 @@
+bin/
+obj/
+appsettings.Development.json
+
+# Vendored SDK reference samples; clone locally when working on MCP hosting.
+reference/csharp-sdk/

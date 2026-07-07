@@ -54,3 +54,17 @@ migrations · xUnit against `memory_test` · YamlDotNet for `config/never_store.
 - Schema, invariants, retrieval, layout, DoD → `docs/design-rules.md`
 - Any MCP hosting/tool code → `reference/csharp-sdk/` samples
 - Domain vocabulary → `CONTEXT.md`
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for `faviann/overmind`; external PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default triage label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: root `CONTEXT.md` plus root `docs/adr/` when they exist. See `docs/agents/domain.md`.

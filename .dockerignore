@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+.git/
+.gitignore
+docs/
+reference/
+tests/
+Makefile
+compose.yaml
+.dockerignore

@@ -1,12 +1,7 @@
+-- Requires the memsrv role to already exist. Roles are owned by provisioning
+-- (Ansible in production, docker/postgres-init in dev/CI); migrations grant to
+-- memsrv but never create roles or manage passwords.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'memsrv') THEN
-    CREATE ROLE memsrv;
-  END IF;
-END
-$$;
 
 CREATE TABLE namespaces (
   name         TEXT PRIMARY KEY,

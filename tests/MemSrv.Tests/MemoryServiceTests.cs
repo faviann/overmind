@@ -319,6 +319,20 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.Contains(traceUuid, approval.Refs ?? []);
     }
 
+    [Fact]
+    public async Task MemctlMigrateAcceptsPostgresUrlAdminConnectionString()
+    {
+        var env = new Dictionary<string, string>
+        {
+            ["MEMSRV_ADMIN_CONNECTION_STRING"] = "postgres://overmind:overmind_dev@127.0.0.1:55432/memory_test"
+        };
+
+        var result = await RunMemCtlForResultAsync(env, "migrate");
+
+        Assert.True(result.ExitCode == 0, $"memctl migrate failed with exit {result.ExitCode}. stdout={result.Stdout} stderr={result.Stderr}");
+        Assert.Contains("migrations applied", result.Stdout);
+    }
+
     private MemoryService Service() =>
         new(RuntimeConnection, new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
 
@@ -381,7 +395,11 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.True(result.ExitCode == 0, $"memctl failed with exit {result.ExitCode}. stdout={result.Stdout} stderr={result.Stderr}");
     }
 
-    private async Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(params string[] args)
+    private Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(params string[] args) =>
+        RunMemCtlForResultAsync(extraEnvironment: null, args);
+
+    private async Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
+        IReadOnlyDictionary<string, string>? extraEnvironment, params string[] args)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -401,6 +419,10 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         }
 
         startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
+        foreach (var (key, value) in extraEnvironment ?? new Dictionary<string, string>())
+        {
+            startInfo.Environment[key] = value;
+        }
 
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start memctl.");
         var stderr = await process.StandardError.ReadToEndAsync();

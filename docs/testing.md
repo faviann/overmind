@@ -6,9 +6,9 @@
   public reads.
 - Named for the behavior: `shared_write_cannot_be_born_approved`, not
   `MemoryRepositoryTest_Update`.
-- Runs against the real local `memory_test` Postgres (pinned to the LXC major
-  version). No mocking of the database or internal services — the DB constraints
-  are part of the behavior under test.
+- Runs against the real local `memory_test` Postgres (major pinned to **18**,
+  matching production; `make db-up` provisions it). No mocking of the database
+  or internal services — the DB constraints are part of the behavior under test.
 
 ## The only DB-level tests allowed (mechanical tests)
 Where the database mechanism IS the spec'd behavior, tests connect directly and

@@ -39,10 +39,14 @@ Closed decisions are closed; new evidence goes to the human, not into code.
 migrations · xUnit against `memory_test` · YamlDotNet for `config/never_store.yaml`.
 
 ## Commands
+- `make db-up` — Postgres **18** dev container via compose (creates
+  `memory_dev`/`memory_test` and the `memsrv` login role, mirroring prod)
 - `make test` / `make test-one T=<filter>` — suite / single test (`memory_test`)
 - `make test-db-reset` — recreate `memory_test` + migrations
-- `make accept` — Session 1 DoD end-to-end path
+- `make migrate-dev` — one-shot containerized `memctl migrate` → `memory_dev`
+- `make accept` — Session 1 DoD end-to-end path (NOT IMPLEMENTED — Session 2)
 - Interactive dev runs against `memory_dev`, never `memory_test`, never prod.
+- Deployment contract for homelab: `docs/deployment-contract.md`.
 
 ## Read before specific tasks (progressive disclosure)
 - Starting any slice → `docs/workflow.md` (checklist + human gates)

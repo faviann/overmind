@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "memsrv": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "dotnet build src/MemSrv.Server -v q 1>&2 && exec dotnet src/MemSrv.Server/bin/Debug/net10.0/MemSrv.Server.dll"
+      ],
+      "env": {
+        "MEMSRV_CONNECTION_STRING": "postgres://memsrv:memsrv_dev@127.0.0.1:55432/memory_dev",
+        "MEMSRV_AGENT_ID": "claude-code"
+      }
+    }
+  }
+}

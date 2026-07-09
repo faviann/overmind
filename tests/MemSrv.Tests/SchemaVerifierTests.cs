@@ -5,9 +5,12 @@ using System.Diagnostics;
 
 namespace MemSrv.Tests;
 
-// Each test owns a disposable database (create → migrate → verify/break → drop),
-// mirroring the homelab-iac disposable verify step. Databases are uniquely named
-// so the class runs in parallel with the rest of the suite without contention.
+// Each test owns a disposable database (create → migrate → break → drop),
+// mirroring the homelab-iac disposable verify step. Databases are uniquely
+// named, but the class shares the "database" collection with MemoryServiceTests
+// so the NOLOGIN test — which toggles the cluster-wide memsrv role — never runs
+// concurrently with a test that connects as memsrv.
+[Collection("database")]
 public sealed class SchemaVerifierTests
 {
     private const string MaintenanceConnection =
@@ -17,6 +20,8 @@ public sealed class SchemaVerifierTests
     [Fact]
     public async Task VerifyPassesOnFreshlyMigratedSchema()
     {
+        // The one deliberate direct-API test: proves VerifyAsync reports no
+        // failures on a clean schema. Broken states below assert through memctl.
         await WithDisposableDbAsync(async admin =>
         {
             var result = await SchemaVerifier.VerifyAsync(admin);
@@ -51,7 +56,7 @@ public sealed class SchemaVerifierTests
     }
 
     [Fact]
-    public async Task MemCtlVerifySchemaFailsWhenMemsrvHasDeleteGrant()
+    public async Task MemCtlVerifySchemaFailsWhenMemsrvHasDeleteGrantOnTraces()
     {
         await WithDisposableDbAsync(async admin =>
         {
@@ -60,6 +65,20 @@ public sealed class SchemaVerifierTests
             var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
             Assert.NotEqual(0, exitCode);
             Assert.Contains("DELETE grant on 'public.traces'", stderr, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenMemsrvHasDeleteGrantOnNonTracesTable()
+    {
+        // Proves the no-DELETE check spans every public table, not just traces.
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, "GRANT DELETE ON memories TO memsrv");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains("DELETE grant on 'public.memories'", stderr, StringComparison.Ordinal);
         });
     }
 
@@ -90,41 +109,61 @@ public sealed class SchemaVerifierTests
     }
 
     [Fact]
-    public async Task VerifyFailsWhenDefaultRetrievalConfigIsMissing()
+    public async Task MemCtlVerifySchemaFailsWhenDefaultRetrievalConfigIsMissing()
     {
         await WithDisposableDbAsync(async admin =>
         {
             await ExecuteAsync(admin, "DELETE FROM retrieval_config WHERE agent_id = '*' AND namespace = '*'");
 
-            var result = await SchemaVerifier.VerifyAsync(admin);
-            Assert.False(result.Passed);
-            Assert.Contains(result.Failures, f => f.Contains("default retrieval config", StringComparison.Ordinal));
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains("default retrieval config", stderr, StringComparison.Ordinal);
         });
     }
 
     [Fact]
-    public async Task VerifyFailsWhenRequiredTableIsMissing()
+    public async Task MemCtlVerifySchemaFailsWhenRequiredTableIsMissing()
     {
         await WithDisposableDbAsync(async admin =>
         {
             await ExecuteAsync(admin, "DROP TABLE jobs");
 
-            var result = await SchemaVerifier.VerifyAsync(admin);
-            Assert.False(result.Passed);
-            Assert.Contains(result.Failures, f => f.Contains("Missing required table 'public.jobs'", StringComparison.Ordinal));
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains("Missing required table 'public.jobs'", stderr, StringComparison.Ordinal);
         });
     }
 
     [Fact]
-    public async Task VerifyFailsWhenMemsrvGrantIsRevoked()
+    public async Task MemCtlVerifySchemaFailsWhenMemsrvGrantIsRevoked()
     {
         await WithDisposableDbAsync(async admin =>
         {
             await ExecuteAsync(admin, "REVOKE INSERT ON memories FROM memsrv");
 
-            var result = await SchemaVerifier.VerifyAsync(admin);
-            Assert.False(result.Passed);
-            Assert.Contains(result.Failures, f => f.Contains("missing INSERT on 'public.memories'", StringComparison.Ordinal));
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains("missing INSERT on 'public.memories'", stderr, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenMemsrvIsNologin()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            // memsrv is cluster-wide; restore LOGIN before any concurrent test connects.
+            await ExecuteAsync(MaintenanceConnection, "ALTER ROLE memsrv NOLOGIN");
+            try
+            {
+                var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+                Assert.NotEqual(0, exitCode);
+                Assert.Contains("NOLOGIN", stderr, StringComparison.Ordinal);
+            }
+            finally
+            {
+                await ExecuteAsync(MaintenanceConnection, "ALTER ROLE memsrv LOGIN");
+            }
         });
     }
 
@@ -189,3 +228,8 @@ public sealed class SchemaVerifierTests
         return directory?.FullName ?? throw new InvalidOperationException("Could not find repo root.");
     }
 }
+
+// Shared no-fixture collection: serializes SchemaVerifierTests with
+// MemoryServiceTests so cluster-wide memsrv role toggles never race a memsrv login.
+[CollectionDefinition("database")]
+public sealed class DatabaseCollection;

@@ -183,12 +183,17 @@ public static class SchemaVerifier
     private static async Task CheckGrantsAsync(
         NpgsqlConnection conn, HashSet<string> existingTables, SchemaVerificationResult result)
     {
-        var roleExists = await conn.ExecuteScalarAsync<bool>(
-            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = @role)", new { role = MemsrvRole });
-        if (!roleExists)
+        var canLogin = await conn.ExecuteScalarAsync<bool?>(
+            "SELECT rolcanlogin FROM pg_roles WHERE rolname = @role", new { role = MemsrvRole });
+        if (canLogin is null)
         {
             result.Fail($"Application role '{MemsrvRole}' does not exist; migrations require it to be provisioned first.");
             return;
+        }
+
+        if (canLogin == false)
+        {
+            result.Fail($"Application role '{MemsrvRole}' exists but is NOLOGIN; it must be a LOGIN role so the server can connect.");
         }
 
         if (!await conn.ExecuteScalarAsync<bool>(

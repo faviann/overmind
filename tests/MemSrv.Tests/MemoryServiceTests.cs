@@ -8,6 +8,7 @@ using ModelContextProtocol.Protocol;
 
 namespace MemSrv.Tests;
 
+[Collection("database")]
 public sealed class MemoryServiceTests : IAsyncLifetime
 {
     private const string AdminConnection = "Host=127.0.0.1;Port=55432;Database=memory_test;Username=overmind;Password=overmind_dev";

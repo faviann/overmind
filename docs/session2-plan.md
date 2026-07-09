@@ -25,6 +25,10 @@ registered in `src/MemSrv.Server/Program.cs`) — impossible under HTTP.
 - Namespace validation moves into `MemoryService`: qualified calls checked
   against the allowlist; `log_trace` gains an optional `namespace` parameter
   defaulting to the key's default namespace.
+- All namespace/visibility checks flow through a single service-layer seam
+  (one choke-point where request identity meets data access), keeping the
+  RLS retrofit cheap per the north-star isolation position
+  (`docs/north-star.md`).
 
 ## 2. HTTP transport + bearer keys
 

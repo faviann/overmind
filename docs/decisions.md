@@ -1,5 +1,19 @@
 # Decisions
 
+## 2026-07-09 — North star + Session 2 audit (wayfinder map #11)
+
+- `docs/north-star.md` added (informational — never wins conflicts): identity
+  (personal substrate, OSS-visible; agent-as-extractor, human-as-gate),
+  evidence-door meta-rule, approval gate human with named reopen evidence,
+  RLS consciously skipped with tripwires, tiering mechanics deferred on the
+  stale-retrieval watch-list trigger, candidate horizons deliberately
+  uncommitted. Full detail: distillation doc + wayfinder tickets #12/#13.
+- Session 2 scope audited against the north star (#14): **confirmed** — no
+  cuts, no reorders, no contradictions. Slice 4 (workstreams) consciously
+  kept. One amendment: Slice 2 gains an acceptance criterion that all
+  namespace/visibility checks flow through a single service-layer seam
+  (RLS-ready). Slice execution is unblocked.
+
 ## 2026-07-07 — Session 2 design (grilling session)
 
 Scope confirmed as exactly spec §12 Session 2; Do-Not-Build stays binding.

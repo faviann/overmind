@@ -37,6 +37,45 @@ docker run --rm \
   provisioning (Ansible in production, `docker/postgres-init/` in dev/CI).
   Migrations grant to `memsrv` but never create roles or manage passwords.
 
+## Schema verification — FINAL
+
+`memctl verify-schema` asserts that a migrated database matches the schema,
+grant, and trigger contract owned by overmind, so homelab-iac never has to
+duplicate schema internals. Intended flow: create a disposable database, run
+`memctl migrate`, run `memctl verify-schema`, then drop the database.
+
+```sh
+docker run --rm \
+  -e MEMSRV_ADMIN_CONNECTION_STRING='postgres://postgres:<REPLACE_ME>@postgres:5432/<disposable>' \
+  --entrypoint memctl \
+  ghcr.io/faviann/overmind:<version> verify-schema
+```
+
+- Reads `MEMSRV_ADMIN_CONNECTION_STRING` only; needs no production data.
+- Exit `0` — schema matches the contract (prints `schema verification passed`).
+- Exit `1` — one or more contract violations; each is printed to stderr as a
+  `  - <message>` line naming the broken contract.
+- Exit `2` — usage error (`MEMSRV_ADMIN_CONNECTION_STRING` not set).
+- Never prints connection strings or secrets.
+- Safe against a real migrated database: the append-only probe writes a trace
+  row inside a transaction that is always rolled back.
+
+What it asserts:
+
+- Required tables, the `forbid_mutation()` function, and the `traces_immutable`
+  trigger exist.
+- `traces` is append-only by trigger: UPDATE and DELETE attempted as the
+  admin-capable verifier identity both fail with the append-only error.
+- `memsrv` cannot UPDATE or DELETE `traces` by grant, and has no DELETE grant on
+  any table in `public`.
+- `memsrv` holds the expected schema/table/sequence privileges from the
+  migration.
+- Bootstrap rows exist: the `memory-system` and `homelab` namespaces and the
+  default (`*`/`*`) retrieval config.
+
+Run it against a **disposable** target only — dev/test/CI use a locally
+provisioned database, never the persistent production `memory`.
+
 ## Environment variables — FINAL
 
 | Variable | Purpose |

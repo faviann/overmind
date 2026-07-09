@@ -19,6 +19,9 @@ try
             Console.WriteLine("migrations applied");
             return 0;
 
+        case "verify-schema":
+            return await VerifySchemaAsync(options);
+
         case "pending":
             await PendingAsync(options, args.Skip(1).FirstOrDefault());
             return 0;
@@ -51,6 +54,30 @@ try
 catch (Exception ex)
 {
     Console.Error.WriteLine(ex.Message);
+    return 1;
+}
+
+static async Task<int> VerifySchemaAsync(MemSrvOptions options)
+{
+    if (string.IsNullOrWhiteSpace(options.AdminConnectionString))
+    {
+        Console.Error.WriteLine("verify-schema requires MEMSRV_ADMIN_CONNECTION_STRING.");
+        return 2;
+    }
+
+    var result = await SchemaVerifier.VerifyAsync(options.AdminConnectionString);
+    if (result.Passed)
+    {
+        Console.WriteLine("schema verification passed");
+        return 0;
+    }
+
+    Console.Error.WriteLine($"schema verification FAILED ({result.Failures.Count} problem(s)):");
+    foreach (var failure in result.Failures)
+    {
+        Console.Error.WriteLine($"  - {failure}");
+    }
+
     return 1;
 }
 
@@ -137,6 +164,7 @@ static void RequireArgs(string[] args, int count)
 static void Usage()
 {
     Console.Error.WriteLine("memctl migrate");
+    Console.Error.WriteLine("memctl verify-schema");
     Console.Error.WriteLine("memctl pending [namespace]");
     Console.Error.WriteLine("memctl show <uuid>");
     Console.Error.WriteLine("memctl approve <uuid> --by name");

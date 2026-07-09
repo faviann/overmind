@@ -1,42 +1,48 @@
 # Per-slice workflow (checklist, not a pipeline)
 
-This is a convention the agent follows, never a runtime to build.
-Do not write tooling that enforces stage transitions.
+A convention the agent follows, never a runtime to build. No tooling
+that enforces stage transitions. Mechanics live in the skills
+(`/tdd`, `/grilling`, `/code-review`); this file is the ordering plus
+the project-specific gates and commands.
 
 ## Checklist
 
-1. **Grill** — `/grill-me` scoped to THIS slice's open questions only.
-   The spec and handoff doc answer most questions; explore them before
-   asking. Never grill on closed decisions.
+1. **Orient** — spec + slice issue answer most questions. Remaining
+   open decisions → plain questions to the human. Cascading vagueness →
+   scoped `/grilling`. Never re-open closed decisions.
 
-2. **Red gate** — write ONE failing behavior test through the public
-   interface (MCP tool or `memctl`). Present it to the human for review
-   before implementing. Once the human says the pattern is trusted,
-   sampling replaces per-test review — but the first slices are all-review.
+2. **Seams** — confirm the seams tests observe behavior through
+   (normally MCP tools or `memctl`). No test at an unconfirmed seam;
+   an internal seam needs explicit human blessing.
 
-3. **TDD loop** — minimum code to green. `make test-one` for the fast
-   loop, `make test` before commit. Commit per green cycle with a
-   message naming the behavior, not the code.
+3. **TDD loop** — `/tdd`. ONE failing test at a confirmed seam,
+   failing for the right reason. From RED the test is frozen: any
+   edit — even "the interface should be different" — goes to the
+   human. Minimum code to green. Commit per green cycle, gated on
+   `make test-one` + typecheck; message names the behavior.
 
-4. **Refactor** — with the suite green. Tests must not change:
-   `git diff -- '*Tests*'` must come back empty. Any test edit during
-   refactor stops the slice and goes to the human.
+4. **Validate** — slice end: `make test` + `make accept` (vertical
+   path: log trace → propose → approve --by → search → fetch →
+   consumed event in trace). Fixes are new commits.
 
-5. **Validate** — `make accept`. The vertical path (log trace → propose →
-   approve --by → search → fetch → consumed event visible in trace) must
-   still pass end to end.
+5. **Review** — `/code-review`; refactoring happens here, not in the
+   loop. Refactor commits: `git diff -- '*Tests*'` empty. Test-quality
+   fixes → separate, labeled commits. If compilation forces one atomic
+   commit, label it "refactor + test adaptation" and get approval
+   first. A contract change is not a refactor — new red→green cycle.
+   Refactors repeatedly hitting tests = wrong seam; raise the pattern,
+   don't relax the rule.
 
-6. **Memory update** — new decisions made during this slice:
-   - design decision with a non-obvious rationale → ADR patch in `docs/adr/`
-   - durable fact/decision → `save_note` proposal into namespace
-     `memory-system` (pre-server: one line each in `docs/decisions.md`)
-   Record the WHY, not the what — the what lives in git.
+6. **Memory** — non-obvious design rationale → ADR in `docs/adr/`;
+   other durable decisions → one line in `docs/decisions.md`. Record
+   the WHY. (Post-server this routes through `save_note` — issue #10.)
 
-7. **Handoff** — end the session with a short summary: outcome,
-   decisions made, leftovers/deferred items. Append it to the issue
-   (or `docs/handoffs.md` if local tracking).
+7. **Closeout** — on the slice issue: outcome, decisions, leftovers.
+   Durable record, not the `/handoff` skill. GitHub down → park
+   locally, post when back; the issue stays the system of record.
 
-## Gates summary
-- Gate A (before slice): human approved the slice scope (via /to-issues review)
-- Gate B (at RED): human reviews the failing test
-- Gate C (after refactor): test-diff must be empty; deviations to human
+## Gates
+- **A** (before slice): human approved scope via issue review
+- **B** (before tests): seams confirmed; tests reviewed by sampling
+- **C** (immutability): tests frozen from RED; refactor commits carry
+  an empty test diff; exceptions only as labeled, human-approved commits

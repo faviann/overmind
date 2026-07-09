@@ -1,0 +1,37 @@
+1. **Graphify** - https://github.com/safishamsi/graphify
+
+2. **Memex** - https://github.com/memex-lab/memex
+
+3. **EdgeQuake** - https://github.com/raphaelmansuy/edgequake
+
+4. **SimpleMem** - https://github.com/aiming-lab/SimpleMem
+
+5. **GitNexus** - https://github.com/abhigyanpatwari/GitNexus
+
+6. **Agent0** - https://github.com/aiming-lab/Agent0
+
+7. **Moraine** - https://github.com/eric-tramel/moraine
+
+8. **oh-my-kiro** - https://github.com/KaimingWan/oh-my-kiro
+
+9. **Hindsight** - https://github.com/vectorize-io/hindsight
+
+10. **MemoryOS** - https://github.com/BAI-LAB/MemoryOS
+
+11. **Supermemory** - https://github.com/supermemoryai/supermemory
+
+12. **OpenContext** - https://github.com/0xranx/OpenContext
+
+13. **Understand-Anything** - https://github.com/Lum1104/Understand-Anything
+
+14. **Second Brain** - https://github.com/henrydaum/second-brain
+
+15. **LLM Wiki** - https://github.com/nashsu/llm_wiki
+
+16. **Tolaria** - https://github.com/refactoringhq/tolaria
+
+17. **OpenKB** - https://github.com/VectifyAI/OpenKB
+
+18. **Graymatter** - https://github.com/angelnicolasc/graymatter
+
+19. **mem9** - https://github.com/mem9-ai/mem9

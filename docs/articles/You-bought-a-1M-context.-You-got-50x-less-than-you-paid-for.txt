@@ -1,0 +1,74 @@
+Every vendor's headline context number is a lie. Not a small lie. A 50 to 100 times lie, depending on what the model is being asked to do.
+
+The architecture accepts the input. The model does not read it.
+
+The headline is uncomfortable. Vendors quote window sizes that are 2 to 8 times larger than what the model can actually use for retrieval, and 50 to 100 times larger than what it can use for reasoning. Both numbers come from the same body of benchmark work. Neither is a guess. The same vendor's newer model on the same multi-needle benchmark can score four times higher than the model it replaces, at the same advertised window. A 10M-token window can lose to a 2M-token window on comprehension of a single book.
+
+This article opens a three-part run on context: weight, cost, and management. Subsequent articles cover what the work-window actually is, what it costs you per active user, and how the systems being shipped in 2026 organise themselves around the gap.
+What advertised context actually means
+Every frontier vendor publishes a context window number. Gemini 3 Pro: 1M. Claude Opus 4.6: 1M. GPT-5: 400K. Llama 4 Scout: 10M, the largest of any production model. These numbers are real in one narrow sense. The architecture accepts that many tokens as input. The model does not break when you hand it a prompt that long.
+
+What the architecture accepts and what the model can use are two different quantities. The first is the size of the door. The second is how much of what's in the room the model can actually see when it's asked to do work.
+
+The way to find the second number is to test the model on tasks that require using material from across the window, then watch where the score falls off. That's what the recent wave of long-context benchmarks is doing. MRCR v2 puts eight needles in the haystack and asks the model to recall them in order. NoLiMa asks the model to reason across passages where the keyword overlap has been deliberately stripped out, so retrieval by similarity can't carry it. HELMET tests downstream task performance at 128K. Fiction.LiveBench gives the model full books and asks comprehension questions that only work if the model tracked what was in the middle.
+
+Each of these is a different lens. None of them is the vendor's needle-in-a-haystack test, and that's the point.
+What the numbers actually look like
+The per-model picture, as of mid 2026, is uneven in a way that should embarrass the field.
+
+Anthropic's MRCR v2 8-needle test at 1M tokens shows Sonnet 4.5 at 18.5 percent and Opus 4.6 at 76 percent. Same vendor, same benchmark, same advertised window. The newer generation is over four times better at the task the window was sold to do. If the window were the thing that mattered, those two numbers would be close. They are not.
+
+Llama 4 Scout advertises 10M tokens and scores 15.6 percent on Fiction.LiveBench at 128K. Gemini 2.5 Pro on the same test scores 90.6 percent. Scout has 80 times the advertised window of older Gemini generations and a fraction of their effective context on the harder tests. The ratio of advertised to effective context, on this benchmark, is the worst of any model shipping in 2026.
+
+The ofox.ai benchmark set, which is the most cited practitioner-facing comparison right now, shows the same spread. Gemini 3 Deep Think hits 99 percent on NIAH-2 single-needle at 1M. Most of the other models cluster much lower on the harder tests at the same length. The single-needle number is what vendors put in slides. The harder tests are what production agents hit when the user pastes in a 400-page document and asks a question about page 312.
+
+The summarising claim, drawn from the same source material: advertised context windows are typically 2 to 8 times the effective context for multi-hop work, and 50 to 100 times the effective context for reasoning tasks. Both ends of that range are real. Both come from the same benchmark families.
+Why the framing matters more than the number
+Different vendors describe the same problem in different ways, and the framing they pick tells you how seriously they're taking it.
+
+Anthropic uses the phrase context rot. Their September 2025 article on effective context engineering for agents put the term into mainstream engineering discourse. The framing is front-footed. The vendor is naming a problem they say their newer models handle better, and pointing to the difference between advertised and effective as the gap they're closing. Sonnet 4.5 to Opus 4.6 is the proof point.
+
+DeepMind prefers effective context. Same underlying phenomenon, more neutral language. They publish effective-length numbers on specific tests rather than claiming the window is fully usable.
+
+OpenAI leans on needle-in-a-haystack. NIAH is the most generous of the long-context tests. It puts a single isolated fact in a haystack and asks the model to recall it. The model doesn't have to use information across the window, only from one position. Vendor benchmark numbers that look like 99 percent recall at 1M are usually NIAH-2 single-needle. They don't predict how the same model will do on a comprehension question that spans the document.
+
+Meta advertises a 10M window on Scout and provides no specific effective-length numbers. The marketing is the message.
+
+The asymmetry is worth holding. When the vendor is naming the gap, the gap is being worked on. When the vendor is showing only the most generous benchmark, the gap is being hidden.
+What the test results actually say
+MRCR v2 multi-needle is the test most often cited as the honest one. It asks the model to recall eight pieces of information from across the window and reproduce them in order. The order requirement is what kills naive retrieval. Even a model that finds every needle can fail the test if it can't recover the sequence.
+
+NoLiMa is the reasoning test. It strips literal keyword overlap from the question and from the supporting passages, so the model has to do semantic inference rather than pattern-matching. At 64K context, NoLiMa scores are noticeably lower than at 4K, even on the best models. The drop is the gap between retrieval and reasoning. It's the gap between finding the right passage and being able to use it once found.
+
+HELMET tests downstream task performance at 128K. RAG, in-context learning, re-ranking, summarisation. The scores on HELMET are uniformly lower than the vendor headline numbers. The drop is the same shape as the drop on NoLiMa. More tokens, less useful per token.
+
+Fiction.LiveBench is the test that's hardest to argue with. The model gets a real book. The questions are about events and relationships in the book. There's no clever prompting that fixes a model that lost track of what happened on page 40 by the time it gets to page 200.
+
+Llama 4 Scout at 15.6 percent on Fiction.LiveBench at 128K is the data point that anchors the whole conversation. A 10M-token window doesn't help if the model can't answer questions about a book at one percent of that length.
+
+The clearest single comparison across these tests is GPT-5.5 on NIAH-2 single-needle at 1M versus GPT-5.5 on MRCR v2 multi-needle at 128K. The first number is 99 percent. The second collapses. Same model, same vendor, same marketing page. The single-needle number is what fills the slide. The multi-needle number is what fills the production incident log.
+What the Chroma study actually showed
+The empirical work on the gap that matters most is the Chroma Research context rot study, published July 14 2025. It tested 18 models from four vendors on four experiment types. The headline is that there is no cliff. Degradation is monotonic from the shortest contexts onward. The rot is continuous, not a step.
+
+The four experiments matter because they isolate different variables. The first looked at needle-question similarity and found that lower cosine similarity between the embedded question and the embedded needle predicts a faster degradation rate. The second looked at distractors and found they lower aggregate accuracy by about one percentage point across all models and haystacks combined. That number is small, and it surprised people who assumed distractors were the problem. The third looked at needle-haystack similarity and concluded it is not the controlling variable. The fourth looked at haystack structure and found that shuffling the haystack destroys performance more than adding distractor needles. The structure of the surrounding text matters more than the count of irrelevant chunks.
+
+Put plainly: the model is not bad at ignoring irrelevant text. It's bad at using relevant text once there's enough of it. The failure is on the use side, not the filter side.
+Where the work actually sits
+The result that most changes how I think about agent architecture is a side-finding from the same body of work. When the same model is run through different harnesses, the gap between harnesses is bigger than the gap between models on most tasks.
+
+Cursor on Claude Opus 4.6 scores 93 percent. Claude Code on Claude Opus 4.6 scores 77 percent. Same model, same tasks, sixteen points apart. The harness, the system prompt, the tool surface, the way the context is sliced before it reaches the model, all of that is in that sixteen points.
+
+The implication is uncomfortable. Most of what gets attributed to the model is the model plus the harness plus the system prompt plus the way the developer chose to fill the context. None of those is fixed by buying a bigger window. All of them are within the developer's control.
+The pattern across all this is consistent enough to state plainly. The advertised number is the size of the door. The number that does work is the size of the room the model can see when it's actually doing the work. The two are different. The difference is not small. The difference is not closing on its own. Buying a bigger window does not close the gap. Building a better harness, slicing context more deliberately, and choosing what to put in front of the model based on the task, those close the gap.
+
+Once the gap is real, three things follow for anyone building an agent in 2026.
+
+The first is that the choice of window is downstream of the choice of test. A team that picks a model based on the NIAH-2 single-needle number is going to ship a system that breaks on the multi-needle and reasoning tests the model can't pass. The benchmark that gets cited in the procurement meeting is the benchmark that should be the most suspect, not the most reassuring.
+
+The second is that the cost of context is not the cost of the input. It's the cost of every retrieval step, every turn, every rerank call, multiplied by whatever fraction of the window the model can actually attend to. Doubling the window doesn't double the useful work. It dilutes it.
+
+The third is that the way the context is sliced before it reaches the model is part of the model, in every practical sense. The Cursor 93 percent versus Claude Code 77 percent isn't an edge case. It's the central case. Two teams, same model, sixteen points apart, all in the harness and the system prompt and the context curation. That's where the engineering goes from here.
+
+That's the argument this series opens with. The rest of the run is about what each of those levers looks like in practice, what it costs, and how the 19 systems I've been studying approach it.
+
+If you've been filling 200K-token windows and wondering why the agent loses the thread, the answer is almost never that you needed 400K. The shame's in still treating the advertised number as the engineering number after the benchmark families have made clear it isn't.

@@ -525,6 +525,26 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         }
     }
 
+    /// <summary>
+    /// Cheap liveness probe for <c>/healthz</c>: opens a connection and runs
+    /// <c>SELECT 1</c>. Returns false (never throws) if the database is
+    /// unreachable or does not answer before the caller's token trips.
+    /// </summary>
+    public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            var answer = await connection.ExecuteScalarAsync<int>(
+                new CommandDefinition("SELECT 1", cancellationToken: cancellationToken));
+            return answer == 1;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private async Task<NpgsqlConnection> OpenAsync(CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(connectionString))

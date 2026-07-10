@@ -501,6 +501,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     private async Task<McpClient> CreateMcpClientAsync(string sessionId)
     {
         var env = StdioClientTransportOptions.GetDefaultEnvironmentVariables();
+        env["MEMSRV_TRANSPORT"] = "stdio";
         env["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
         env["MEMSRV_AGENT_ID"] = "agent-a";
         env["MEMSRV_NAMESPACE"] = "memory-system";
@@ -543,6 +544,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         startInfo.ArgumentList.Add("--project");
         startInfo.ArgumentList.Add(Path.Combine(_root, "src/MemSrv.Server/MemSrv.Server.csproj"));
         startInfo.ArgumentList.Add("--no-build");
+        startInfo.Environment["MEMSRV_TRANSPORT"] = "stdio";
         startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
         startInfo.Environment["MEMSRV_AGENT_ID"] = "agent-a";
         startInfo.Environment["MEMSRV_NAMESPACE"] = "memory-system";

@@ -12,8 +12,11 @@ COPY src/ src/
 RUN dotnet publish src/MemSrv.Server/MemSrv.Server.csproj -c Release -o /out/server --no-restore \
  && dotnet publish src/MemCtl/MemCtl.csproj -c Release -o /out/memctl --no-restore
 
-FROM mcr.microsoft.com/dotnet/runtime:10.0
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
+
+# HTTP transport (default mode) binds 0.0.0.0:8080; MCP at /mcp, health at /healthz.
+EXPOSE 8080
 
 # Npgsql probes GSSAPI at connect time; without this it logs a load error.
 RUN apt-get update \

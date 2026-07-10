@@ -297,6 +297,19 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         await transaction.CommitAsync(cancellationToken);
     }
 
+    public async Task RetireAsync(Guid uuid, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(
+            "UPDATE memories SET status = 'retired', retired_at = now() WHERE uuid = @Uuid",
+            new { Uuid = uuid });
+
+        if (affected == 0)
+        {
+            throw new InvalidOperationException($"Memory '{uuid}' was not found.");
+        }
+    }
+
     public async Task<MemoryRecord> ShowAsync(Guid uuid)
     {
         await using var connection = await OpenAsync();
@@ -322,6 +335,71 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             new { Uuid = uuid });
 
         return ToRecord(row) with { SupersededBy = supersededBy };
+    }
+
+    public async Task<IReadOnlyList<ConsumedEntry>> ConsumedAsync(string sessionId)
+    {
+        await using var connection = await OpenAsync();
+        var rows = await connection.QueryAsync<ConsumedRow>(
+            """
+            SELECT t.ts AS Ts, m.uuid AS MemoryUuid, m.type AS Type,
+                   m.source_type AS SourceType, m.source_id AS SourceId
+            FROM traces t
+            JOIN memories m ON m.uuid = ANY(t.refs)
+            WHERE t.session_id = @SessionId AND t.event_type = 'memory_consumed'
+            ORDER BY t.ts, m.uuid
+            """,
+            new { SessionId = sessionId });
+        return rows
+            .Select(row => new ConsumedEntry(row.Ts, row.MemoryUuid, row.Type, row.SourceType, row.SourceId))
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<WhyStep>> WhyAsync(Guid uuid)
+    {
+        await using var connection = await OpenAsync();
+        var steps = new List<WhyStep>();
+        var seen = new HashSet<Guid>();
+        Guid? current = uuid;
+
+        while (current is Guid target && seen.Add(target))
+        {
+            var row = await connection.QuerySingleOrDefaultAsync<MemoryRow>(
+                """
+                SELECT uuid, version, status, source_type AS SourceType, source_id AS SourceId, supersedes
+                FROM memories
+                WHERE uuid = @Uuid
+                """,
+                new { Uuid = target });
+
+            if (row is null)
+            {
+                if (steps.Count == 0)
+                {
+                    throw new InvalidOperationException($"Memory '{uuid}' was not found.");
+                }
+
+                break;
+            }
+
+            TraceRecord? sourceTrace = null;
+            if (string.Equals(row.SourceType, "trace", StringComparison.Ordinal) && Guid.TryParse(row.SourceId, out var traceUuid))
+            {
+                sourceTrace = await connection.QuerySingleOrDefaultAsync<TraceRecord>(
+                    """
+                    SELECT trace_uuid AS TraceUuid, session_id AS SessionId, agent_id AS AgentId, namespace,
+                           event_type AS EventType, content::text AS Content, refs, ts
+                    FROM traces
+                    WHERE trace_uuid = @TraceUuid
+                    """,
+                    new { TraceUuid = traceUuid });
+            }
+
+            steps.Add(new WhyStep(row.Uuid, row.Version, row.Status, row.SourceType, row.SourceId, row.Supersedes, sourceTrace));
+            current = row.Supersedes;
+        }
+
+        return steps;
     }
 
     public async Task<IReadOnlyList<TraceRecord>> TraceAsync(string sessionId)
@@ -669,6 +747,15 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         public DateTimeOffset CreatedAt { get; set; }
         public int Rank { get; set; }
         public double Score { get; set; }
+    }
+
+    private sealed class ConsumedRow
+    {
+        public DateTimeOffset Ts { get; set; }
+        public Guid MemoryUuid { get; set; }
+        public string Type { get; set; } = "";
+        public string SourceType { get; set; } = "";
+        public string? SourceId { get; set; }
     }
 
     private sealed class MemoryRow

@@ -41,6 +41,21 @@ try
             await RejectAsync(options, Guid.Parse(args[1]), RequireOption(args, "--by"), RequireOption(args, "--reason"));
             return 0;
 
+        case "retire":
+            RequireArgs(args, 2);
+            await RetireAsync(options, Guid.Parse(args[1]));
+            return 0;
+
+        case "why":
+            RequireArgs(args, 2);
+            await WhyAsync(options, Guid.Parse(args[1]));
+            return 0;
+
+        case "consumed":
+            RequireArgs(args, 2);
+            await ConsumedAsync(options, args[1]);
+            return 0;
+
         case "trace":
             RequireArgs(args, 2);
             await TraceAsync(options, args[1]);
@@ -101,6 +116,7 @@ static async Task ShowAsync(MemSrvOptions options, Guid uuid)
     Console.WriteLine($"{row.Uuid} {row.Namespace} {row.Type} {row.Visibility}/{row.Status} tier={row.Tier} v{row.Version}");
     Console.WriteLine($"source={row.SourceType}:{row.SourceId ?? "<none>"} agent={row.AgentId} session={row.SessionId ?? "<none>"}");
     Console.WriteLine($"created={row.CreatedAt:O} approved_by={row.ApprovedBy ?? "<none>"} approved_at={row.ApprovedAt?.ToString("O") ?? "<none>"}");
+    Console.WriteLine($"retired={row.RetiredAt?.ToString("O") ?? "<none>"}");
     if (row.Supersedes.HasValue)
     {
         Console.WriteLine($"supersedes={row.Supersedes}");
@@ -125,6 +141,40 @@ static async Task RejectAsync(MemSrvOptions options, Guid uuid, string by, strin
 {
     await Service(options).RejectAsync(uuid, by, reason);
     Console.WriteLine($"rejected {uuid} by {by}");
+}
+
+static async Task RetireAsync(MemSrvOptions options, Guid uuid)
+{
+    await Service(options).RetireAsync(uuid);
+    Console.WriteLine($"retired {uuid}");
+}
+
+static async Task WhyAsync(MemSrvOptions options, Guid uuid)
+{
+    var steps = await Service(options).WhyAsync(uuid);
+    foreach (var step in steps)
+    {
+        Console.WriteLine($"memory {step.Uuid} v{step.Version} {step.Status} source={step.SourceType}:{step.SourceId ?? "<none>"}");
+        if (step.SourceTrace is { } trace)
+        {
+            Console.WriteLine($"  trace {trace.TraceUuid} {trace.EventType} session={trace.SessionId} agent={trace.AgentId} ts={trace.Ts:O}");
+            Console.WriteLine($"  {trace.Content}");
+        }
+
+        if (step.Supersedes.HasValue)
+        {
+            Console.WriteLine($"  supersedes {step.Supersedes}");
+        }
+    }
+}
+
+static async Task ConsumedAsync(MemSrvOptions options, string sessionId)
+{
+    var entries = await Service(options).ConsumedAsync(sessionId);
+    foreach (var entry in entries)
+    {
+        Console.WriteLine($"{entry.Ts:O} {entry.MemoryUuid} type={entry.Type} source={entry.SourceType}:{entry.SourceId ?? "<none>"}");
+    }
 }
 
 static async Task TraceAsync(MemSrvOptions options, string sessionId)
@@ -169,5 +219,8 @@ static void Usage()
     Console.Error.WriteLine("memctl show <uuid>");
     Console.Error.WriteLine("memctl approve <uuid> --by name");
     Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
+    Console.Error.WriteLine("memctl retire <uuid>");
+    Console.Error.WriteLine("memctl why <uuid>");
+    Console.Error.WriteLine("memctl consumed <session_id>");
     Console.Error.WriteLine("memctl trace <session_id>");
 }

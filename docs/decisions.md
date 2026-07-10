@@ -1,5 +1,23 @@
 # Decisions
 
+## 2026-07-10 — memctl audit commands (Slice 5, #5)
+
+- `retire <uuid>` is a bare status flip (`status='retired'`, sets `retired_at`) —
+  no `--by`, no trace event. Rationale: spec §9's signature is bare, and
+  retirement is deliberately absent from the trace event taxonomy (§191) and the
+  review-event convention (§6b). Retiring is not an adjudication; it just drops a
+  memory from the default retrieval path (search already filters
+  `status='approved'`). Don't "fix" this by inventing a retirement event — that's
+  a taxonomy change, not this slice.
+- `retire` has **no status guard** (`WHERE uuid = @Uuid` only): it will flip a
+  `proposed`/`rejected`/`superseded` row too. Intentional — an operator may want
+  to fully drop a superseded row from retrieval; the CLI shouldn't second-guess.
+- `show` gained a `retired=` line so retirement is inspectable at the operator
+  seam (supports the AC "the row remains queryable").
+- `why` walks the `supersedes` chain backward and resolves each version's
+  `source_id` to its trace only when `source_type='trace'` (only traces live
+  in-DB; other source types print as `type:id`).
+
 ## 2026-07-09 — North star + Session 2 audit (wayfinder map #11)
 
 - `docs/north-star.md` added (informational — never wins conflicts): identity

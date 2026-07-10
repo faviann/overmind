@@ -429,6 +429,72 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.Contains("migrations applied", result.Stdout);
     }
 
+    [Fact]
+    public async Task MemCtlRetireFlipsStatusKeepsRowAndLeavesRetrieval()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", "session-retire");
+        var term = $"retire-marker-{Guid.NewGuid():N}";
+        var proposed = await service.ProposeMemoryAsync(context, "memory-system", "fact", $"Stale fact {term}", "human", "test-source");
+        await service.ApproveAsync(proposed.Data.Uuid, "test-operator");
+
+        var retire = await RunMemCtlForResultAsync("retire", proposed.Data.Uuid.ToString());
+        Assert.True(retire.ExitCode == 0, $"retire failed: {retire.Stderr}");
+        Assert.Contains($"retired {proposed.Data.Uuid}", retire.Stdout, StringComparison.Ordinal);
+
+        var show = await RunMemCtlForResultAsync("show", proposed.Data.Uuid.ToString());
+        Assert.Equal(0, show.ExitCode);
+        Assert.Contains("shared/retired", show.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("retired=<none>", show.Stdout, StringComparison.Ordinal);
+
+        var afterRetire = await service.SearchMemoryAsync(context, term);
+        Assert.DoesNotContain(afterRetire.Data, result => result.Uuid == proposed.Data.Uuid);
+    }
+
+    [Fact]
+    public async Task MemCtlWhyWalksSourceTraceChainAcrossSupersession()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", "session-why-source");
+        var firstMarker = $"why-v1-{Guid.NewGuid():N}";
+        var secondMarker = $"why-v2-{Guid.NewGuid():N}";
+
+        var firstTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = firstMarker });
+        var firstMemory = await service.ProposeMemoryAsync(context, "memory-system", "decision", "Original belief", "trace", firstTrace.Data.TraceUuid.ToString());
+        await service.ApproveAsync(firstMemory.Data.Uuid, "test-operator");
+
+        var secondTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = secondMarker });
+        var secondMemory = await service.ProposeMemoryAsync(context, "memory-system", "decision", "Revised belief", "trace", secondTrace.Data.TraceUuid.ToString(), firstMemory.Data.Uuid);
+        await service.ApproveAsync(secondMemory.Data.Uuid, "test-operator");
+
+        var why = await RunMemCtlForResultAsync("why", secondMemory.Data.Uuid.ToString());
+
+        Assert.True(why.ExitCode == 0, $"why failed: {why.Stderr}");
+        Assert.Contains(secondMemory.Data.Uuid.ToString(), why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(secondTrace.Data.TraceUuid.ToString(), why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(secondMarker, why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(firstMemory.Data.Uuid.ToString(), why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(firstTrace.Data.TraceUuid.ToString(), why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(firstMarker, why.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MemCtlConsumedListsReadMemoriesWithResolvableSource()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-consumed-{Guid.NewGuid():N}");
+        var sourceTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = "consumed source" });
+        var proposed = await service.ProposeMemoryAsync(context, "memory-system", "fact", "A read fact", "trace", sourceTrace.Data.TraceUuid.ToString());
+        await service.ApproveAsync(proposed.Data.Uuid, "test-operator");
+        await service.GetByIdAsync(context, proposed.Data.Uuid);
+
+        var consumed = await RunMemCtlForResultAsync("consumed", context.SessionId);
+
+        Assert.True(consumed.ExitCode == 0, $"consumed failed: {consumed.Stderr}");
+        Assert.Contains(proposed.Data.Uuid.ToString(), consumed.Stdout, StringComparison.Ordinal);
+        Assert.Contains(sourceTrace.Data.TraceUuid.ToString(), consumed.Stdout, StringComparison.Ordinal);
+    }
+
     private MemoryService Service() =>
         new(RuntimeConnection, new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
 

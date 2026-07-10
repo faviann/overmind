@@ -314,7 +314,8 @@ public sealed class MemoryServiceTests : IAsyncLifetime
 
         var outsider = new MemoryContext("agent-a", "memory-system", new[] { "memory-system" }, "session-ns-getbyid-outsider");
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetByIdAsync(outsider, proposed.Data.Uuid));
+        var ex = await Assert.ThrowsAsync<NamespaceForbiddenException>(() => service.GetByIdAsync(outsider, proposed.Data.Uuid));
+        Assert.Equal("homelab", ex.Namespace);
     }
 
     [Fact]

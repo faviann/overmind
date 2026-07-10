@@ -116,15 +116,18 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
                    content_hash AS ContentHash, metadata::text AS MetadataJson
             FROM memories
             WHERE uuid = @Uuid
-              AND namespace = ANY(@AllowedNamespaces)
               AND (visibility = 'shared' OR agent_id = @AgentId)
             """,
-            new { Uuid = uuid, context.AgentId, AllowedNamespaces = context.AllowedNamespaces.ToArray() });
+            new { Uuid = uuid, context.AgentId });
 
         if (row is null)
         {
             throw new InvalidOperationException($"Memory '{uuid}' was not found.");
         }
+
+        // Reads flow through the same namespace seam as writes: a memory in a
+        // namespace outside the allowlist is rejected before it is consumed.
+        AuthorizeNamespace(context, row.Namespace);
 
         var supersededBy = await connection.QuerySingleOrDefaultAsync<Guid?>(
             "SELECT uuid FROM memories WHERE supersedes = @Uuid ORDER BY created_at DESC LIMIT 1",
@@ -405,9 +408,11 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             new { SessionId = sessionId, AgentId = agentId, Namespace = @namespace, EventType = eventType, ContentJson = contentJson, Refs = refs });
     }
 
-    // The single namespace-authorization seam: every path that names a
-    // namespace resolves and authorizes it here, so request identity meets data
-    // access in exactly one place (keeps the north-star RLS retrofit cheap).
+    // The namespace-authorization seam. Every path that reaches a namespace —
+    // qualified writes, unqualified defaults, cross-namespace search, and reads
+    // by uuid — is gated by AuthorizeNamespace against the context's allowlist,
+    // so request identity meets namespace access in one service-layer function.
+    // That single policy point is what keeps the north-star RLS retrofit cheap.
     private static string ResolveNamespace(MemoryContext context, string? requested)
     {
         var @namespace = requested ?? context.DefaultNamespace;

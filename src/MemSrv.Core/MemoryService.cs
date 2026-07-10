@@ -324,6 +324,53 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         return ToRecord(row) with { SupersededBy = supersededBy };
     }
 
+    public async Task<IReadOnlyList<WhyStep>> WhyAsync(Guid uuid)
+    {
+        await using var connection = await OpenAsync();
+        var steps = new List<WhyStep>();
+        var seen = new HashSet<Guid>();
+        Guid? current = uuid;
+
+        while (current is Guid target && seen.Add(target))
+        {
+            var row = await connection.QuerySingleOrDefaultAsync<MemoryRow>(
+                """
+                SELECT uuid, version, status, source_type AS SourceType, source_id AS SourceId, supersedes
+                FROM memories
+                WHERE uuid = @Uuid
+                """,
+                new { Uuid = target });
+
+            if (row is null)
+            {
+                if (steps.Count == 0)
+                {
+                    throw new InvalidOperationException($"Memory '{uuid}' was not found.");
+                }
+
+                break;
+            }
+
+            TraceRecord? sourceTrace = null;
+            if (string.Equals(row.SourceType, "trace", StringComparison.Ordinal) && Guid.TryParse(row.SourceId, out var traceUuid))
+            {
+                sourceTrace = await connection.QuerySingleOrDefaultAsync<TraceRecord>(
+                    """
+                    SELECT trace_uuid AS TraceUuid, session_id AS SessionId, agent_id AS AgentId, namespace,
+                           event_type AS EventType, content::text AS Content, refs, ts
+                    FROM traces
+                    WHERE trace_uuid = @TraceUuid
+                    """,
+                    new { TraceUuid = traceUuid });
+            }
+
+            steps.Add(new WhyStep(row.Uuid, row.Version, row.Status, row.SourceType, row.SourceId, row.Supersedes, sourceTrace));
+            current = row.Supersedes;
+        }
+
+        return steps;
+    }
+
     public async Task<IReadOnlyList<TraceRecord>> TraceAsync(string sessionId)
     {
         await using var connection = await OpenAsync();

@@ -49,6 +49,15 @@ public sealed record MemoryRecord(
     string ContentHash,
     JsonElement Metadata);
 
+public sealed record WhyStep(
+    Guid Uuid,
+    int Version,
+    string Status,
+    string SourceType,
+    string? SourceId,
+    Guid? Supersedes,
+    TraceRecord? SourceTrace);
+
 public sealed class TraceRecord
 {
     public Guid TraceUuid { get; set; }

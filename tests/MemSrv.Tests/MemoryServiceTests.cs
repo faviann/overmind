@@ -356,6 +356,33 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.DoesNotContain(afterRetire.Data, result => result.Uuid == proposed.Data.Uuid);
     }
 
+    [Fact]
+    public async Task MemCtlWhyWalksSourceTraceChainAcrossSupersession()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", "session-why-source");
+        var firstMarker = $"why-v1-{Guid.NewGuid():N}";
+        var secondMarker = $"why-v2-{Guid.NewGuid():N}";
+
+        var firstTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = firstMarker });
+        var firstMemory = await service.ProposeMemoryAsync(context, "memory-system", "decision", "Original belief", "trace", firstTrace.Data.TraceUuid.ToString());
+        await service.ApproveAsync(firstMemory.Data.Uuid, "test-operator");
+
+        var secondTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = secondMarker });
+        var secondMemory = await service.ProposeMemoryAsync(context, "memory-system", "decision", "Revised belief", "trace", secondTrace.Data.TraceUuid.ToString(), firstMemory.Data.Uuid);
+        await service.ApproveAsync(secondMemory.Data.Uuid, "test-operator");
+
+        var why = await RunMemCtlForResultAsync("why", secondMemory.Data.Uuid.ToString());
+
+        Assert.True(why.ExitCode == 0, $"why failed: {why.Stderr}");
+        Assert.Contains(secondMemory.Data.Uuid.ToString(), why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(secondTrace.Data.TraceUuid.ToString(), why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(secondMarker, why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(firstMemory.Data.Uuid.ToString(), why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(firstTrace.Data.TraceUuid.ToString(), why.Stdout, StringComparison.Ordinal);
+        Assert.Contains(firstMarker, why.Stdout, StringComparison.Ordinal);
+    }
+
     private MemoryService Service() =>
         new(RuntimeConnection, new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
 

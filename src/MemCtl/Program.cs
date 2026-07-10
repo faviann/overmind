@@ -46,6 +46,11 @@ try
             await RetireAsync(options, Guid.Parse(args[1]));
             return 0;
 
+        case "why":
+            RequireArgs(args, 2);
+            await WhyAsync(options, Guid.Parse(args[1]));
+            return 0;
+
         case "trace":
             RequireArgs(args, 2);
             await TraceAsync(options, args[1]);
@@ -139,6 +144,25 @@ static async Task RetireAsync(MemSrvOptions options, Guid uuid)
     Console.WriteLine($"retired {uuid}");
 }
 
+static async Task WhyAsync(MemSrvOptions options, Guid uuid)
+{
+    var steps = await Service(options).WhyAsync(uuid);
+    foreach (var step in steps)
+    {
+        Console.WriteLine($"memory {step.Uuid} v{step.Version} {step.Status} source={step.SourceType}:{step.SourceId ?? "<none>"}");
+        if (step.SourceTrace is { } trace)
+        {
+            Console.WriteLine($"  trace {trace.TraceUuid} {trace.EventType} session={trace.SessionId} agent={trace.AgentId} ts={trace.Ts:O}");
+            Console.WriteLine($"  {trace.Content}");
+        }
+
+        if (step.Supersedes.HasValue)
+        {
+            Console.WriteLine($"  supersedes {step.Supersedes}");
+        }
+    }
+}
+
 static async Task TraceAsync(MemSrvOptions options, string sessionId)
 {
     var rows = await Service(options).TraceAsync(sessionId);
@@ -182,5 +206,6 @@ static void Usage()
     Console.Error.WriteLine("memctl approve <uuid> --by name");
     Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
     Console.Error.WriteLine("memctl retire <uuid>");
+    Console.Error.WriteLine("memctl why <uuid>");
     Console.Error.WriteLine("memctl trace <session_id>");
 }

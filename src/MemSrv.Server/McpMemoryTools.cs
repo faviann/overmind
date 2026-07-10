@@ -17,8 +17,9 @@ public sealed class McpMemoryTools
         [Description("Trace event type from the Phase 1 taxonomy.")] string event_type,
         [Description("JSON content for the event.")] JsonElement content,
         [Description("Optional memory UUIDs consumed or produced by this event.")] Guid[]? refs = null,
+        [Description("Optional namespace for this event. Must be within the agent's allowlist; defaults to the agent's default namespace.")] string? @namespace = null,
         CancellationToken cancellationToken = default) =>
-        memory.LogTraceAsync(context, session_id, event_type, content, refs, cancellationToken);
+        memory.LogTraceAsync(context, session_id, event_type, content, refs, @namespace, cancellationToken);
 
     [McpServerTool(Name = "search_memory")]
     [Description("Search approved shared memories and this agent's private memories. Returns previews only.")]

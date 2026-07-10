@@ -17,9 +17,11 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         string eventType,
         object content,
         Guid[]? refs = null,
+        string? @namespace = null,
         CancellationToken cancellationToken = default)
     {
-        var traceUuid = await InsertTraceRawAsync(context.AgentId, context.Namespace, sessionId, eventType, content, refs, cancellationToken);
+        var targetNamespace = ResolveNamespace(context, @namespace);
+        var traceUuid = await InsertTraceRawAsync(context.AgentId, targetNamespace, sessionId, eventType, content, refs, cancellationToken);
         return new ToolEnvelope<TraceResult>(
             new TraceResult(traceUuid),
             "If this event contains a durable decision or fact, call propose_memory referencing this trace_uuid as source_id.");
@@ -33,14 +35,19 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         int? limit = null,
         CancellationToken cancellationToken = default)
     {
-        await ValidateOrLogBlockedAsync(context, context.Namespace, "search_memory", new { query, namespaces, types, limit }, cancellationToken);
-        await InsertTraceRawAsync(context.AgentId, context.Namespace, context.SessionId, "tool_call", new
+        var searchedNamespaces = namespaces is { Length: > 0 } ? namespaces : [context.DefaultNamespace];
+        foreach (var searched in searchedNamespaces)
+        {
+            AuthorizeNamespace(context, searched);
+        }
+
+        await ValidateOrLogBlockedAsync(context, context.DefaultNamespace, "search_memory", new { query, namespaces, types, limit }, cancellationToken);
+        await InsertTraceRawAsync(context.AgentId, context.DefaultNamespace, context.SessionId, "tool_call", new
         {
             tool = "search_memory",
             @params = new { query, namespaces, types, limit }
         }, null, cancellationToken);
 
-        var searchedNamespaces = namespaces is { Length: > 0 } ? namespaces : [context.Namespace];
         var config = await GetRetrievalConfigAsync(context.AgentId, searchedNamespaces[0], cancellationToken);
         var take = Math.Min(limit ?? config.MaxResults, config.MaxResults);
         var laneNames = config.Lanes.Count == 0 ? ["fts", "recency"] : config.Lanes;
@@ -109,9 +116,10 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
                    content_hash AS ContentHash, metadata::text AS MetadataJson
             FROM memories
             WHERE uuid = @Uuid
+              AND namespace = ANY(@AllowedNamespaces)
               AND (visibility = 'shared' OR agent_id = @AgentId)
             """,
-            new { Uuid = uuid, context.AgentId });
+            new { Uuid = uuid, context.AgentId, AllowedNamespaces = context.AllowedNamespaces.ToArray() });
 
         if (row is null)
         {
@@ -164,6 +172,7 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         Guid? supersedes = null,
         CancellationToken cancellationToken = default)
     {
+        AuthorizeNamespace(context, @namespace);
         await ValidateOrLogBlockedAsync(context, @namespace, "propose_memory", new { type, content, sourceType, sourceId, supersedes }, cancellationToken);
         var uuid = await InsertMemoryAsync(context, @namespace, type, "shared", "proposed", content, sourceType, sourceId, supersedes, cancellationToken);
         await InsertTraceRawAsync(context.AgentId, @namespace, context.SessionId, "memory_proposed", new { uuid, type, sourceType, sourceId }, [uuid], cancellationToken);
@@ -181,6 +190,7 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         string? sourceId = null,
         CancellationToken cancellationToken = default)
     {
+        AuthorizeNamespace(context, @namespace);
         await ValidateOrLogBlockedAsync(context, @namespace, "save_note", new { type, content, sourceType, sourceId }, cancellationToken);
         var uuid = await InsertMemoryAsync(context, @namespace, type, "private", "approved", content, sourceType, sourceId, null, cancellationToken);
         await InsertTraceRawAsync(context.AgentId, @namespace, context.SessionId, "memory_written", new { uuid, type, sourceType, sourceId }, [uuid], cancellationToken);
@@ -393,6 +403,24 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             RETURNING trace_uuid
             """,
             new { SessionId = sessionId, AgentId = agentId, Namespace = @namespace, EventType = eventType, ContentJson = contentJson, Refs = refs });
+    }
+
+    // The single namespace-authorization seam: every path that names a
+    // namespace resolves and authorizes it here, so request identity meets data
+    // access in exactly one place (keeps the north-star RLS retrofit cheap).
+    private static string ResolveNamespace(MemoryContext context, string? requested)
+    {
+        var @namespace = requested ?? context.DefaultNamespace;
+        AuthorizeNamespace(context, @namespace);
+        return @namespace;
+    }
+
+    private static void AuthorizeNamespace(MemoryContext context, string @namespace)
+    {
+        if (!context.IsNamespaceAllowed(@namespace))
+        {
+            throw new NamespaceForbiddenException(@namespace, context.AgentId);
+        }
     }
 
     private async Task ValidateOrLogBlockedAsync(MemoryContext context, string @namespace, string writePath, object payload, CancellationToken cancellationToken)

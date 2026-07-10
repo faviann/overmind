@@ -25,7 +25,22 @@ public static class Configuration
         options.AgentId = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_AGENT_ID"), options.AgentId);
         options.Namespace = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_NAMESPACE"), options.Namespace);
         options.SessionId = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_SESSION_ID"), options.SessionId);
+        options.AllowedNamespaces = ParseNamespaces(Environment.GetEnvironmentVariable("MEMSRV_ALLOWED_NAMESPACES"), options.AllowedNamespaces);
         return options;
+    }
+
+    // Stdio-mode allowlist source. Comma-separated; unset leaves the list
+    // empty, so the context allows only the default namespace.
+    private static string[] ParseNamespaces(string? value, string[] fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        return value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToArray();
     }
 
     private static string FirstNonEmpty(params string?[] values) =>

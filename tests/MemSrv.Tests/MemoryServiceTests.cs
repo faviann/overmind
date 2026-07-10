@@ -224,6 +224,100 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task LogTraceToExplicitAllowedNamespaceLandsThere()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system", "homelab" }, "session-ns-explicit");
+
+        var trace = await service.LogTraceAsync(context, context.SessionId, "note", new { ok = true }, refs: null, @namespace: "homelab");
+
+        var rows = await service.TraceAsync(context.SessionId);
+        var row = Assert.Single(rows, r => r.TraceUuid == trace.Data.TraceUuid);
+        Assert.Equal("homelab", row.Namespace);
+    }
+
+    [Fact]
+    public async Task LogTraceToForbiddenNamespaceIsRejectedNamingIt()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system" }, "session-ns-forbidden");
+
+        var ex = await Assert.ThrowsAsync<NamespaceForbiddenException>(() =>
+            service.LogTraceAsync(context, context.SessionId, "note", new { ok = true }, refs: null, @namespace: "secret-ops"));
+
+        Assert.Equal("secret-ops", ex.Namespace);
+        Assert.Contains("secret-ops", ex.Message, StringComparison.Ordinal);
+        Assert.Empty(await service.TraceAsync(context.SessionId));
+    }
+
+    [Fact]
+    public async Task UnqualifiedLogTraceLandsInDefaultNamespace()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system", "homelab" }, "session-ns-default");
+
+        var trace = await service.LogTraceAsync(context, context.SessionId, "note", new { ok = true });
+
+        var row = Assert.Single(await service.TraceAsync(context.SessionId), r => r.TraceUuid == trace.Data.TraceUuid);
+        Assert.Equal("memory-system", row.Namespace);
+    }
+
+    [Fact]
+    public async Task SearchWithForbiddenNamespaceIsRejectedNamingIt()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system" }, "session-ns-search-forbidden");
+
+        var ex = await Assert.ThrowsAsync<NamespaceForbiddenException>(() =>
+            service.SearchMemoryAsync(context, "anything", namespaces: ["homelab"]));
+
+        Assert.Equal("homelab", ex.Namespace);
+        Assert.Contains("homelab", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SearchAcrossAllowedNamespacesReturnsBoth()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system", "homelab" }, "session-ns-search-allowed");
+
+        var here = await service.ProposeMemoryAsync(context, "memory-system", "fact", "Crossns alpha marker", "human", "test-source");
+        var there = await service.ProposeMemoryAsync(context, "homelab", "fact", "Crossns beta marker", "human", "test-source");
+        await service.ApproveAsync(here.Data.Uuid, "test-operator");
+        await service.ApproveAsync(there.Data.Uuid, "test-operator");
+
+        var results = await service.SearchMemoryAsync(context, "Crossns marker", namespaces: ["memory-system", "homelab"]);
+
+        Assert.Contains(results.Data, r => r.Uuid == here.Data.Uuid);
+        Assert.Contains(results.Data, r => r.Uuid == there.Data.Uuid);
+    }
+
+    [Fact]
+    public async Task ProposeToForbiddenNamespaceIsRejectedNamingIt()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system" }, "session-ns-propose-forbidden");
+
+        var ex = await Assert.ThrowsAsync<NamespaceForbiddenException>(() =>
+            service.ProposeMemoryAsync(context, "homelab", "fact", "Should never land", "human", "test-source"));
+
+        Assert.Equal("homelab", ex.Namespace);
+    }
+
+    [Fact]
+    public async Task GetByIdRejectsMemoryOutsideAllowlist()
+    {
+        var service = Service();
+        var writer = new MemoryContext("agent-a", "homelab", new[] { "homelab" }, "session-ns-getbyid-writer");
+        var proposed = await service.ProposeMemoryAsync(writer, "homelab", "fact", "Foreign namespace secret", "human", "test-source");
+        await service.ApproveAsync(proposed.Data.Uuid, "test-operator");
+
+        var outsider = new MemoryContext("agent-a", "memory-system", new[] { "memory-system" }, "session-ns-getbyid-outsider");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetByIdAsync(outsider, proposed.Data.Uuid));
+    }
+
+    [Fact]
     public async Task SearchDefaultsToCurrentNamespace()
     {
         var service = Service();

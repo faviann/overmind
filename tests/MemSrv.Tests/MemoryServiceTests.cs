@@ -267,6 +267,90 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MemCtlAmendmentBlockedByNeverStoreLogsRedactedReviewNote()
+    {
+        var service = Service();
+        var proposer = new MemoryContext("agent-a", "memory-system", "session-blocked-amendment");
+        var proposed = await service.ProposeMemoryAsync(
+            proposer,
+            "memory-system",
+            "warning",
+            "Never store credentials from amendments",
+            "human",
+            "test-source");
+        var contentFile = Path.GetTempFileName();
+        const string secret = "AKIA1234567890ABCDEF";
+
+        try
+        {
+            await File.WriteAllTextAsync(contentFile, $"Do not persist {secret}");
+            var approval = await RunMemCtlForResultAsync(
+                "approve", proposed.Data.Uuid.ToString(), "--by", "security-reviewer", "--content-file", contentFile);
+
+            Assert.NotEqual(0, approval.ExitCode);
+            var trace = await RunMemCtlForResultAsync("trace", $"review:{proposed.Data.Uuid}");
+            Assert.Contains(" note ", trace.Stdout, StringComparison.Ordinal);
+            Assert.Contains("aws-access-key-id", trace.Stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, trace.Stdout, StringComparison.Ordinal);
+
+            var original = await RunMemCtlForResultAsync("show", proposed.Data.Uuid.ToString());
+            Assert.Contains("shared/proposed", original.Stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(contentFile);
+        }
+    }
+
+    [Fact]
+    public async Task MemCtlAmendmentAdvancesExistingVersionChainAndReviewRefs()
+    {
+        var service = Service();
+        var proposer = new MemoryContext("agent-a", "memory-system", "session-existing-chain");
+        var source = await service.LogTraceAsync(proposer, proposer.SessionId, "assistant_msg", new { text = "chain source" });
+        var original = await service.ProposeMemoryAsync(
+            proposer, "memory-system", "decision", "Original approved belief", "trace", source.Data.TraceUuid.ToString());
+        await service.ApproveAsync(original.Data.Uuid, "first-reviewer");
+        var replacement = await service.ProposeMemoryAsync(
+            proposer,
+            "memory-system",
+            "decision",
+            "Replacement proposal before editing",
+            "trace",
+            source.Data.TraceUuid.ToString(),
+            original.Data.Uuid);
+        var contentFile = Path.GetTempFileName();
+
+        try
+        {
+            await File.WriteAllTextAsync(contentFile, "Final amended replacement");
+            var approval = await RunMemCtlForResultAsync(
+                "approve", replacement.Data.Uuid.ToString(), "--by", "chain-reviewer", "--content-file", contentFile);
+            var approvedUuid = Guid.Parse(approval.Stdout.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1]);
+
+            var originalOutput = await RunMemCtlForResultAsync("show", original.Data.Uuid.ToString());
+            Assert.Contains("shared/superseded", originalOutput.Stdout, StringComparison.Ordinal);
+            Assert.Contains("v1", originalOutput.Stdout, StringComparison.Ordinal);
+            var replacementOutput = await RunMemCtlForResultAsync("show", replacement.Data.Uuid.ToString());
+            Assert.Contains("shared/superseded", replacementOutput.Stdout, StringComparison.Ordinal);
+            Assert.Contains("v2", replacementOutput.Stdout, StringComparison.Ordinal);
+            var amendedOutput = await RunMemCtlForResultAsync("show", approvedUuid.ToString());
+            Assert.Contains("shared/approved", amendedOutput.Stdout, StringComparison.Ordinal);
+            Assert.Contains("v3", amendedOutput.Stdout, StringComparison.Ordinal);
+
+            var trace = await service.TraceAsync($"review:{replacement.Data.Uuid}");
+            var review = Assert.Single(trace, row => row.EventType == "approval");
+            Assert.Contains(replacement.Data.Uuid, review.Refs ?? []);
+            Assert.Contains(approvedUuid, review.Refs ?? []);
+            Assert.Contains(source.Data.TraceUuid, review.Refs ?? []);
+        }
+        finally
+        {
+            File.Delete(contentFile);
+        }
+    }
+
+    [Fact]
     public async Task RejectionUsesSyntheticSessionAndReviewerIdentity()
     {
         var service = Service();

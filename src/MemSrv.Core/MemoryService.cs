@@ -271,22 +271,51 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             throw new ArgumentException("Amended content must not be empty.", nameof(amendedContent));
         }
 
-        neverStore.AssertAllowed(amendedContent);
         var reviewer = NormalizeReviewerIdentity(approvedBy);
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var proposal = await connection.QuerySingleAsync<MemoryRow>(
             """
-            UPDATE memories
-            SET status = 'superseded'
+            SELECT uuid, namespace, type, visibility, status, tier, content, source_type AS SourceType,
+                   source_id AS SourceId, agent_id AS AgentId, session_id AS SessionId, version,
+                   supersedes, created_at AS CreatedAt, approved_by AS ApprovedBy,
+                   approved_at AS ApprovedAt, retired_at AS RetiredAt,
+                   content_hash AS ContentHash, metadata::text AS MetadataJson
+            FROM memories
             WHERE uuid = @Uuid AND visibility = 'shared' AND status = 'proposed'
-            RETURNING uuid, namespace, type, visibility, status, tier, content, source_type AS SourceType,
-                      source_id AS SourceId, agent_id AS AgentId, session_id AS SessionId, version,
-                      supersedes, created_at AS CreatedAt, approved_by AS ApprovedBy,
-                      approved_at AS ApprovedAt, retired_at AS RetiredAt,
-                      content_hash AS ContentHash, metadata::text AS MetadataJson
+            FOR UPDATE
             """,
             new { Uuid = proposalUuid },
+            transaction);
+
+        try
+        {
+            neverStore.AssertAllowed(amendedContent);
+        }
+        catch (NeverStoreException ex)
+        {
+            await InsertTraceRawAsync(
+                reviewer,
+                proposal.Namespace,
+                ReviewSessionId(proposalUuid),
+                "note",
+                new
+                {
+                    blockedWrite = "approve_amendment",
+                    rule = ex.RuleName,
+                    payload = neverStore.RedactObject(new { content = amendedContent })
+                },
+                [proposalUuid],
+                cancellationToken,
+                connection,
+                transaction);
+            await transaction.CommitAsync(cancellationToken);
+            throw;
+        }
+
+        await connection.ExecuteAsync(
+            "UPDATE memories SET status = 'superseded' WHERE uuid = @Uuid OR uuid = @PriorUuid",
+            new { Uuid = proposalUuid, PriorUuid = proposal.Supersedes },
             transaction);
 
         var approvedUuid = await connection.QuerySingleAsync<Guid>(
@@ -503,8 +532,11 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         await using var connection = await OpenAsync(cancellationToken);
         return await connection.QuerySingleAsync<Guid>(
             """
-            INSERT INTO memories (namespace, type, visibility, status, content, content_hash, source_type, source_id, agent_id, session_id, supersedes)
-            VALUES (@Namespace, @Type, @Visibility, @Status, @Content, @ContentHash, @SourceType, @SourceId, @AgentId, @SessionId, @Supersedes)
+            INSERT INTO memories (namespace, type, visibility, status, content, content_hash, source_type, source_id, agent_id, session_id, version, supersedes)
+            VALUES (
+                @Namespace, @Type, @Visibility, @Status, @Content, @ContentHash, @SourceType, @SourceId, @AgentId, @SessionId,
+                COALESCE((SELECT version + 1 FROM memories WHERE uuid = @Supersedes), 1),
+                @Supersedes)
             RETURNING uuid
             """,
             new

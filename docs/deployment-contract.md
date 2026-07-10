@@ -1,9 +1,9 @@
 # Deployment contract (consumed by homelab-iac)
 
 What the homelab repo may rely on when deploying this application. Anything not
-stated here is not a contract. Status of each section is explicit: **FINAL**
-sections are stable; **DEFERRED** sections are defined by Session 2 (HTTP
-transport) and must not be guessed at.
+stated here is not a contract. Every section is now **FINAL**: the Session 2
+HTTP transport has landed, so the service runtime shape (port, health, bind
+address, key file) is defined below rather than deferred.
 
 ## Image — FINAL
 
@@ -86,8 +86,19 @@ provisioned database, never the persistent production `memory`.
 Both accept either a `postgres://user:pass@host:port/db` URL or an Npgsql
 keyword string (`Host=...;Port=...;Database=...;Username=...;Password=...`).
 
-Optional (defaults are sensible for a single-agent local setup):
-`MEMSRV_AGENT_ID`, `MEMSRV_NAMESPACE`, `MEMSRV_SESSION_ID`.
+HTTP transport (default mode):
+
+| Variable | Purpose |
+| --- | --- |
+| `MEMSRV_AGENT_KEYS_PATH` | Path to the Ansible-provisioned bearer-key YAML, mounted into the container. Required in HTTP mode; the server fails fast at startup if it is missing. |
+
+Optional:
+
+| Variable | Purpose |
+| --- | --- |
+| `MEMSRV_TRANSPORT` | `stdio` selects the local stdio transport; unset (default) serves HTTP. `--stdio` on the command line is equivalent. |
+| `MEMSRV_HTTP_URL` | Kestrel bind address; defaults to `http://0.0.0.0:8080`. |
+| `MEMSRV_AGENT_ID`, `MEMSRV_NAMESPACE`, `MEMSRV_SESSION_ID` | stdio-mode identity/session (defaults are sensible for a single-agent local setup). Ignored in HTTP mode, where identity comes from the bearer key and the session is transport-derived. |
 
 No other configuration is required; `config/never_store.yaml` ships in the
 image.
@@ -99,15 +110,26 @@ image.
   managed by Ansible). Consumers never receive a connection string; the server
   is the only door.
 
-## Service runtime (port, health, bind address) — DEFERRED to Session 2
+## Service runtime (port, health, bind address) — FINAL
 
-The server currently speaks MCP over **stdio only**. The HTTP transport with
-static bearer keys is Session 2 of `memory-server-phase1-spec.md` and has not
-been built. Until it lands:
+The server is one binary with a mode flag. Default mode serves streamable-HTTP
+MCP; `MEMSRV_TRANSPORT=stdio` (or `--stdio`) keeps the local stdio path. Both
+modes run from the same image.
 
-- there is **no listen port, no health endpoint, no bind address** to encode in
-  a production compose file — do not write the service unit yet;
-- the production-useful capability of the image is `memctl migrate` (homelab
-  slices: database bootstrap, backups, migration invocation, schema verify);
-- when Session 2 lands, this section gets replaced with the final values and a
-  new image tag, and the homelab service compose is written against it.
+- **Bind address:** `0.0.0.0:8080` by default (override with `MEMSRV_HTTP_URL`).
+- **MCP endpoint:** `POST/GET/DELETE /mcp`, streamable HTTP, **bearer-authenticated**.
+  A missing or unknown key is rejected with `401` before any tool runs. The
+  agent identity and namespace allowlist come from the key entry; the trace
+  session is the MCP protocol session (transport-derived, one MCP session = one
+  trace session).
+- **Health endpoint:** `GET /healthz`, **unauthenticated**. Returns `200` only
+  when the database answers `SELECT 1` within ~2s; otherwise `503`. Suitable for
+  a compose healthcheck — a non-200 reflects a real database outage, not just
+  process liveness.
+- **Bearer keys:** an Ansible-provisioned YAML file mounted into the container,
+  path via `MEMSRV_AGENT_KEYS_PATH`. Plaintext entries under a top-level `keys:`
+  list, each `{key, agent_id, default_namespace, allowed_namespaces[]}`.
+  Rotation is a redeploy; there is no key CRUD in the app.
+- **Day-1 agent URL:** `http://overmind.faviann.vms:8080/mcp` — DNS name, plain
+  HTTP on the LAN. Traefik/TLS is a later, purely infra-side add-on requiring no
+  app or contract change.

@@ -26,6 +26,9 @@ public static class Configuration
         options.Namespace = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_NAMESPACE"), options.Namespace);
         options.SessionId = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_SESSION_ID"), options.SessionId);
         options.AllowedNamespaces = ParseNamespaces(Environment.GetEnvironmentVariable("MEMSRV_ALLOWED_NAMESPACES"), options.AllowedNamespaces);
+        options.AgentKeysPath = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_AGENT_KEYS_PATH"), options.AgentKeysPath);
+        options.HttpUrl = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_HTTP_URL"), options.HttpUrl);
+        options.Transport = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_TRANSPORT"), options.Transport);
         return options;
     }
 

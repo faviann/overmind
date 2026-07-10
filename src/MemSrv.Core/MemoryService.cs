@@ -284,6 +284,19 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         await transaction.CommitAsync(cancellationToken);
     }
 
+    public async Task RetireAsync(Guid uuid, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(
+            "UPDATE memories SET status = 'retired', retired_at = now() WHERE uuid = @Uuid",
+            new { Uuid = uuid });
+
+        if (affected == 0)
+        {
+            throw new InvalidOperationException($"Memory '{uuid}' was not found.");
+        }
+    }
+
     public async Task<MemoryRecord> ShowAsync(Guid uuid)
     {
         await using var connection = await OpenAsync();

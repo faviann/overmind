@@ -334,6 +334,28 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.Contains("migrations applied", result.Stdout);
     }
 
+    [Fact]
+    public async Task MemCtlRetireFlipsStatusKeepsRowAndLeavesRetrieval()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", "session-retire");
+        var term = $"retire-marker-{Guid.NewGuid():N}";
+        var proposed = await service.ProposeMemoryAsync(context, "memory-system", "fact", $"Stale fact {term}", "human", "test-source");
+        await service.ApproveAsync(proposed.Data.Uuid, "test-operator");
+
+        var retire = await RunMemCtlForResultAsync("retire", proposed.Data.Uuid.ToString());
+        Assert.True(retire.ExitCode == 0, $"retire failed: {retire.Stderr}");
+        Assert.Contains($"retired {proposed.Data.Uuid}", retire.Stdout, StringComparison.Ordinal);
+
+        var show = await RunMemCtlForResultAsync("show", proposed.Data.Uuid.ToString());
+        Assert.Equal(0, show.ExitCode);
+        Assert.Contains("shared/retired", show.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("retired=<none>", show.Stdout, StringComparison.Ordinal);
+
+        var afterRetire = await service.SearchMemoryAsync(context, term);
+        Assert.DoesNotContain(afterRetire.Data, result => result.Uuid == proposed.Data.Uuid);
+    }
+
     private MemoryService Service() =>
         new(RuntimeConnection, new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
 

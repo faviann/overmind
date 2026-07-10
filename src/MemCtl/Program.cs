@@ -41,6 +41,11 @@ try
             await RejectAsync(options, Guid.Parse(args[1]), RequireOption(args, "--by"), RequireOption(args, "--reason"));
             return 0;
 
+        case "retire":
+            RequireArgs(args, 2);
+            await RetireAsync(options, Guid.Parse(args[1]));
+            return 0;
+
         case "trace":
             RequireArgs(args, 2);
             await TraceAsync(options, args[1]);
@@ -101,6 +106,7 @@ static async Task ShowAsync(MemSrvOptions options, Guid uuid)
     Console.WriteLine($"{row.Uuid} {row.Namespace} {row.Type} {row.Visibility}/{row.Status} tier={row.Tier} v{row.Version}");
     Console.WriteLine($"source={row.SourceType}:{row.SourceId ?? "<none>"} agent={row.AgentId} session={row.SessionId ?? "<none>"}");
     Console.WriteLine($"created={row.CreatedAt:O} approved_by={row.ApprovedBy ?? "<none>"} approved_at={row.ApprovedAt?.ToString("O") ?? "<none>"}");
+    Console.WriteLine($"retired={row.RetiredAt?.ToString("O") ?? "<none>"}");
     if (row.Supersedes.HasValue)
     {
         Console.WriteLine($"supersedes={row.Supersedes}");
@@ -125,6 +131,12 @@ static async Task RejectAsync(MemSrvOptions options, Guid uuid, string by, strin
 {
     await Service(options).RejectAsync(uuid, by, reason);
     Console.WriteLine($"rejected {uuid} by {by}");
+}
+
+static async Task RetireAsync(MemSrvOptions options, Guid uuid)
+{
+    await Service(options).RetireAsync(uuid);
+    Console.WriteLine($"retired {uuid}");
 }
 
 static async Task TraceAsync(MemSrvOptions options, string sessionId)
@@ -169,5 +181,6 @@ static void Usage()
     Console.Error.WriteLine("memctl show <uuid>");
     Console.Error.WriteLine("memctl approve <uuid> --by name");
     Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
+    Console.Error.WriteLine("memctl retire <uuid>");
     Console.Error.WriteLine("memctl trace <session_id>");
 }

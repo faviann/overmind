@@ -1,5 +1,41 @@
 # Decisions
 
+## 2026-07-10 — log_trace session selection (#17; amends Session 2 decision)
+
+Supersedes the Session 2 line "`log_trace` keeps an explicit `session_id`
+override (imports)". Considered: optional-with-override (DES-002 as filed),
+capability-gated override, full removal. Chose **removal**:
+
+- **`session_id` is removed from the `log_trace` input schema.** Session
+  identity joins `agent_id` and namespace under the existing rule: server-
+  derived, never trusted from tool arguments. Rationale: an optional override
+  doesn't fix fragmentation for existing clients (they all send `session_id`
+  because it was required — explicit-wins means they keep splitting their runs),
+  and it lets any agent write events into any session in its namespace,
+  polluting the session joins the provenance questions depend on. Removal makes
+  fragmentation unexpressible rather than merely defaulted away.
+- **Compatibility: a caller-supplied `session_id` is ignored** (SDK drops
+  unmatched arguments; no custom validation). Every legitimate current caller
+  invented its session id arbitrarily, so ignoring converges unmodified clients
+  onto correct joinable behavior. The response makes the substitution
+  observable rather than silent.
+- **`log_trace` returns `{trace_uuid, session_id}`** — the server-derived
+  session is echoed so agents can reference their own run (handoffs) and
+  legacy callers can see what session their event actually landed in.
+- **stdio default: unique per process.** When `MEMSRV_SESSION_ID` is unset,
+  generate a fresh id at startup (was the constant `"local-session"`, which
+  collapsed all unconfigured runs into one unbounded session). The env var
+  stays as the explicit pin — over stdio the process launcher is the trusted
+  identity source, same as for `agent_id`. HTTP behavior unchanged: transport
+  session, fail loudly if `Mcp-Session-Id` is absent.
+- **Imports get no agent-tool path.** Preserving an external session identity
+  is operator tooling (precedent: memctl writes synthetic `review:<uuid>`
+  sessions without touching `log_trace`), to be designed when #15 maps
+  conversation capture. Evidence door: a real importer needing MCP-level
+  session override is the trigger to revisit a capability-gated parameter.
+- **Ordering: lands before the v1.0.0 tag** (Slice 8, #10) — pre-1.0 with only
+  first-party clients is the cheap moment to break the tool contract.
+
 ## 2026-07-10 — memctl audit commands (Slice 5, #5)
 
 - `retire <uuid>` is a bare status flip (`status='retired'`, sets `retired_at`) —

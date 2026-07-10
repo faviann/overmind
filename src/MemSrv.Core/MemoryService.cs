@@ -260,6 +260,77 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         await transaction.CommitAsync(cancellationToken);
     }
 
+    public async Task<Guid> ApproveAmendmentAsync(
+        Guid proposalUuid,
+        string approvedBy,
+        string amendedContent,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(amendedContent))
+        {
+            throw new ArgumentException("Amended content must not be empty.", nameof(amendedContent));
+        }
+
+        neverStore.AssertAllowed(amendedContent);
+        var reviewer = NormalizeReviewerIdentity(approvedBy);
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var proposal = await connection.QuerySingleAsync<MemoryRow>(
+            """
+            UPDATE memories
+            SET status = 'superseded'
+            WHERE uuid = @Uuid AND visibility = 'shared' AND status = 'proposed'
+            RETURNING uuid, namespace, type, visibility, status, tier, content, source_type AS SourceType,
+                      source_id AS SourceId, agent_id AS AgentId, session_id AS SessionId, version,
+                      supersedes, created_at AS CreatedAt, approved_by AS ApprovedBy,
+                      approved_at AS ApprovedAt, retired_at AS RetiredAt,
+                      content_hash AS ContentHash, metadata::text AS MetadataJson
+            """,
+            new { Uuid = proposalUuid },
+            transaction);
+
+        var approvedUuid = await connection.QuerySingleAsync<Guid>(
+            """
+            INSERT INTO memories (
+                namespace, type, visibility, status, tier, content, content_hash, metadata,
+                source_type, source_id, agent_id, session_id, version, supersedes, approved_by, approved_at)
+            VALUES (
+                @Namespace, @Type, 'shared', 'approved', @Tier, @Content, @ContentHash, CAST(@MetadataJson AS jsonb),
+                @SourceType, @SourceId, @AgentId, @SessionId, @Version, @Supersedes, @ApprovedBy, now())
+            RETURNING uuid
+            """,
+            new
+            {
+                proposal.Namespace,
+                proposal.Type,
+                proposal.Tier,
+                Content = amendedContent,
+                ContentHash = ComputeContentHash(amendedContent),
+                proposal.MetadataJson,
+                proposal.SourceType,
+                proposal.SourceId,
+                proposal.AgentId,
+                proposal.SessionId,
+                Version = proposal.Version + 1,
+                Supersedes = proposalUuid,
+                ApprovedBy = reviewer
+            },
+            transaction);
+
+        await InsertTraceRawAsync(
+            reviewer,
+            proposal.Namespace,
+            ReviewSessionId(proposalUuid),
+            "approval",
+            new { reviewer, amended = true },
+            ReviewRefs(proposal, approvedUuid),
+            cancellationToken,
+            connection,
+            transaction);
+        await transaction.CommitAsync(cancellationToken);
+        return approvedUuid;
+    }
+
     public async Task RejectAsync(Guid uuid, string rejectedBy, string reason, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(reason))
@@ -730,6 +801,13 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             refs.Add(row.Uuid);
         }
 
+        return refs.ToArray();
+    }
+
+    private static Guid[] ReviewRefs(MemoryRow proposal, Guid approvedUuid)
+    {
+        var refs = ReviewRefs(proposal, includeApprovedMemory: false).ToList();
+        refs.Add(approvedUuid);
         return refs.ToArray();
     }
 

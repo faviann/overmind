@@ -182,6 +182,91 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MemCtlApproveWithContentFileCreatesApprovedAmendment()
+    {
+        var service = Service();
+        var proposer = new MemoryContext("agent-a", "memory-system", "session-amendment-source");
+        var proposed = await service.ProposeMemoryAsync(
+            proposer,
+            "memory-system",
+            "decision",
+            "Keep the original proposal content",
+            "human",
+            "test-source");
+        var contentFile = Path.GetTempFileName();
+
+        try
+        {
+            await File.WriteAllTextAsync(contentFile, "Use the amended approved content");
+
+            var approval = await RunMemCtlForResultAsync(
+                "approve", proposed.Data.Uuid.ToString(), "--by", "reviewer-three", "--content-file", contentFile);
+
+            Assert.Equal(0, approval.ExitCode);
+            var approvedUuid = Guid.Parse(approval.Stdout.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1]);
+
+            var original = await RunMemCtlForResultAsync("show", proposed.Data.Uuid.ToString());
+            Assert.Contains("shared/superseded", original.Stdout, StringComparison.Ordinal);
+            Assert.Contains($"superseded_by={approvedUuid}", original.Stdout, StringComparison.Ordinal);
+            Assert.Contains("Keep the original proposal content", original.Stdout, StringComparison.Ordinal);
+
+            var amended = await RunMemCtlForResultAsync("show", approvedUuid.ToString());
+            Assert.Contains("shared/approved", amended.Stdout, StringComparison.Ordinal);
+            Assert.Contains("v2", amended.Stdout, StringComparison.Ordinal);
+            Assert.Contains($"supersedes={proposed.Data.Uuid}", amended.Stdout, StringComparison.Ordinal);
+            Assert.Contains("Use the amended approved content", amended.Stdout, StringComparison.Ordinal);
+
+            var trace = await RunMemCtlForResultAsync("trace", $"review:{proposed.Data.Uuid}");
+            Assert.Contains("agent=human:reviewer-three", trace.Stdout, StringComparison.Ordinal);
+            Assert.Contains("\"amended\": true", trace.Stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(contentFile);
+        }
+    }
+
+    [Fact]
+    public async Task MemCtlApproveWithEditorCreatesApprovedAmendment()
+    {
+        var service = Service();
+        var proposer = new MemoryContext("agent-a", "memory-system", "session-editor-source");
+        var proposed = await service.ProposeMemoryAsync(
+            proposer,
+            "memory-system",
+            "fact",
+            "Editor receives this proposal text",
+            "human",
+            "test-source");
+        var editor = Path.GetTempFileName();
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                editor,
+                "#!/bin/sh\ngrep -q 'Editor receives this proposal text' \"$1\" || exit 42\nprintf 'Editor saved amended text' > \"$1\"\n");
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(editor, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+
+            var approval = await RunMemCtlForResultAsync(
+                new Dictionary<string, string> { ["EDITOR"] = editor },
+                "approve", proposed.Data.Uuid.ToString(), "--by", "reviewer-four", "--edit");
+
+            Assert.Equal(0, approval.ExitCode);
+            var approvedUuid = Guid.Parse(approval.Stdout.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1]);
+            var amended = await RunMemCtlForResultAsync("show", approvedUuid.ToString());
+            Assert.Contains("Editor saved amended text", amended.Stdout, StringComparison.Ordinal);
+            Assert.Contains($"supersedes={proposed.Data.Uuid}", amended.Stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(editor);
+        }
+    }
+
+    [Fact]
     public async Task RejectionUsesSyntheticSessionAndReviewerIdentity()
     {
         var service = Service();

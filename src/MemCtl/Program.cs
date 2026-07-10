@@ -51,6 +51,11 @@ try
             await WhyAsync(options, Guid.Parse(args[1]));
             return 0;
 
+        case "consumed":
+            RequireArgs(args, 2);
+            await ConsumedAsync(options, args[1]);
+            return 0;
+
         case "trace":
             RequireArgs(args, 2);
             await TraceAsync(options, args[1]);
@@ -163,6 +168,15 @@ static async Task WhyAsync(MemSrvOptions options, Guid uuid)
     }
 }
 
+static async Task ConsumedAsync(MemSrvOptions options, string sessionId)
+{
+    var entries = await Service(options).ConsumedAsync(sessionId);
+    foreach (var entry in entries)
+    {
+        Console.WriteLine($"{entry.Ts:O} {entry.MemoryUuid} type={entry.Type} source={entry.SourceType}:{entry.SourceId ?? "<none>"}");
+    }
+}
+
 static async Task TraceAsync(MemSrvOptions options, string sessionId)
 {
     var rows = await Service(options).TraceAsync(sessionId);
@@ -207,5 +221,6 @@ static void Usage()
     Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
     Console.Error.WriteLine("memctl retire <uuid>");
     Console.Error.WriteLine("memctl why <uuid>");
+    Console.Error.WriteLine("memctl consumed <session_id>");
     Console.Error.WriteLine("memctl trace <session_id>");
 }

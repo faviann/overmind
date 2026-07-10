@@ -324,6 +324,24 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         return ToRecord(row) with { SupersededBy = supersededBy };
     }
 
+    public async Task<IReadOnlyList<ConsumedEntry>> ConsumedAsync(string sessionId)
+    {
+        await using var connection = await OpenAsync();
+        var rows = await connection.QueryAsync<ConsumedRow>(
+            """
+            SELECT t.ts AS Ts, m.uuid AS MemoryUuid, m.type AS Type,
+                   m.source_type AS SourceType, m.source_id AS SourceId
+            FROM traces t
+            JOIN memories m ON m.uuid = ANY(t.refs)
+            WHERE t.session_id = @SessionId AND t.event_type = 'memory_consumed'
+            ORDER BY t.ts, m.uuid
+            """,
+            new { SessionId = sessionId });
+        return rows
+            .Select(row => new ConsumedEntry(row.Ts, row.MemoryUuid, row.Type, row.SourceType, row.SourceId))
+            .ToArray();
+    }
+
     public async Task<IReadOnlyList<WhyStep>> WhyAsync(Guid uuid)
     {
         await using var connection = await OpenAsync();
@@ -696,6 +714,15 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         public DateTimeOffset CreatedAt { get; set; }
         public int Rank { get; set; }
         public double Score { get; set; }
+    }
+
+    private sealed class ConsumedRow
+    {
+        public DateTimeOffset Ts { get; set; }
+        public Guid MemoryUuid { get; set; }
+        public string Type { get; set; } = "";
+        public string SourceType { get; set; } = "";
+        public string? SourceId { get; set; }
     }
 
     private sealed class MemoryRow

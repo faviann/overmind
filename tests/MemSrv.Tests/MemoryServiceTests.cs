@@ -383,6 +383,23 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.Contains(firstMarker, why.Stdout, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task MemCtlConsumedListsReadMemoriesWithResolvableSource()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-consumed-{Guid.NewGuid():N}");
+        var sourceTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = "consumed source" });
+        var proposed = await service.ProposeMemoryAsync(context, "memory-system", "fact", "A read fact", "trace", sourceTrace.Data.TraceUuid.ToString());
+        await service.ApproveAsync(proposed.Data.Uuid, "test-operator");
+        await service.GetByIdAsync(context, proposed.Data.Uuid);
+
+        var consumed = await RunMemCtlForResultAsync("consumed", context.SessionId);
+
+        Assert.True(consumed.ExitCode == 0, $"consumed failed: {consumed.Stderr}");
+        Assert.Contains(proposed.Data.Uuid.ToString(), consumed.Stdout, StringComparison.Ordinal);
+        Assert.Contains(sourceTrace.Data.TraceUuid.ToString(), consumed.Stdout, StringComparison.Ordinal);
+    }
+
     private MemoryService Service() =>
         new(RuntimeConnection, new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
 

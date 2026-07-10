@@ -49,6 +49,13 @@ public sealed record MemoryRecord(
     string ContentHash,
     JsonElement Metadata);
 
+public sealed record ConsumedEntry(
+    DateTimeOffset Ts,
+    Guid MemoryUuid,
+    string Type,
+    string SourceType,
+    string? SourceId);
+
 public sealed record WhyStep(
     Guid Uuid,
     int Version,

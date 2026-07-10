@@ -20,8 +20,10 @@ EXPOSE 8080
 
 # Npgsql probes GSSAPI at connect time; without this it logs a load error.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+ && apt-get install -y --no-install-recommends libgssapi-krb5-2 nano \
  && rm -rf /var/lib/apt/lists/*
+
+ENV EDITOR=nano
 
 COPY --from=build /out/server server/
 COPY --from=build /out/memctl memctl/

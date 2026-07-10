@@ -33,7 +33,12 @@ try
 
         case "approve":
             RequireArgs(args, 2);
-            await ApproveAsync(options, Guid.Parse(args[1]), RequireOption(args, "--by"));
+            await ApproveAsync(
+                options,
+                Guid.Parse(args[1]),
+                RequireOption(args, "--by"),
+                HasOption(args, "--edit"),
+                FindOption(args, "--content-file"));
             return 0;
 
         case "reject":
@@ -131,10 +136,64 @@ static async Task ShowAsync(MemSrvOptions options, Guid uuid)
     Console.WriteLine(row.Content);
 }
 
-static async Task ApproveAsync(MemSrvOptions options, Guid uuid, string by)
+static async Task ApproveAsync(MemSrvOptions options, Guid uuid, string by, bool edit, string? contentFile)
 {
-    await Service(options).ApproveAsync(uuid, by);
-    Console.WriteLine($"approved {uuid} by {by}");
+    if (edit && contentFile is not null)
+    {
+        throw new ArgumentException("--edit and --content-file cannot be used together.");
+    }
+
+    if (!edit && contentFile is null)
+    {
+        await Service(options).ApproveAsync(uuid, by);
+        Console.WriteLine($"approved {uuid} by {by}");
+        return;
+    }
+
+    var amendedContent = contentFile is not null
+        ? await File.ReadAllTextAsync(contentFile)
+        : await EditProposalAsync(options, uuid);
+    var approvedUuid = await Service(options).ApproveAmendmentAsync(uuid, by, amendedContent);
+    Console.WriteLine($"approved {approvedUuid} by {by} superseding {uuid}");
+}
+
+static async Task<string> EditProposalAsync(MemSrvOptions options, Guid uuid)
+{
+    var proposal = await Service(options).ShowAsync(uuid);
+    if (proposal.Visibility != "shared" || proposal.Status != "proposed")
+    {
+        throw new InvalidOperationException($"Memory '{uuid}' is not a pending shared proposal.");
+    }
+
+    var path = Path.GetTempFileName();
+    try
+    {
+        await File.WriteAllTextAsync(path, proposal.Content);
+        var editor = Environment.GetEnvironmentVariable("EDITOR");
+        if (string.IsNullOrWhiteSpace(editor))
+        {
+            editor = "nano";
+        }
+
+        var startInfo = new System.Diagnostics.ProcessStartInfo(editor)
+        {
+            UseShellExecute = false
+        };
+        startInfo.ArgumentList.Add(path);
+        using var process = System.Diagnostics.Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Failed to start editor '{editor}'.");
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Editor '{editor}' exited with code {process.ExitCode}.");
+        }
+
+        return await File.ReadAllTextAsync(path);
+    }
+    finally
+    {
+        File.Delete(path);
+    }
 }
 
 static async Task RejectAsync(MemSrvOptions options, Guid uuid, string by, string reason)
@@ -182,7 +241,8 @@ static async Task TraceAsync(MemSrvOptions options, string sessionId)
     var rows = await Service(options).TraceAsync(sessionId);
     foreach (var row in rows)
     {
-        Console.WriteLine($"{row.Ts:O} {row.EventType} {row.TraceUuid} agent={row.AgentId} ns={row.Namespace}");
+        var refs = row.Refs is { Length: > 0 } ? string.Join(',', row.Refs) : "<none>";
+        Console.WriteLine($"{row.Ts:O} {row.EventType} {row.TraceUuid} agent={row.AgentId} ns={row.Namespace} refs={refs}");
         Console.WriteLine(row.Content);
     }
 }
@@ -199,6 +259,8 @@ static string? FindOption(string[] args, string name)
 
     return null;
 }
+
+static bool HasOption(string[] args, string name) => args.Contains(name, StringComparer.Ordinal);
 
 static string RequireOption(string[] args, string name) =>
     FindOption(args, name) ?? throw new ArgumentException($"{name} is required.");
@@ -217,7 +279,7 @@ static void Usage()
     Console.Error.WriteLine("memctl verify-schema");
     Console.Error.WriteLine("memctl pending [namespace]");
     Console.Error.WriteLine("memctl show <uuid>");
-    Console.Error.WriteLine("memctl approve <uuid> --by name");
+    Console.Error.WriteLine("memctl approve <uuid> --by name [--edit | --content-file path]");
     Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
     Console.Error.WriteLine("memctl retire <uuid>");
     Console.Error.WriteLine("memctl why <uuid>");

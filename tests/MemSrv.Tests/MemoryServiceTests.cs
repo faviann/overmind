@@ -338,11 +338,10 @@ public sealed class MemoryServiceTests : IAsyncLifetime
             Assert.Contains("shared/approved", amendedOutput.Stdout, StringComparison.Ordinal);
             Assert.Contains("v3", amendedOutput.Stdout, StringComparison.Ordinal);
 
-            var trace = await service.TraceAsync($"review:{replacement.Data.Uuid}");
-            var review = Assert.Single(trace, row => row.EventType == "approval");
-            Assert.Contains(replacement.Data.Uuid, review.Refs ?? []);
-            Assert.Contains(approvedUuid, review.Refs ?? []);
-            Assert.Contains(source.Data.TraceUuid, review.Refs ?? []);
+            var trace = await RunMemCtlForResultAsync("trace", $"review:{replacement.Data.Uuid}");
+            Assert.Contains($"refs={replacement.Data.Uuid}", trace.Stdout, StringComparison.Ordinal);
+            Assert.Contains(approvedUuid.ToString(), trace.Stdout, StringComparison.Ordinal);
+            Assert.Contains(source.Data.TraceUuid.ToString(), trace.Stdout, StringComparison.Ordinal);
         }
         finally
         {

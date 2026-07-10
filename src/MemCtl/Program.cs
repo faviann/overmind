@@ -241,7 +241,8 @@ static async Task TraceAsync(MemSrvOptions options, string sessionId)
     var rows = await Service(options).TraceAsync(sessionId);
     foreach (var row in rows)
     {
-        Console.WriteLine($"{row.Ts:O} {row.EventType} {row.TraceUuid} agent={row.AgentId} ns={row.Namespace}");
+        var refs = row.Refs is { Length: > 0 } ? string.Join(',', row.Refs) : "<none>";
+        Console.WriteLine($"{row.Ts:O} {row.EventType} {row.TraceUuid} agent={row.AgentId} ns={row.Namespace} refs={refs}");
         Console.WriteLine(row.Content);
     }
 }

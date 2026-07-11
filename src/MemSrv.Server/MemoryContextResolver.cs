@@ -24,7 +24,8 @@ public sealed class MemoryContextResolver(IHttpContextAccessor accessor)
         ClaimsPrincipal user = http.User;
         string? agentId = user.FindFirstValue(BearerKeyAuthenticationHandler.AgentIdClaim);
         string? defaultNamespace = user.FindFirstValue(BearerKeyAuthenticationHandler.DefaultNamespaceClaim);
-        if (agentId is null || defaultNamespace is null)
+        // Empty, not just null: an identity-less principal must never reach a tool.
+        if (string.IsNullOrEmpty(agentId) || string.IsNullOrEmpty(defaultNamespace))
         {
             throw new InvalidOperationException("Request is not authenticated with a bearer-key principal.");
         }

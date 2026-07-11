@@ -51,6 +51,11 @@ try
             await RetireAsync(options, Guid.Parse(args[1]));
             return 0;
 
+        case "release":
+            RequireArgs(args, 2);
+            await ReleaseAsync(options, Guid.Parse(args[1]));
+            return 0;
+
         case "why":
             RequireArgs(args, 2);
             await WhyAsync(options, Guid.Parse(args[1]));
@@ -208,6 +213,12 @@ static async Task RetireAsync(MemSrvOptions options, Guid uuid)
     Console.WriteLine($"retired {uuid}");
 }
 
+static async Task ReleaseAsync(MemSrvOptions options, Guid uuid)
+{
+    var row = await Service(options).ReleaseWorkstreamAsync(uuid);
+    Console.WriteLine($"released {row.Uuid} ('{row.Title}') back to open");
+}
+
 static async Task WhyAsync(MemSrvOptions options, Guid uuid)
 {
     var steps = await Service(options).WhyAsync(uuid);
@@ -282,6 +293,7 @@ static void Usage()
     Console.Error.WriteLine("memctl approve <uuid> --by name [--edit | --content-file path]");
     Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
     Console.Error.WriteLine("memctl retire <uuid>");
+    Console.Error.WriteLine("memctl release <uuid>");
     Console.Error.WriteLine("memctl why <uuid>");
     Console.Error.WriteLine("memctl consumed <session_id>");
     Console.Error.WriteLine("memctl trace <session_id>");

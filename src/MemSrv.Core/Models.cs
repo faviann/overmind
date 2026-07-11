@@ -49,6 +49,19 @@ public sealed record MemoryRecord(
     string ContentHash,
     JsonElement Metadata);
 
+public sealed record WorkstreamRecord(
+    Guid Uuid,
+    string Namespace,
+    string Title,
+    string Status,
+    string? OwnerAgent,
+    string? SessionId,
+    string? Notes,
+    Guid[]? Refs,
+    DateTimeOffset UpdatedAt);
+
+public sealed record WorkstreamCheckoutResult(WorkstreamRecord Workstream, bool Created);
+
 public sealed record ConsumedEntry(
     DateTimeOffset Ts,
     Guid MemoryUuid,

@@ -52,6 +52,16 @@ public sealed class BearerKeyAuthenticationHandler : AuthenticationHandler<Authe
             return Task.FromResult(AuthenticateResult.Fail("Unknown bearer key."));
         }
 
+        // Defense in depth: the loader rejects malformed entries, but the store
+        // can also be constructed directly, so never mint an identity-less
+        // principal (which would authenticate into agent_id "" / namespace "").
+        string? invalid = AgentKeyStore.ValidationError(
+            agentKey.Key, agentKey.AgentId, agentKey.DefaultNamespace, agentKey.AllowedNamespaces);
+        if (invalid is not null)
+        {
+            return Task.FromResult(AuthenticateResult.Fail($"Bearer key is not usable: {invalid}."));
+        }
+
         var claims = new List<Claim>
         {
             new(AgentIdClaim, agentKey.AgentId),

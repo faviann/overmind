@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace MemSrv.Server;
 
@@ -17,6 +18,12 @@ public static class HttpServerHost
     public static WebApplication Build(MemSrvOptions options, AgentKeyStore keyStore)
     {
         var builder = WebApplication.CreateBuilder();
+
+        // AGENTS.md: never log to stdout. WebApplication's default console
+        // provider writes to stdout; keep every log line (Kestrel startup
+        // included) on stderr so stdout stays clean, matching the stdio host.
+        builder.Logging.ClearProviders();
+        builder.Logging.AddConsole(console => console.LogToStandardErrorThreshold = LogLevel.Trace);
 
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(keyStore);

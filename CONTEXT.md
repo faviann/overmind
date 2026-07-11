@@ -22,10 +22,12 @@ Calls naming a namespace explicitly are validated against the key's allowed
 list.
 
 **Trace session (`session_id`)** — the unit of replay: one contiguous agent
-run. Transport-derived: one MCP protocol session is one trace session, so
-server-side causal logging (e.g. `memory_consumed`) never depends on agent
-cooperation. `log_trace` may state an explicit session id (e.g. imports), but
-auto-logged events stay transport-scoped.
+run. Server-derived, never trusted from tool arguments (same rule as agent
+identity and namespace): the MCP protocol session over HTTP, process
+configuration or a generated per-process id over stdio. Every event from one
+run — agent-logged and server-logged alike — shares one session. Preserving an
+external or historical session identity (imports) is an operator-path concern,
+not an agent-tool capability.
 
 **Review session** — a synthetic session (`review:<proposal_uuid>`) carrying an
 approval/rejection event. Its actor is the reviewer (`human:<name>`), never the

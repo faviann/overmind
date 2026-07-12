@@ -1,5 +1,17 @@
 # Decisions
 
+## 2026-07-12 — tool-response JSON uses camelCase (#31)
+
+- JSON tool-response properties use the MCP SDK's camelCase convention; for
+  example, `log_trace` returns `{traceUuid, sessionId}`. Conceptual and
+  storage-layer names remain snake_case, including PostgreSQL columns such as
+  `trace_uuid`.
+- Chose the existing SDK default over switching serializer policy before
+  v1.0.0. A switch would require custom configuration across every tool
+  response and break existing clients even though the full surface and test
+  suite already agree on camelCase, solely to resemble storage names clients
+  never see.
+
 ## 2026-07-10 — retirement is provenance-carrying (#18; supersedes Slice 5 retirement decisions)
 
 - Retirement is a distinct operator action, not a proposal review. It appends a
@@ -37,7 +49,7 @@ capability-gated override, full removal. Chose **removal**:
   invented its session id arbitrarily, so ignoring converges unmodified clients
   onto correct joinable behavior. The response makes the substitution
   observable rather than silent.
-- **`log_trace` returns `{trace_uuid, session_id}`** — the server-derived
+- **`log_trace` returns `{traceUuid, sessionId}`** — the server-derived
   session is echoed so agents can reference their own run (handoffs) and
   legacy callers can see what session their event actually landed in.
 - **stdio default: unique per process.** When `MEMSRV_SESSION_ID` is unset,

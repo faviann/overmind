@@ -16,7 +16,7 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > Postgres major pinned to **18** everywhere (was "15+"). Migrations no longer create the `memsrv` role — provisioning owns roles (Ansible in prod, `docker/postgres-init/` in dev/CI). Image contract: `ghcr.io/faviann/overmind:<version>`, immutable tags. Service runtime contract (HTTP port/health) explicitly deferred to Session 2.
 
 > **v1.3 changelog (2026-07-10 — `log_trace` session selection, issue #17, see `docs/decisions.md`):**
-> `session_id` removed from the `log_trace` input schema; session identity is always server-derived (Mcp-Session-Id over HTTP; `MEMSRV_SESSION_ID` or a generated per-process id over stdio). A caller-supplied `session_id` is ignored; the response now returns `{trace_uuid, session_id}`. Import-time session preservation is an operator-path feature deferred to the conversation-capture wayfinder (#15). Must land before the v1.0.0 tag.
+> `session_id` removed from the `log_trace` input schema; session identity is always server-derived (Mcp-Session-Id over HTTP; `MEMSRV_SESSION_ID` or a generated per-process id over stdio). A caller-supplied `session_id` is ignored; the response now returns `{traceUuid, sessionId}`. Import-time session preservation is an operator-path feature deferred to the conversation-capture wayfinder (#15). Must land before the v1.0.0 tag.
 
 > **v1.4 changelog (2026-07-10 — provenance-carrying retirement, issue #18):**
 > Retirement joins the trace taxonomy as a distinct operator action. `memctl retire` now requires operator identity and a reason, and atomically records the `approved` → `retired` transition with its trace event. See §6c.
@@ -278,12 +278,17 @@ Rules:
 
 Every tool response is JSON and **ends with a `next` field**: a one-line hint about the most likely follow-up call (self-guiding responses). Examples given per tool.
 
+**Wire convention:** JSON tool-response property names use camelCase, following
+the MCP SDK convention. Snake_case names elsewhere in this document are
+conceptual or storage-layer names; PostgreSQL columns such as `trace_uuid` are
+genuinely snake_case and remain so.
+
 **Core (must ship):**
 
-1. **`log_trace`** `{event_type, content, refs?, namespace?}` → `{trace_uuid, session_id}`
+1. **`log_trace`** `{event_type, content, refs?, namespace?}` → `{traceUuid, sessionId}`
    `next`: "If this event contains a durable decision or fact, call propose_memory referencing this trace_uuid as source_id."
    **(v1.3)** The session is server-derived, never a tool argument; a caller-supplied `session_id` is ignored and the effective session is echoed in the response.
-2. **`search_memory`** `{query, namespaces?, types?, limit?}` → `{results: [{uuid, type, tier, status, preview, source_type, source_id, version, lane_scores, fused_score}], next}`
+2. **`search_memory`** `{query, namespaces?, types?, limit?}` → `{results: [{uuid, type, tier, status, preview, sourceType, sourceId, version, laneScores, fusedScore}], next}`
    `next`: "Call get_by_id with a uuid to read full content. Nothing relevant? Consider propose_memory to fill the gap."
 3. **`get_by_id`** `{uuid}` → full record incl. all provenance columns + version chain (`supersedes` / superseded-by).
    `next`: "This memory derives from source_id=<...>; retrieve_trace on it for full context." (Server logs `memory_consumed`.)

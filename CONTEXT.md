@@ -37,6 +37,11 @@ proposing agent. No anonymous reviews.
 retrieved by default. Becomes shared knowledge only through operator approval
 (approve / edit-then-approve / reject), never through an agent-facing tool.
 
+**Retirement** — an operator decision that withdraws a memory from normal
+retrieval without deleting it. The memory and the provenance of its retirement
+remain available for audit.
+_Avoid_: Deletion, removal
+
 **Private note** — a memory with `visibility='private'`: direct-write,
 auto-approved, only ever retrieved by its owning agent. Still traced and
 provenance-carrying.

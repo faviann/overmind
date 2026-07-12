@@ -1,4 +1,4 @@
-# Memory Server — Phase 1 Build Spec (v1.1)
+# Memory Server — Phase 1 Build Spec (v1.4)
 
 This is a build spec for a Claude Code session. It is deliberately narrow. The **Do Not Build** section is as binding as the requirements. The goal is a working v0 spine in 1–2 sessions that the homelab project can consume immediately.
 
@@ -17,6 +17,9 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 
 > **v1.3 changelog (2026-07-10 — `log_trace` session selection, issue #17, see `docs/decisions.md`):**
 > `session_id` removed from the `log_trace` input schema; session identity is always server-derived (Mcp-Session-Id over HTTP; `MEMSRV_SESSION_ID` or a generated per-process id over stdio). A caller-supplied `session_id` is ignored; the response now returns `{trace_uuid, session_id}`. Import-time session preservation is an operator-path feature deferred to the conversation-capture wayfinder (#15). Must land before the v1.0.0 tag.
+
+> **v1.4 changelog (2026-07-10 — provenance-carrying retirement, issue #18):**
+> Retirement joins the trace taxonomy as a distinct operator action. `memctl retire` now requires operator identity and a reason, and atomically records the `approved` → `retired` transition with its trace event. See §6c.
 
 Companion doc: `ansible-integration-checklist.md` (first consumer wiring).
 Background: the project handoff (`agent-memory-handoff-v4.md`) governs intent; where this spec is silent, the handoff decides.
@@ -191,7 +194,7 @@ GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO memsrv;
 
 ### Trace event taxonomy (event_type)
 
-`user_msg`, `assistant_msg`, `tool_call`, `tool_result`, `memory_consumed`, `memory_proposed`, `memory_written`, `approval`, `rejection`, `handoff`, `workstream_checkout`, `workstream_checkin`, `compaction_boundary`, `note`.
+`user_msg`, `assistant_msg`, `tool_call`, `tool_result`, `memory_consumed`, `memory_proposed`, `memory_written`, `approval`, `rejection`, `retirement`, `handoff`, `workstream_checkout`, `workstream_checkin`, `compaction_boundary`, `note`.
 
 `event_type` is open text, not an enum — consumers may add types as they earn them. Pre-blessed additions (from the predecessor project's event contract): `error`, `command_run`, `file_observed`, `file_modified`.
 
@@ -209,6 +212,7 @@ Normalization rule (Moraine-shaped): `tool_call` content is `{tool, params}`; `t
 - **Shared memories** (`visibility='shared'`): agents can only create them with `status='proposed'` via `propose_memory`. There is **no agent-facing approval tool.** Approval happens through `memctl approve <uuid>` (operator only). Approval/rejection writes an `approval`/`rejection` trace event **following the review event convention in §6b.**
 - **Edit-then-approve (v1.1):** `memctl approve <uuid> --edit` opens `$EDITOR` on the proposal content; the amended text becomes the approved memory. The proposal's original content is preserved (append-and-archive: the approved row is a new version superseding the proposal content, or the original is retained in `metadata.original_content` — implementer's choice, but the original must remain queryable). The approval trace event records `amended: true`. Rationale: the common real case is a proposal that is 90% right with wrong wording; reject-and-lose-it wastes the fact and the calibration signal.
 - **Supersession:** approving a memory whose `supersedes` is set flips the old row to `status='superseded'` (it is never deleted) and logs it.
+- **Retirement (v1.4):** an operator may retire an `approved` shared memory or private note through `memctl`; retirement is never deletion. The transition is provenance-carrying and follows §6c. Proposed, rejected, superseded, and already-retired memories cannot be retired.
 - **Never-store gate (v1.1 — split behavior):** every write path runs a denylist scan before insert — private keys, obvious password/token patterns, `.env`-style secrets (configurable regex list in `config/never_store.yaml`). Behavior differs by store:
   - **Memory writes (`propose_memory`, `save_note`): REJECT.** Return an error naming the rule; log a redacted `note` trace event that a write was blocked.
   - **Trace writes (`log_trace` and server-side auto-logging): REDACT in place.** Replace each matched span with `[REDACTED:<rule-name>]` and record the event. A tool result that happens to contain a token still describes something that happened; dropping the event silently would trade a secrets risk for an audit hole, and the acceptance tests are trace joins. Redaction happens *before* insert — it is write-time sanitization, not mutation of an append-only row.
@@ -238,6 +242,23 @@ The approval is itself a provenance-carrying event with its **own actor**. The s
 - `content`: minimal — `{reviewer, amended: bool, reason?}` (reason required on reject)
 
 This is a trace convention, not a review workflow product. A future review system can evolve it into richer authenticated review sessions while preserving the recorded reviewer, proposal, source, and result identifiers.
+
+## 6c. Retirement event convention (v1.4)
+
+Retirement withdraws a memory from normal retrieval without deleting it. Because this changes what the system presents as current knowledge, it is a provenance-carrying operator action, distinct from proposal review.
+
+`memctl retire <uuid> --by <name> --reason "..."` writes its trace event as:
+
+- `session_id`: synthetic — `retirement:<memory_uuid>`
+- `agent_id`: the operator identity; an unqualified `--by <name>` is normalized to `human:<name>` — **required** (no anonymous retirement)
+- `namespace`: the memory's namespace
+- `event_type`: `retirement`
+- `refs`: `[memory_uuid]`
+- `content`: `{operator, reason}` — `reason` is required and non-blank
+
+Only a memory currently in `status='approved'` is eligible, regardless of whether its visibility is shared or private. A missing uuid, any other source status, and a repeated retirement fail with a non-zero exit and a clear, distinct error; they do not change `retired_at` or append a trace event.
+
+The guarded `approved` → `retired` transition, `retired_at`, and trace append occur in one database transaction. Either all become visible or none do. Sessions group the action that occurred; `refs=[memory_uuid]` connects this action to the memory's history without turning one session into a lifetime event bucket.
 
 ## 7. Retrieval
 
@@ -281,9 +302,9 @@ Every tool response is JSON and **ends with a `next` field**: a one-line hint ab
 
 ## 9. Operator CLI (`memctl`)
 
-`memctl pending [ns]` · `memctl show <uuid>` · `memctl approve <uuid> --by <name> [--edit]` · `memctl reject <uuid> --by <name> --reason "..."` · `memctl retire <uuid>` · `memctl trace <session_id>` (chronological session replay) · `memctl why <uuid>` (memory → source trace chain) · `memctl consumed <session_id>` (what the agent read). Plain text output is fine.
+`memctl pending [ns]` · `memctl show <uuid>` · `memctl approve <uuid> --by <name> [--edit]` · `memctl reject <uuid> --by <name> --reason "..."` · `memctl retire <uuid> --by <name> --reason "..."` · `memctl trace <session_id>` (chronological session replay) · `memctl why <uuid>` (memory → source trace chain) · `memctl consumed <session_id>` (what the agent read). Plain text output is fine.
 
-v1.1 notes: `--by` is **required** on approve/reject (see §6b); `--edit` opens `$EDITOR` and preserves the original content (see §5).
+v1.1 notes: `--by` is **required** on approve/reject (see §6b); `--edit` opens `$EDITOR` and preserves the original content (see §5). v1.4: retirement requires `--by` and `--reason` and follows §6c.
 
 ## 10. Acceptance tests
 
@@ -294,7 +315,7 @@ Ship these as an executable test script against a seeded, disposable local `memo
 3. **"Adjudicate these two facts."** Given two uuids, show capture timestamps, sources, versions, and supersession chain side by side — including who approved each (from the review events), distinctly from who proposed each.
 4. **"Was this hallucinated?"** Given a session_id and a claim, show whether any consumed memory in that session contains it (FTS over the consumed set).
 
-Plus mechanical tests: UPDATE/DELETE on traces fails **both** via trigger and via the `memsrv` role's grants; private memories invisible to other agents; shared writes cannot be born approved; never-store gate **blocks** a seeded fake secret on the memory path and **redacts** it on the trace path (event recorded, secret absent); RRF returns per-lane scores; namespace isolation holds; **(v1.1)** every memory row has a valid `content_hash`; approval without `--by` fails; approval trace event carries `review:<uuid>` session and a reviewer agent_id distinct from the proposer; `--edit` approval preserves original content and marks `amended: true`.
+Plus mechanical tests: UPDATE/DELETE on traces fails **both** via trigger and via the `memsrv` role's grants; private memories invisible to other agents; shared writes cannot be born approved; never-store gate **blocks** a seeded fake secret on the memory path and **redacts** it on the trace path (event recorded, secret absent); RRF returns per-lane scores; namespace isolation holds; **(v1.1)** every memory row has a valid `content_hash`; approval without `--by` fails; approval trace event carries `review:<uuid>` session and a reviewer agent_id distinct from the proposer; `--edit` approval preserves original content and marks `amended: true`; **(v1.4)** successful retirement of approved shared and private memories records the normalized actor and reason, is replayable through `memctl trace retirement:<uuid>`, and exposes the status change and trace together; missing `--by`/`--reason`, a missing uuid, an invalid source status, and repeated retirement fail without changing the row or appending a retirement event.
 
 ## 11. Do Not Build (binding)
 

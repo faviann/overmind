@@ -431,9 +431,9 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
     /// <summary>
     /// Operator escape hatch (memctl release): flips a stale checked-out
     /// workstream back to open, clearing owner and session but keeping the
-    /// notes. Like memctl retire — and unlike the agent-facing checkin — it
-    /// writes no trace event: the taxonomy's workstream events describe agent
-    /// coordination, and only approve/reject carry the review-event convention.
+    /// notes. Unlike the agent-facing checkin, it writes no trace event: the
+    /// taxonomy's workstream events describe agent coordination, and the
+    /// binding spec defines no operator-release event convention.
     /// </summary>
     public async Task<WorkstreamRecord> ReleaseWorkstreamAsync(Guid uuid, CancellationToken cancellationToken = default)
     {

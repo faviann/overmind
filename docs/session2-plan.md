@@ -62,7 +62,8 @@ Against the existing `workstreams` table:
 Existing commands: `migrate, pending, show, approve, reject, trace`
 (`src/MemCtl/Program.cs`). Add:
 
-- `retire <uuid>`
+- `retire <uuid> --by <name> --reason "..."` (provenance-carrying operator
+  action per the binding spec §6c)
 - `why <uuid>` (memory → source trace chain)
 - `consumed <session_id>`
 - `approve --edit` ($EDITOR, default nano — add nano to the runtime image) and

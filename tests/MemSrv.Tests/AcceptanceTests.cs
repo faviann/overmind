@@ -51,13 +51,23 @@ public sealed class AcceptanceTests : HttpSeamTestBase
 
         // "Why did you say that?" — the consumed memory resolves to its source
         // trace, across the whole supersession chain, with full trace content.
-        var why = await RunMemCtlAsync("why", scenario.RevisedMemoryUuid.ToString());
-        Assert.Contains(scenario.RevisedMemoryUuid.ToString(), why, StringComparison.Ordinal);
-        Assert.Contains(scenario.RevisionTraceUuid.ToString(), why, StringComparison.Ordinal);
-        Assert.Contains(RevisionTraceText, why, StringComparison.Ordinal);
-        Assert.Contains(scenario.OriginalMemoryUuid.ToString(), why, StringComparison.Ordinal);
-        Assert.Contains(scenario.SourceTraceUuid.ToString(), why, StringComparison.Ordinal);
-        Assert.Contains(SourceTraceText, why, StringComparison.Ordinal);
+        var revisedWhy = await RunMemCtlAsync("why", scenario.RevisedMemoryUuid.ToString());
+        Assert.Contains(scenario.RevisedMemoryUuid.ToString(), revisedWhy, StringComparison.Ordinal);
+        Assert.Contains(scenario.RevisionTraceUuid.ToString(), revisedWhy, StringComparison.Ordinal);
+        Assert.Contains(RevisionTraceText, revisedWhy, StringComparison.Ordinal);
+        Assert.Contains(scenario.OriginalMemoryUuid.ToString(), revisedWhy, StringComparison.Ordinal);
+        Assert.Contains(scenario.SourceTraceUuid.ToString(), revisedWhy, StringComparison.Ordinal);
+        Assert.Contains(SourceTraceText, revisedWhy, StringComparison.Ordinal);
+
+        var siblingWhy = await RunMemCtlAsync("why", scenario.SiblingMemoryUuid.ToString());
+        Assert.Contains(scenario.SiblingMemoryUuid.ToString(), siblingWhy, StringComparison.Ordinal);
+        Assert.Contains(scenario.SourceTraceUuid.ToString(), siblingWhy, StringComparison.Ordinal);
+        Assert.Contains(SourceTraceText, siblingWhy, StringComparison.Ordinal);
+
+        var originalWhy = await RunMemCtlAsync("why", scenario.OriginalMemoryUuid.ToString());
+        Assert.Contains(scenario.OriginalMemoryUuid.ToString(), originalWhy, StringComparison.Ordinal);
+        Assert.Contains(scenario.SourceTraceUuid.ToString(), originalWhy, StringComparison.Ordinal);
+        Assert.Contains(SourceTraceText, originalWhy, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -231,7 +241,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         await using var client = await ConnectAsync(AgentAKey);
         var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = $"acceptance-appendonly-{Guid.NewGuid():N}",
+            ["session_id"] = client.SessionId,
             ["event_type"] = "note",
             ["content"] = new { text = "immutable once written" }
         });
@@ -449,11 +459,10 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     [Fact]
     public async Task ApprovalTraceFollowsReviewSessionConvention()
     {
-        var sourceSession = $"acceptance-review-src-{Guid.NewGuid():N}";
         await using var client = await ConnectAsync(AgentAKey);
         var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = sourceSession,
+            ["session_id"] = client.SessionId,
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = "evidence behind the proposal" }
         });
@@ -469,8 +478,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         Assert.Contains(" approval ", review, StringComparison.Ordinal);
         Assert.Contains("agent=human:casey", review, StringComparison.Ordinal);
         Assert.DoesNotContain("agent=agent-a", review);
-        Assert.Contains(uuid.ToString(), review, StringComparison.Ordinal);
-        Assert.Contains(sourceTraceUuid.ToString(), review, StringComparison.Ordinal);
+        Assert.Contains($"refs={uuid},{sourceTraceUuid},{uuid}", review, StringComparison.Ordinal);
         Assert.Contains("\"reviewer\": \"human:casey\"", review, StringComparison.Ordinal);
         Assert.Contains("\"amended\": false", review, StringComparison.Ordinal);
     }
@@ -517,6 +525,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
 
             // ...and the approval trace event records amended: true.
             var review = await RunMemCtlAsync("trace", $"review:{uuid}");
+            Assert.Contains($"refs={uuid},{approvedUuid}", review, StringComparison.Ordinal);
             Assert.Contains("\"amended\": true", review, StringComparison.Ordinal);
         }
         finally
@@ -546,12 +555,11 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     private async Task<ProvenanceScenario> SeedProvenanceScenarioAsync()
     {
         var marker = $"resonator{Guid.NewGuid():N}";
-        var sourceSession = $"acceptance-src-{marker}";
         await using var client = await ConnectAsync(AgentAKey);
 
         var sourceTrace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = sourceSession,
+            ["session_id"] = client.SessionId,
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = $"{SourceTraceText} {marker}" }
         });
@@ -563,7 +571,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
 
         var revisionTrace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = sourceSession,
+            ["session_id"] = client.SessionId,
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = $"{RevisionTraceText} {marker}" }
         });

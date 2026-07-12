@@ -18,7 +18,9 @@ namespace MemSrv.Tests;
 // MCP-over-HTTP, plus memctl run as a subprocess (the operator seam). Test
 // classes inherit this and assert through the public surface only: MCP tools
 // for agent actions, memctl for operator-visible state. No direct database
-// reads.
+// reads — with one sanctioned exception (docs/testing.md): mechanical tests
+// where the database mechanism itself (grants, triggers, content hashes) is
+// the spec'd behavior may connect directly.
 public abstract class HttpSeamTestBase : IAsyncLifetime
 {
     protected const string AdminConnection = "Host=127.0.0.1;Port=55432;Database=memory_test;Username=overmind;Password=overmind_dev";
@@ -89,6 +91,17 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     // reading the database directly.
     protected async Task<string> RunMemCtlAsync(params string[] args)
     {
+        var (exitCode, stdout, stderr) = await RunMemCtlForResultAsync(null, args);
+        Assert.True(exitCode == 0, $"memctl {string.Join(' ', args)} failed with exit {exitCode}. stdout={stdout} stderr={stderr}");
+        return stdout;
+    }
+
+    // The failure-tolerant core: returns the exit code and both streams so tests
+    // can assert on memctl refusals too; extraEnvironment lets a test inject
+    // process environment such as a stub $EDITOR.
+    protected async Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
+        IReadOnlyDictionary<string, string>? extraEnvironment, params string[] args)
+    {
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = _root,
@@ -106,6 +119,10 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
             startInfo.ArgumentList.Add(arg);
         }
         startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
+        foreach (var (key, value) in extraEnvironment ?? new Dictionary<string, string>())
+        {
+            startInfo.Environment[key] = value;
+        }
 
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start memctl.");
         // Drain both streams concurrently so a full pipe buffer can't deadlock the
@@ -127,10 +144,7 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
             throw new Xunit.Sdk.XunitException($"memctl {string.Join(' ', args)} did not exit within 60s.");
         }
 
-        var stdout = await stdoutPump;
-        var stderr = await stderrPump;
-        Assert.True(process.ExitCode == 0, $"memctl {string.Join(' ', args)} failed with exit {process.ExitCode}. stdout={stdout} stderr={stderr}");
-        return stdout;
+        return (process.ExitCode, await stdoutPump, await stderrPump);
     }
 
     protected static async Task<JsonElement> CallToolAsync(McpClient client, string toolName, Dictionary<string, object?> arguments)

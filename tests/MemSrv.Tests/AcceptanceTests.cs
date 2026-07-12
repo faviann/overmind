@@ -1,10 +1,10 @@
 using Dapper;
-using ModelContextProtocol.Protocol;
 using Npgsql;
-using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace MemSrv.Tests;
 
@@ -12,14 +12,27 @@ namespace MemSrv.Tests;
 // end-to-end scenario is seeded through the public surface (MCP tools as keyed
 // agents over HTTP, memctl as the operator), then the four provenance
 // questions are asserted as queries: memctl where a command exists (consumed,
-// why, show, trace), SQL where the spec says "the query must work now"
-// (source_id listing, FTS over the consumed set). Mechanical checks follow
-// docs/testing.md: direct DB access only where the database mechanism IS the
+// why, show, trace), SQL where none does — the source_id listing, which spec
+// §10.2 requires to work now, and the FTS-over-consumed-set join, per the
+// issue's "assert the four provenance questions as queries". Mechanical checks
+// follow docs/testing.md: direct DB access only where the database mechanism IS the
 // spec'd behavior (trigger + grants append-only, content_hash validity);
 // operator-facing checks run the real memctl CLI as a subprocess.
 [Collection("database")]
 public sealed class AcceptanceTests : HttpSeamTestBase
 {
+    // Shared fixture language: the seeder writes these phrases and the
+    // provenance and hallucination checks assert on them, so the seeded
+    // scenario and the queries cannot drift apart silently.
+    private const string SourceTraceText = "Bench measurement read 32768 hertz for the quartz resonator";
+    private const string RevisionTraceText = "Recalibration measured the quartz resonator at 32767 hertz";
+    private const string OriginalFactText = "The quartz resonator runs at 32768 hertz";
+    private const string RevisedFactText = "After recalibration the quartz resonator runs at 32767 hertz";
+    private const string UnconsumedFactText = "The helium backup oscillator drifts weekly";
+    private const string ConsumedClaim = "quartz resonator recalibration";  // present in the consumed revised fact
+    private const string UnconsumedClaim = "helium backup oscillator";      // present only in the approved-but-unconsumed fact
+    private const string FabricatedClaim = "antigravity perpetual turbine"; // present nowhere
+
     // --- The four provenance questions (spec §10.1–.4) ---
 
     [Fact]
@@ -41,10 +54,10 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         var why = await RunMemCtlAsync("why", scenario.RevisedMemoryUuid.ToString());
         Assert.Contains(scenario.RevisedMemoryUuid.ToString(), why, StringComparison.Ordinal);
         Assert.Contains(scenario.RevisionTraceUuid.ToString(), why, StringComparison.Ordinal);
-        Assert.Contains("32767", why, StringComparison.Ordinal);
+        Assert.Contains(RevisionTraceText, why, StringComparison.Ordinal);
         Assert.Contains(scenario.OriginalMemoryUuid.ToString(), why, StringComparison.Ordinal);
         Assert.Contains(scenario.SourceTraceUuid.ToString(), why, StringComparison.Ordinal);
-        Assert.Contains("32768", why, StringComparison.Ordinal);
+        Assert.Contains(SourceTraceText, why, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -78,7 +91,6 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         Assert.Contains("shared/superseded", original, StringComparison.Ordinal);
         Assert.Contains($"source=trace:{scenario.SourceTraceUuid}", original, StringComparison.Ordinal);
         Assert.Contains($"superseded_by={scenario.RevisedMemoryUuid}", original, StringComparison.Ordinal);
-        Assert.Contains("created=2", original, StringComparison.Ordinal);
         Assert.DoesNotContain("approved_at=<none>", original);
         Assert.Contains("approved_by=human:reviewer-alpha", original, StringComparison.Ordinal);
         Assert.Contains("agent=agent-a", original, StringComparison.Ordinal);
@@ -88,10 +100,16 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         Assert.Contains("shared/approved", revised, StringComparison.Ordinal);
         Assert.Contains($"source=trace:{scenario.RevisionTraceUuid}", revised, StringComparison.Ordinal);
         Assert.Contains($"supersedes={scenario.OriginalMemoryUuid}", revised, StringComparison.Ordinal);
-        Assert.Contains("created=2", revised, StringComparison.Ordinal);
         Assert.DoesNotContain("approved_at=<none>", revised);
         Assert.Contains("approved_by=human:reviewer-beta", revised, StringComparison.Ordinal);
         Assert.Contains("agent=agent-a", revised, StringComparison.Ordinal);
+
+        // The capture timestamps parse and order: the original fact was
+        // captured no later than its revision.
+        var originalCreated = CreatedTimestamp(original);
+        var revisedCreated = CreatedTimestamp(revised);
+        Assert.True(originalCreated <= revisedCreated,
+            $"original created={originalCreated:O} must not be after revised created={revisedCreated:O}");
 
         // Who approved each — from the review events — distinctly from who
         // proposed each: the review sessions carry reviewer identities, never
@@ -107,6 +125,13 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         Assert.DoesNotContain("agent=agent-a", revisedReview);
     }
 
+    private static DateTimeOffset CreatedTimestamp(string show)
+    {
+        var match = Regex.Match(show, @"created=(\S+)");
+        Assert.True(match.Success, $"memctl show must print created=<timestamp>; got: {show}");
+        return DateTimeOffset.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+    }
+
     [Fact]
     public async Task WasThisHallucinated_FtsOverConsumedSetAnswersClaims()
     {
@@ -114,25 +139,22 @@ public sealed class AcceptanceTests : HttpSeamTestBase
 
         // Spec §10.4: given a session and a claim, FTS over the memories the
         // session actually consumed answers whether the claim was in memory.
-        const string consumedClaim = "quartz resonator recalibration";
-        const string unconsumedClaim = "helium backup oscillator";
-        const string fabricatedClaim = "antigravity perpetual turbine";
-
         await using var connection = new NpgsqlConnection(AdminConnection);
         await connection.OpenAsync();
 
-        Assert.True(await ClaimInConsumedSetAsync(connection, scenario.ConsumerSessionId, consumedClaim),
+        Assert.True(await ClaimInConsumedSetAsync(connection, scenario.ConsumerSessionId, ConsumedClaim),
             "a claim present in a consumed memory must be found");
-        Assert.False(await ClaimInConsumedSetAsync(connection, scenario.ConsumerSessionId, fabricatedClaim),
+        Assert.False(await ClaimInConsumedSetAsync(connection, scenario.ConsumerSessionId, FabricatedClaim),
             "a fabricated claim must not be found");
 
         // The join is over the consumed set, not the whole store: this claim
-        // exists as an approved memory but was never consumed in the session.
-        var existsAtAll = await connection.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM memories WHERE search_tsv @@ websearch_to_tsquery('english', @Claim)",
-            new { Claim = unconsumedClaim });
-        Assert.Equal(1, existsAtAll);
-        Assert.False(await ClaimInConsumedSetAsync(connection, scenario.ConsumerSessionId, unconsumedClaim),
+        // exists — exactly as the approved-but-unconsumed memory the scenario
+        // seeded — yet was never consumed in the session.
+        var unconsumedMatches = (await connection.QueryAsync<Guid>(
+            "SELECT uuid FROM memories WHERE search_tsv @@ websearch_to_tsquery('english', @Claim)",
+            new { Claim = UnconsumedClaim })).ToList();
+        Assert.Equal(scenario.UnconsumedMemoryUuid, Assert.Single(unconsumedMatches));
+        Assert.False(await ClaimInConsumedSetAsync(connection, scenario.ConsumerSessionId, UnconsumedClaim),
             "a claim only present in unconsumed memory must not be attributed to the session");
     }
 
@@ -292,6 +314,40 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task NamespaceIsolationHoldsAcrossAgentAllowlists()
+    {
+        var term = $"nsisolation{Guid.NewGuid():N}";
+        await using var writer = await ConnectAsync(AgentAKey);
+        var uuid = await ProposeAsync(writer, "fact", $"Homelab-only fact {term}", "human", null, @namespace: "homelab");
+        await RunMemCtlAsync("approve", uuid.ToString(), "--by", "gatekeeper");
+
+        // The allowlisted writer reads it back, proving the memory is live...
+        var allowed = await CallToolAsync(writer, "search_memory", new Dictionary<string, object?>
+        {
+            ["query"] = term,
+            ["namespaces"] = new[] { "homelab" }
+        });
+        Assert.Contains(allowed.GetProperty("data").EnumerateArray(), r => r.GetProperty("uuid").GetGuid() == uuid);
+
+        // ...but agent-b is confined to memory-system: an explicit homelab
+        // search is rejected, an unqualified search does not leak the memory,
+        // and a direct fetch of the known uuid fails.
+        await using var outsider = await ConnectAsync(ScopedKey);
+        var foreignSearch = await outsider.CallToolAsync("search_memory", new Dictionary<string, object?>
+        {
+            ["query"] = term,
+            ["namespaces"] = new[] { "homelab" }
+        });
+        Assert.True(foreignSearch.IsError == true, "searching a namespace outside the allowlist must be rejected");
+
+        var defaultSearch = await CallToolAsync(outsider, "search_memory", new Dictionary<string, object?> { ["query"] = term });
+        Assert.DoesNotContain(defaultSearch.GetProperty("data").EnumerateArray(), r => r.GetProperty("uuid").GetGuid() == uuid);
+
+        var fetch = await outsider.CallToolAsync("get_by_id", new Dictionary<string, object?> { ["uuid"] = uuid });
+        Assert.True(fetch.IsError == true, "fetching a memory outside the allowlist must be rejected");
+    }
+
+    [Fact]
     public async Task NeverStoreRejectsMemoryWritesAndRedactsTraceWrites()
     {
         // Synthetic secret matching config/never_store.yaml's aws-access-key-id
@@ -332,6 +388,16 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         Assert.Contains("[REDACTED:aws-access-key-id]", trace, StringComparison.Ordinal);
         Assert.Contains(" note ", trace, StringComparison.Ordinal);
         Assert.DoesNotContain(fakeSecret, trace, StringComparison.Ordinal);
+
+        // Sanctioned DB-level absence check (docs/testing.md never-store gate):
+        // the rejected writes must not have persisted the secret in any memory
+        // row.
+        await using var connection = new NpgsqlConnection(AdminConnection);
+        await connection.OpenAsync();
+        var persisted = await connection.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM memories WHERE content LIKE @Pattern",
+            new { Pattern = $"%{fakeSecret}%" });
+        Assert.Equal(0, persisted);
     }
 
     // Sanctioned direct-DB test: content_hash validity is a database-level
@@ -459,59 +525,10 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         }
     }
 
-    // memctl runner tolerating failure, for asserting the CLI's refusals —
-    // the base RunMemCtlAsync asserts success.
-    private async Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
-        IReadOnlyDictionary<string, string>? extraEnvironment, params string[] args)
-    {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = _root,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("run");
-        startInfo.ArgumentList.Add("--project");
-        startInfo.ArgumentList.Add(Path.Combine(_root, "src/MemCtl/MemCtl.csproj"));
-        startInfo.ArgumentList.Add("--no-build");
-        startInfo.ArgumentList.Add("--");
-        foreach (var arg in args)
-        {
-            startInfo.ArgumentList.Add(arg);
-        }
-
-        startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
-        foreach (var (key, value) in extraEnvironment ?? new Dictionary<string, string>())
-        {
-            startInfo.Environment[key] = value;
-        }
-
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start memctl.");
-        var stdoutPump = process.StandardOutput.ReadToEndAsync();
-        var stderrPump = process.StandardError.ReadToEndAsync();
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        try
-        {
-            await process.WaitForExitAsync(cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
-            await Task.WhenAll(stdoutPump, stderrPump);
-            throw new Xunit.Sdk.XunitException($"memctl {string.Join(' ', args)} did not exit within 60s.");
-        }
-
-        return (process.ExitCode, await stdoutPump, await stderrPump);
-    }
-
     // --- The seeded end-to-end scenario, built through the public surface ---
 
     private sealed record ProvenanceScenario(
         string ConsumerSessionId,
-        string Marker,
         Guid SourceTraceUuid,
         Guid RevisionTraceUuid,
         Guid OriginalMemoryUuid,
@@ -536,24 +553,24 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         {
             ["session_id"] = sourceSession,
             ["event_type"] = "assistant_msg",
-            ["content"] = new { text = $"Bench measurement read 32768 hertz for the quartz resonator {marker}" }
+            ["content"] = new { text = $"{SourceTraceText} {marker}" }
         });
         var sourceTraceUuid = sourceTrace.GetProperty("data").GetProperty("traceUuid").GetGuid();
 
         var originalUuid = await ProposeAsync(client, "fact",
-            $"The quartz resonator runs at 32768 hertz ({marker})", "trace", sourceTraceUuid.ToString());
+            $"{OriginalFactText} ({marker})", "trace", sourceTraceUuid.ToString());
         await RunMemCtlAsync("approve", originalUuid.ToString(), "--by", "reviewer-alpha");
 
         var revisionTrace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
             ["session_id"] = sourceSession,
             ["event_type"] = "assistant_msg",
-            ["content"] = new { text = $"Recalibration measured the quartz resonator at 32767 hertz {marker}" }
+            ["content"] = new { text = $"{RevisionTraceText} {marker}" }
         });
         var revisionTraceUuid = revisionTrace.GetProperty("data").GetProperty("traceUuid").GetGuid();
 
         var revisedUuid = await ProposeAsync(client, "fact",
-            $"After recalibration the quartz resonator runs at 32767 hertz ({marker})",
+            $"{RevisedFactText} ({marker})",
             "trace", revisionTraceUuid.ToString(), originalUuid);
         await RunMemCtlAsync("approve", revisedUuid.ToString(), "--by", "reviewer-beta");
 
@@ -565,7 +582,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         // Approved but never consumed: the negative case for "was this
         // hallucinated?".
         var unconsumedUuid = await ProposeAsync(client, "fact",
-            $"The helium backup oscillator drifts weekly ({marker})", "human", null);
+            $"{UnconsumedFactText} ({marker})", "human", null);
         await RunMemCtlAsync("approve", unconsumedUuid.ToString(), "--by", "reviewer-alpha");
 
         // Consumption: search, then read full records — the server logs
@@ -584,7 +601,6 @@ public sealed class AcceptanceTests : HttpSeamTestBase
 
         return new ProvenanceScenario(
             consumerSessionId,
-            marker,
             sourceTraceUuid,
             revisionTraceUuid,
             originalUuid,
@@ -602,11 +618,12 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         string content,
         string sourceType,
         string? sourceId,
-        Guid? supersedes = null)
+        Guid? supersedes = null,
+        string @namespace = "memory-system")
     {
         var arguments = new Dictionary<string, object?>
         {
-            ["namespace"] = "memory-system",
+            ["namespace"] = @namespace,
             ["type"] = type,
             ["content"] = content,
             ["source_type"] = sourceType,

@@ -241,7 +241,6 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         await using var client = await ConnectAsync(AgentAKey);
         var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = client.SessionId,
             ["event_type"] = "note",
             ["content"] = new { text = "immutable once written" }
         });
@@ -386,7 +385,6 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         // Trace writes REDACT in place: the event is still recorded.
         await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = client.SessionId,
             ["event_type"] = "tool_result",
             ["content"] = new { tool = "shell", ok = true, summary = $"found {fakeSecret} in config" }
         });
@@ -462,7 +460,6 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         await using var client = await ConnectAsync(AgentAKey);
         var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = client.SessionId,
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = "evidence behind the proposal" }
         });
@@ -559,11 +556,14 @@ public sealed class AcceptanceTests : HttpSeamTestBase
 
         var sourceTrace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = client.SessionId,
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = $"{SourceTraceText} {marker}" }
         });
         var sourceTraceUuid = sourceTrace.GetProperty("data").GetProperty("traceUuid").GetGuid();
+
+        // The scenario's consumer session is the session the server assigned:
+        // the echoed session_id must be the transport session.
+        Assert.Equal(client.SessionId, sourceTrace.GetProperty("data").GetProperty("sessionId").GetString());
 
         var originalUuid = await ProposeAsync(client, "fact",
             $"{OriginalFactText} ({marker})", "trace", sourceTraceUuid.ToString());
@@ -571,7 +571,6 @@ public sealed class AcceptanceTests : HttpSeamTestBase
 
         var revisionTrace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = client.SessionId,
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = $"{RevisionTraceText} {marker}" }
         });

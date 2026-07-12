@@ -78,7 +78,6 @@ public sealed class HttpTransportTests : IAsyncLifetime
         // 1. log_trace — the source the proposal will cite.
         var trace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = "http-lifecycle-trace",
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = "http lifecycle" }
         });
@@ -120,6 +119,87 @@ public sealed class HttpTransportTests : IAsyncLifetime
         });
         AssertNext(fetched);
         Assert.Equal(memoryUuid, fetched.GetProperty("data").GetProperty("uuid").GetGuid());
+    }
+
+    [Fact]
+    public async Task LogTraceWithoutSessionIdLandsInTransportSessionAndEchoesIt()
+    {
+        await using var client = await ConnectAsync(AgentAKey);
+
+        // The schema takes no session_id: session identity is server-derived
+        // from the MCP transport, the same rule as agent_id and namespace.
+        var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "note",
+            ["content"] = new { ok = true }
+        });
+
+        var transportSession = client.SessionId!;
+        Assert.False(string.IsNullOrEmpty(transportSession));
+        Assert.Equal(transportSession, logged.GetProperty("data").GetProperty("sessionId").GetString());
+
+        // The event is observable under the transport session through the
+        // operator seam.
+        var uuid = logged.GetProperty("data").GetProperty("traceUuid").GetGuid();
+        var trace = await RunMemCtlAsync("trace", transportSession);
+        Assert.Contains(uuid.ToString(), trace);
+    }
+
+    [Fact]
+    public async Task LegacySessionIdArgumentIsIgnoredNotRejected()
+    {
+        var legacySession = $"legacy-{Guid.NewGuid():N}";
+        await using var client = await ConnectAsync(AgentAKey);
+
+        // Compatibility: existing clients still send session_id (it used to be
+        // required). The call succeeds, the argument is dropped, the event
+        // lands in the transport session, and the response echoes the
+        // substitution.
+        var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["session_id"] = legacySession,
+            ["event_type"] = "note",
+            ["content"] = new { ok = true }
+        });
+
+        var transportSession = client.SessionId!;
+        var echoed = logged.GetProperty("data").GetProperty("sessionId").GetString();
+        Assert.Equal(transportSession, echoed);
+        Assert.NotEqual(legacySession, echoed);
+
+        // The event is under the transport session, and nothing exists under
+        // the supplied legacy id.
+        var uuid = logged.GetProperty("data").GetProperty("traceUuid").GetGuid();
+        var transportTrace = await RunMemCtlAsync("trace", transportSession);
+        Assert.Contains(uuid.ToString(), transportTrace);
+        var legacyTrace = await RunMemCtlAsync("trace", legacySession);
+        Assert.DoesNotContain(uuid.ToString(), legacyTrace);
+    }
+
+    [Fact]
+    public async Task LogTraceAndGetByIdShareOneSessionWithServerGeneratedEvents()
+    {
+        await using var client = await ConnectAsync(AgentAKey);
+        var seed = await SeedApprovedMemoryAsync(client, "memory-system");
+
+        // The agent's own event and the server-generated memory_consumed event
+        // from get_by_id must be joinable under one trace session without any
+        // caller coordination.
+        var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "assistant_msg",
+            ["content"] = new { text = "about to consult memory" }
+        });
+        await CallToolAsync(client, "get_by_id", new Dictionary<string, object?> { ["uuid"] = seed });
+
+        var sessionId = logged.GetProperty("data").GetProperty("sessionId").GetString()!;
+        Assert.Equal(client.SessionId, sessionId);
+
+        var trace = await RunMemCtlAsync("trace", sessionId);
+        Assert.Contains(logged.GetProperty("data").GetProperty("traceUuid").GetGuid().ToString(), trace);
+        Assert.Contains("memory_consumed", trace);
+        var consumed = await RunMemCtlAsync("consumed", sessionId);
+        Assert.Contains(seed.ToString(), consumed);
     }
 
     [Fact]
@@ -217,21 +297,21 @@ public sealed class HttpTransportTests : IAsyncLifetime
     [Fact]
     public async Task UnqualifiedCallLandsInDefaultNamespace()
     {
-        var sessionId = $"http-default-ns-{Guid.NewGuid():N}";
         await using var client = await ConnectAsync(AgentAKey);
 
         var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = sessionId,
             ["event_type"] = "note",
             ["content"] = new { ok = true }
         });
         var uuid = logged.GetProperty("data").GetProperty("traceUuid").GetGuid();
 
         // The unqualified call carried no namespace; the operator trace seam shows
-        // that event landed in the key's default namespace. (The session id here is
-        // caller-supplied because log_trace still requires it — it is only used to
-        // locate the event, not as evidence of transport-derived sessioning.)
+        // that event landed in the key's default namespace. The event is located
+        // through the session id the server echoed, which must be the transport
+        // session.
+        var sessionId = logged.GetProperty("data").GetProperty("sessionId").GetString()!;
+        Assert.Equal(client.SessionId, sessionId);
         var trace = await RunMemCtlAsync("trace", sessionId);
         var eventLine = trace.Split('\n').FirstOrDefault(line => line.Contains(uuid.ToString()));
         Assert.NotNull(eventLine);
@@ -340,7 +420,6 @@ public sealed class HttpTransportTests : IAsyncLifetime
         var trace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
             ["namespace"] = @namespace,
-            ["session_id"] = $"seed-{Guid.NewGuid():N}",
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = "seed" }
         });

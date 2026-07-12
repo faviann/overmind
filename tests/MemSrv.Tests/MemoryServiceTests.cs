@@ -33,7 +33,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     {
         var service = Service();
         var context = new MemoryContext("agent-a", "memory-system", "session-grants");
-        var trace = await service.LogTraceAsync(context, context.SessionId, "note", new { ok = true });
+        var trace = await service.LogTraceAsync(context, "note", new { ok = true });
 
         await using var admin = new NpgsqlConnection(AdminConnection);
         await admin.OpenAsync();
@@ -132,7 +132,6 @@ public sealed class MemoryServiceTests : IAsyncLifetime
 
         var trace = await service.LogTraceAsync(
             context,
-            context.SessionId,
             "tool_result",
             new { token = "bearer abcdefghijklmnopqrstuvwxyz123456" });
 
@@ -147,7 +146,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     {
         var service = Service();
         var proposer = new MemoryContext("agent-a", "memory-system", "session-review-source");
-        var source = await service.LogTraceAsync(proposer, proposer.SessionId, "assistant_msg", new { text = "review provenance source" });
+        var source = await service.LogTraceAsync(proposer, "assistant_msg", new { text = "review provenance source" });
         var proposed = await service.ProposeMemoryAsync(
             proposer,
             "memory-system",
@@ -307,7 +306,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     {
         var service = Service();
         var proposer = new MemoryContext("agent-a", "memory-system", "session-existing-chain");
-        var source = await service.LogTraceAsync(proposer, proposer.SessionId, "assistant_msg", new { text = "chain source" });
+        var source = await service.LogTraceAsync(proposer, "assistant_msg", new { text = "chain source" });
         var original = await service.ProposeMemoryAsync(
             proposer, "memory-system", "decision", "Original approved belief", "trace", source.Data.TraceUuid.ToString());
         await service.ApproveAsync(original.Data.Uuid, "first-reviewer");
@@ -354,7 +353,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     {
         var service = Service();
         var proposer = new MemoryContext("agent-a", "memory-system", "session-reject-source");
-        var source = await service.LogTraceAsync(proposer, proposer.SessionId, "assistant_msg", new { text = "reject provenance source" });
+        var source = await service.LogTraceAsync(proposer, "assistant_msg", new { text = "reject provenance source" });
         var proposed = await service.ProposeMemoryAsync(
             proposer,
             "memory-system",
@@ -397,7 +396,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         var service = Service();
         var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system", "homelab" }, "session-ns-explicit");
 
-        var trace = await service.LogTraceAsync(context, context.SessionId, "note", new { ok = true }, refs: null, @namespace: "homelab");
+        var trace = await service.LogTraceAsync(context, "note", new { ok = true }, refs: null, @namespace: "homelab");
 
         var rows = await service.TraceAsync(context.SessionId);
         var row = Assert.Single(rows, r => r.TraceUuid == trace.Data.TraceUuid);
@@ -411,7 +410,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system" }, "session-ns-forbidden");
 
         var ex = await Assert.ThrowsAsync<NamespaceForbiddenException>(() =>
-            service.LogTraceAsync(context, context.SessionId, "note", new { ok = true }, refs: null, @namespace: "secret-ops"));
+            service.LogTraceAsync(context, "note", new { ok = true }, refs: null, @namespace: "secret-ops"));
 
         Assert.Equal("secret-ops", ex.Namespace);
         Assert.Contains("secret-ops", ex.Message, StringComparison.Ordinal);
@@ -424,7 +423,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         var service = Service();
         var context = new MemoryContext("agent-a", "memory-system", new[] { "memory-system", "homelab" }, "session-ns-default");
 
-        var trace = await service.LogTraceAsync(context, context.SessionId, "note", new { ok = true });
+        var trace = await service.LogTraceAsync(context, "note", new { ok = true });
 
         var row = Assert.Single(await service.TraceAsync(context.SessionId), r => r.TraceUuid == trace.Data.TraceUuid);
         Assert.Equal("memory-system", row.Namespace);
@@ -526,6 +525,54 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task StdioSessionUsesConfiguredMemsrvSessionIdVerbatim()
+    {
+        var sessionId = $"session-stdio-configured-{Guid.NewGuid():N}";
+        await using var client = await CreateMcpClientAsync(sessionId);
+
+        var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "note",
+            ["content"] = new { ok = true }
+        });
+
+        // The configured session id is used verbatim: echoed in the response
+        // and carrying the event, observable through the operator seam.
+        Assert.Equal(sessionId, logged.GetProperty("data").GetProperty("sessionId").GetString());
+        var uuid = logged.GetProperty("data").GetProperty("traceUuid").GetGuid();
+        var trace = await RunMemCtlForResultAsync("trace", sessionId);
+        Assert.Equal(0, trace.ExitCode);
+        Assert.Contains(uuid.ToString(), trace.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task UnconfiguredStdioServersGetDistinctGeneratedSessions()
+    {
+        // Two server starts without MEMSRV_SESSION_ID must not collapse into
+        // one trace session (the old "local-session" constant did exactly
+        // that). Each process start generates a fresh unique id.
+        await using var first = await CreateMcpClientAsync(sessionId: null);
+        await using var second = await CreateMcpClientAsync(sessionId: null);
+
+        var firstLogged = await CallToolAsync(first, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "note",
+            ["content"] = new { run = 1 }
+        });
+        var secondLogged = await CallToolAsync(second, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "note",
+            ["content"] = new { run = 2 }
+        });
+
+        var firstSession = firstLogged.GetProperty("data").GetProperty("sessionId").GetString();
+        var secondSession = secondLogged.GetProperty("data").GetProperty("sessionId").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(firstSession));
+        Assert.False(string.IsNullOrWhiteSpace(secondSession));
+        Assert.NotEqual(firstSession, secondSession);
+    }
+
+    [Fact]
     public async Task McpStdioSmokeTestRunsSession1DefinitionOfDone()
     {
         var sessionId = $"session-smoke-{Guid.NewGuid():N}";
@@ -534,12 +581,15 @@ public sealed class MemoryServiceTests : IAsyncLifetime
 
         var trace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = sessionId,
             ["event_type"] = "assistant_msg",
             ["content"] = new { text = "Session 1 MCP smoke trace" }
         });
         var traceUuid = trace.GetProperty("data").GetProperty("traceUuid").GetGuid();
         AssertNext(trace);
+
+        // The rest of the smoke test replays this session by id: the echoed
+        // session must be the one configured through MEMSRV_SESSION_ID.
+        Assert.Equal(sessionId, trace.GetProperty("data").GetProperty("sessionId").GetString());
 
         var uniqueTerm = $"mcp-smoke-{Guid.NewGuid():N}";
         var proposed = await CallToolAsync(client, "propose_memory", new Dictionary<string, object?>
@@ -627,11 +677,11 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         var firstMarker = $"why-v1-{Guid.NewGuid():N}";
         var secondMarker = $"why-v2-{Guid.NewGuid():N}";
 
-        var firstTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = firstMarker });
+        var firstTrace = await service.LogTraceAsync(context, "assistant_msg", new { text = firstMarker });
         var firstMemory = await service.ProposeMemoryAsync(context, "memory-system", "decision", "Original belief", "trace", firstTrace.Data.TraceUuid.ToString());
         await service.ApproveAsync(firstMemory.Data.Uuid, "test-operator");
 
-        var secondTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = secondMarker });
+        var secondTrace = await service.LogTraceAsync(context, "assistant_msg", new { text = secondMarker });
         var secondMemory = await service.ProposeMemoryAsync(context, "memory-system", "decision", "Revised belief", "trace", secondTrace.Data.TraceUuid.ToString(), firstMemory.Data.Uuid);
         await service.ApproveAsync(secondMemory.Data.Uuid, "test-operator");
 
@@ -651,7 +701,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     {
         var service = Service();
         var context = new MemoryContext("agent-a", "memory-system", $"session-consumed-{Guid.NewGuid():N}");
-        var sourceTrace = await service.LogTraceAsync(context, context.SessionId, "assistant_msg", new { text = "consumed source" });
+        var sourceTrace = await service.LogTraceAsync(context, "assistant_msg", new { text = "consumed source" });
         var proposed = await service.ProposeMemoryAsync(context, "memory-system", "fact", "A read fact", "trace", sourceTrace.Data.TraceUuid.ToString());
         await service.ApproveAsync(proposed.Data.Uuid, "test-operator");
         await service.GetByIdAsync(context, proposed.Data.Uuid);
@@ -666,14 +716,19 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     private MemoryService Service() =>
         new(RuntimeConnection, new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
 
-    private async Task<McpClient> CreateMcpClientAsync(string sessionId)
+    // sessionId null starts the server without MEMSRV_SESSION_ID, exercising
+    // the generated per-process-start session id.
+    private async Task<McpClient> CreateMcpClientAsync(string? sessionId)
     {
         var env = StdioClientTransportOptions.GetDefaultEnvironmentVariables();
         env["MEMSRV_TRANSPORT"] = "stdio";
         env["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
         env["MEMSRV_AGENT_ID"] = "agent-a";
         env["MEMSRV_NAMESPACE"] = "memory-system";
-        env["MEMSRV_SESSION_ID"] = sessionId;
+        if (sessionId is not null)
+        {
+            env["MEMSRV_SESSION_ID"] = sessionId;
+        }
 
         return await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
         {

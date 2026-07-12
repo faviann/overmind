@@ -21,8 +21,10 @@ Closed decisions are closed; new evidence goes to the human, not into code.
 - **Never log to stdout.** In stdio transport stdout belongs to JSON-RPC;
   one stray `Console.WriteLine` breaks the client. Serilog → stderr or file.
 - **MCP SDK `ModelContextProtocol` 1.4.0 (pinned).** Your training data likely
-  predates the stable API. Before writing ANY MCP hosting/tool code, read the
-  vendored samples in `reference/csharp-sdk/`. Trust samples over memory.
+  predates the stable API. Before writing ANY MCP hosting/tool code, run
+  `make sdk-reference`, then inspect the specific version-matched upstream
+  documentation or sample relevant to the change in `reference/csharp-sdk/`.
+  Trust that evidence over memory.
   Streamable HTTP for remote (Session 2); never legacy SSE.
 - **The server is the only door.** No consumer ever sees a connection string.
 - **Traces are append-only** — enforced by grants AND trigger; no code path
@@ -49,10 +51,10 @@ migrations · xUnit against `memory_test` · YamlDotNet for `config/never_store.
 - Deployment contract for homelab: `docs/deployment-contract.md`.
 
 ## Read before specific tasks (progressive disclosure)
-- Starting any slice → `docs/workflow.md` (checklist + human gates)
 - Writing/changing tests → `docs/testing.md`
 - Schema, invariants, retrieval, layout, DoD → `docs/design-rules.md`
-- Any MCP hosting/tool code → `reference/csharp-sdk/` samples
+- Any MCP hosting/tool code → `make sdk-reference`, then the relevant
+  version-matched documentation or sample in `reference/csharp-sdk/`
 - Domain vocabulary → `CONTEXT.md`
 
 ## Agent skills

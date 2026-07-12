@@ -1,5 +1,23 @@
 # Decisions
 
+## 2026-07-10 — retirement is provenance-carrying (#18; supersedes Slice 5 retirement decisions)
+
+- Retirement is a distinct operator action, not a proposal review. It appends a
+  `retirement` trace event under synthetic session `retirement:<memory_uuid>`;
+  the target memory is the event's sole ref. Sessions describe individual
+  actions, while refs connect the memory's history.
+- `memctl retire <uuid> --by <name> --reason "..."` requires a named operator
+  and non-blank reason. Unqualified names normalize to `human:<name>`; event
+  content is `{operator, reason}`.
+- Only `approved` memories may be retired, whether shared or private. Missing,
+  proposed, rejected, superseded, or already-retired memories fail without a
+  row change or trace append. Repeated retirement is an error, not an
+  idempotent success.
+- The guarded status transition, `retired_at`, and trace append are atomic.
+  Rationale: retirement changes what the system presents as current knowledge;
+  keeping only its timestamp discards actor and reason provenance that cannot
+  be reconstructed later.
+
 ## 2026-07-10 — log_trace session selection (#17; amends Session 2 decision)
 
 Supersedes the Session 2 line "`log_trace` keeps an explicit `session_id`
@@ -36,7 +54,7 @@ capability-gated override, full removal. Chose **removal**:
 - **Ordering: lands before the v1.0.0 tag** (Slice 8, #10) — pre-1.0 with only
   first-party clients is the cheap moment to break the tool contract.
 
-## 2026-07-10 — memctl audit commands (Slice 5, #5)
+## 2026-07-10 — memctl audit commands (Slice 5, #5; retirement bullets superseded by #18)
 
 - `retire <uuid>` is a bare status flip (`status='retired'`, sets `retired_at`) —
   no `--by`, no trace event. Rationale: spec §9's signature is bare, and

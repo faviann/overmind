@@ -1,4 +1,4 @@
-# CLAUDE.md — Memory Server (Phase 1)
+# AGENTS.md — Memory Server (Phase 1)
 
 Self-hosted memory/control substrate: one .NET server exposing a small MCP tool
 surface over ONE PostgreSQL database. Append-only traces, provenance-carrying
@@ -13,19 +13,18 @@ memories, proposal→approval flow, two-step hybrid retrieval.
 The spec's Do Not Build list is BINDING (full list: `docs/design-rules.md` §1).
 Headline: no embeddings, no graphs, no LLM workers, no tiering mechanics, no UI,
 no second datastore, no dispatcher, no harness extensions.
-Mid-session ideas not in the spec: one line in `docs/decisions.md`
-(post-server: `save_note`, namespace `memory-system`) — then move on.
-Closed decisions are closed; new evidence goes to the human, not into code.
+Ideas outside the spec belong in `docs/decisions.md`, not in the current slice.
+Closed decisions are closed; bring new evidence to the human before changing code.
 
 ## Hard rules (catastrophic if missed)
 - **Never log to stdout.** In stdio transport stdout belongs to JSON-RPC;
-  one stray `Console.WriteLine` breaks the client. Serilog → stderr or file.
+  one stray log line breaks the client. Send application logs to stderr or a file.
 - **MCP SDK `ModelContextProtocol` 1.4.0 (pinned).** Your training data likely
   predates the stable API. Before writing ANY MCP hosting/tool code, run
   `make sdk-reference`, then inspect the specific version-matched upstream
   documentation or sample relevant to the change in `reference/csharp-sdk/`.
   Trust that evidence over memory.
-  Streamable HTTP for remote (Session 2); never legacy SSE.
+  Remote transport uses Streamable HTTP, never legacy SSE.
 - **The server is the only door.** No consumer ever sees a connection string.
 - **Traces are append-only** — enforced by grants AND trigger; no code path
   updates or deletes a trace. No DELETE granted anywhere; retirement = status flip.
@@ -46,7 +45,7 @@ migrations · xUnit against `memory_test` · YamlDotNet for `config/never_store.
 - `make test` / `make test-one T=<filter>` — suite / single test (`memory_test`)
 - `make test-db-reset` — recreate `memory_test` + migrations
 - `make migrate-dev` — one-shot containerized `memctl migrate` → `memory_dev`
-- `make accept` — Session 1 DoD end-to-end path (NOT IMPLEMENTED — Session 2)
+- `make accept` — reserved end-to-end acceptance target; currently unimplemented
 - Interactive dev runs against `memory_dev`, never `memory_test`, never prod.
 - Deployment contract for homelab: `docs/deployment-contract.md`.
 

@@ -1,71 +1,47 @@
-# AGENTS.md — Memory Server (Phase 1)
+# AGENTS.md — Memory Server
 
 Self-hosted memory/control substrate: one .NET server exposing a small MCP tool
-surface over ONE PostgreSQL database. Append-only traces, provenance-carrying
-memories, proposal→approval flow, two-step hybrid retrieval.
+surface over one PostgreSQL database. Traces are append-only, memories carry
+provenance, shared memories follow proposal→approval, and retrieval is two-step.
 
-## Document hierarchy (who wins)
-1. `docs/memory-server-phase1-spec.md` — binding on build details, schema, tool contracts
-2. `docs/agent-memory-handoff-v4.md` — intent/architecture where the spec is silent
-3. This file + `docs/` conventions
+## Authority
 
-## Scope discipline
-The spec's Do Not Build list is BINDING (full list: `docs/design-rules.md` §1).
-Headline: no embeddings, no graphs, no LLM workers, no tiering mechanics, no UI,
-no second datastore, no dispatcher, no harness extensions.
-Ideas outside the spec belong in `docs/decisions.md`, not in the current slice.
-Closed decisions are closed; bring new evidence to the human before changing code.
+1. `docs/memory-server-phase1-spec.md` — binding build details, schema, and tool contracts
+2. `docs/agent-memory-handoff-v4.md` — intent and architecture where the spec is silent
+3. This file and `docs/` conventions
 
-## Hard rules (catastrophic if missed)
-- **Never log to stdout.** In stdio transport stdout belongs to JSON-RPC;
-  one stray log line breaks the client. Send application logs to stderr or a file.
-- **MCP SDK `ModelContextProtocol` 1.4.0 (pinned).** Your training data likely
-  predates the stable API. Before writing ANY MCP hosting/tool code, run
-  `make sdk-reference`, then inspect the specific version-matched upstream
-  documentation or sample relevant to the change in `reference/csharp-sdk/`.
-  Trust that evidence over memory.
-  Remote transport uses Streamable HTTP, never legacy SSE.
-- **The server is the only door.** No consumer ever sees a connection string.
-- **Traces are append-only** — enforced by grants AND trigger; no code path
-  updates or deletes a trace. No DELETE granted anywhere; retirement = status flip.
-- **`agent_id` comes from the credential, never from tool arguments.**
-- **Shared memories are born `proposed`; approval is `memctl`-only** —
-  never add an agent-facing approve tool.
-- Tests exercise the public surface (MCP tools + `memctl`) only —
-  exceptions and details in `docs/testing.md`.
-- Tests never change during refactor. Commit per green cycle.
+## Always-on invariants
 
-## Stack (decided — do not re-litigate; rationale in docs/design-rules.md §3)
-.NET 10 · Npgsql + Dapper, hand-written SQL (NO EF Core) · DbUp plain-SQL
-migrations · xUnit against `memory_test` · YamlDotNet for `config/never_store.yaml`.
+- **Never log to stdout.** In stdio transport, stdout belongs to JSON-RPC; send
+  application logs to stderr or a file.
+- **The server is the only database door.** No consumer ever sees a connection
+  string.
+- **Traces are append-only.** Enforce this with grants and a trigger; no code
+  path updates or deletes a trace, no role receives DELETE, and retirement is a
+  status change.
+- **Derive `agent_id` from the credential, never from tool arguments.**
+- **Shared memories require operator approval.** They are born `proposed`, and
+  approval is `memctl`-only; never add an agent-facing approval tool.
+- **Do not broaden scope beyond the binding spec.**
 
-## Commands
-- `make db-up` — Postgres **18** dev container via compose (creates
-  `memory_dev`/`memory_test` and the `memsrv` login role, mirroring prod)
-- `make test` / `make test-one T=<filter>` — suite / single test (`memory_test`)
-- `make test-db-reset` — recreate `memory_test` + migrations
-- `make migrate-dev` — one-shot containerized `memctl migrate` → `memory_dev`
-- `make accept` — reserved end-to-end acceptance target; currently unimplemented
-- Interactive dev runs against `memory_dev`, never `memory_test`, never prod.
-- Deployment contract for homelab: `docs/deployment-contract.md`.
+## Read before changing
 
-## Read before specific tasks (progressive disclosure)
-- Writing/changing tests → `docs/testing.md`
-- Schema, invariants, retrieval, layout, DoD → `docs/design-rules.md`
-- Any MCP hosting/tool code → `make sdk-reference`, then the relevant
-  version-matched documentation or sample in `reference/csharp-sdk/`
-- Domain vocabulary → `CONTEXT.md`
+- MCP hosting or tools → run `make sdk-reference`, then inspect the relevant
+  centrally pinned, version-matched upstream documentation or sample in
+  `reference/csharp-sdk/`. Trust that evidence over memory. Remote transport
+  uses Streamable HTTP, never legacy SSE.
+- Tests or refactors → `docs/testing.md`
+- Schema, retrieval, dependencies, or scope → `docs/design-rules.md`
+- Deployment or deployment configuration → `docs/deployment-contract.md`
+- Domain terminology or domain documentation → `CONTEXT.md` and
+  `docs/agents/domain.md`
+- Issue tracking or labels → `docs/agents/issue-tracker.md` and
+  `docs/agents/triage-labels.md`
 
-## Agent skills
+## Common commands
 
-### Issue tracker
-
-Issues are tracked in GitHub Issues for `faviann/overmind`; external PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Use the default triage label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context layout: root `CONTEXT.md` plus root `docs/adr/` when they exist. See `docs/agents/domain.md`.
+- `make db-up` — start the development database services
+- `make test` / `make test-one T=<filter>` — run the suite / one filtered test
+- `make test-db-reset` — recreate the test database and apply migrations
+- `make migrate-dev` — migrate the development database
+- Interactive development uses `memory_dev`, never `memory_test` or production.

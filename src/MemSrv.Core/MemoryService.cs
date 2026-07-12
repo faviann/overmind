@@ -205,8 +205,6 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
     private const string WorkstreamColumns =
         "uuid, namespace, title, status, owner_agent AS OwnerAgent, session_id AS SessionId, notes, refs, updated_at AS UpdatedAt";
 
-    // A read: mutates no coordination state and logs NO trace event — the
-    // taxonomy has no event type for listing.
     public async Task<ToolEnvelope<IReadOnlyList<WorkstreamRecord>>> ListWorkstreamsAsync(
         MemoryContext context,
         string? @namespace = null,
@@ -214,12 +212,25 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         CancellationToken cancellationToken = default)
     {
         var targetNamespace = ResolveNamespace(context, @namespace);
+        if (status is not null and not ("open" or "checked_out"))
+        {
+            throw new WorkstreamException("list_workstreams status must be open or checked_out.");
+        }
+
+        await InsertTraceRawAsync(context.AgentId, targetNamespace, context.SessionId, "tool_call", new
+        {
+            tool = "list_workstreams",
+            @params = new { @namespace = targetNamespace, status }
+        }, null, cancellationToken);
+
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<WorkstreamRow>(
             $"""
             SELECT {WorkstreamColumns}
             FROM workstreams
-            WHERE namespace = @Namespace AND (@Status IS NULL OR status = @Status)
+            WHERE namespace = @Namespace
+              AND status IN ('open', 'checked_out')
+              AND (@Status IS NULL OR status = @Status)
             ORDER BY updated_at DESC
             """,
             new { Namespace = targetNamespace, Status = status });

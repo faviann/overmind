@@ -92,6 +92,41 @@ public sealed class WorkstreamToolsTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ListWorkstreamsDefaultsToInflightStreamsAndRejectsTerminalStatusFilters()
+    {
+        await using var client = await ConnectAsync(AgentAKey);
+        var terminalUuids = new List<Guid>();
+        foreach (var status in new[] { "done", "abandoned" })
+        {
+            var checkout = await CallToolAsync(client, "checkout_workstream", new Dictionary<string, object?>
+            {
+                ["title"] = $"ws-{status}-{Guid.NewGuid():N}"
+            });
+            var uuid = checkout.GetProperty("data").GetProperty("workstream").GetProperty("uuid").GetGuid();
+            terminalUuids.Add(uuid);
+            await CallToolAsync(client, "checkin_workstream", new Dictionary<string, object?>
+            {
+                ["uuid"] = uuid,
+                ["status"] = status,
+                ["notes"] = $"terminal {status}"
+            });
+        }
+
+        var listed = await CallToolAsync(client, "list_workstreams", new Dictionary<string, object?>());
+        Assert.DoesNotContain(listed.GetProperty("data").EnumerateArray(),
+            row => terminalUuids.Contains(row.GetProperty("uuid").GetGuid()));
+
+        foreach (var status in new[] { "done", "abandoned" })
+        {
+            var result = await client.CallToolAsync("list_workstreams", new Dictionary<string, object?>
+            {
+                ["status"] = status
+            });
+            Assert.True(result.IsError == true, $"terminal status filter '{status}' must be rejected");
+        }
+    }
+
+    [Fact]
     public async Task CheckinByNonOwnerFails()
     {
         var title = $"ws-{Guid.NewGuid():N}";
@@ -154,22 +189,33 @@ public sealed class WorkstreamToolsTests : HttpSeamTestBase
         AssertNext(checkin);
         Assert.Equal(status, checkin.GetProperty("data").GetProperty("status").GetString());
 
-        var list = await CallToolAsync(restarted, "list_workstreams", new Dictionary<string, object?>
-        {
-            ["status"] = status
-        });
-        var entry = list.GetProperty("data").EnumerateArray()
-            .Single(row => row.GetProperty("uuid").GetGuid() == uuid);
-        Assert.Equal(status, entry.GetProperty("status").GetString());
-        Assert.Equal(notes, entry.GetProperty("notes").GetString());
         if (status == "open")
         {
+            var list = await CallToolAsync(restarted, "list_workstreams", new Dictionary<string, object?>
+            {
+                ["status"] = status
+            });
+            var entry = list.GetProperty("data").EnumerateArray()
+                .Single(row => row.GetProperty("uuid").GetGuid() == uuid);
+            Assert.Equal(notes, entry.GetProperty("notes").GetString());
             // An open checkin is a handoff: the stream is released for the next
             // agent (null owner serializes as an absent property).
             Assert.False(
                 entry.TryGetProperty("ownerAgent", out var ownerProperty)
                     && ownerProperty.ValueKind != System.Text.Json.JsonValueKind.Null,
                 "an open checkin must release the owner");
+        }
+        else
+        {
+            var checkout = await restarted.CallToolAsync("checkout_workstream", new Dictionary<string, object?>
+            {
+                ["uuid"] = uuid
+            });
+            Assert.True(checkout.IsError == true, $"a {status} workstream must reject checkout");
+            var message = string.Join("\n", checkout.Content
+                .OfType<ModelContextProtocol.Protocol.TextContentBlock>()
+                .Select(block => block.Text));
+            Assert.Contains($"terminal status '{status}'", message);
         }
     }
 
@@ -282,7 +328,11 @@ public sealed class WorkstreamToolsTests : HttpSeamTestBase
         });
         AssertNext(handoff);
 
-        var list = await CallToolAsync(client, "list_workstreams", new Dictionary<string, object?>());
+        var list = await CallToolAsync(client, "list_workstreams", new Dictionary<string, object?>
+        {
+            ["namespace"] = "homelab",
+            ["status"] = "open"
+        });
         AssertNext(list);
 
         // All server-side workstream events share the transport session; the
@@ -295,13 +345,21 @@ public sealed class WorkstreamToolsTests : HttpSeamTestBase
         Assert.Contains("\"status\": \"done\"", trace);
         Assert.Contains("handoff", trace);
 
-        // list_workstreams is a read: the taxonomy has no event for it and the
-        // session replay must not contain one.
-        Assert.DoesNotContain("list_workstreams", trace);
-        var eventTypes = new[] { "workstream_checkout", "workstream_checkin", "handoff" };
+        // Listing is a read audit event, normalized as {tool, params}, in the
+        // resolved namespace and with identity/session derived from transport.
+        Assert.Contains(" tool_call ", trace);
+        Assert.Contains("\"tool\": \"list_workstreams\"", trace);
+        Assert.Contains("\"namespace\": \"homelab\"", trace);
+        Assert.Contains("\"status\": \"open\"", trace);
+        var traceLines = trace.Split('\n');
+        var listContentIndex = Array.FindIndex(traceLines, line => line.Contains("\"tool\": \"list_workstreams\""));
+        Assert.True(listContentIndex > 0, "list_workstreams content must follow its trace header");
+        Assert.Contains("agent=agent-a", traceLines[listContentIndex - 1]);
+        Assert.Contains("ns=homelab", traceLines[listContentIndex - 1]);
+        var eventTypes = new[] { "workstream_checkout", "workstream_checkin", "handoff", "tool_call" };
         var eventLines = trace.Split('\n')
             .Count(line => eventTypes.Any(eventType => line.Contains($" {eventType} ")));
-        Assert.Equal(3, eventLines);
+        Assert.Equal(4, eventLines);
     }
 
     [Fact]

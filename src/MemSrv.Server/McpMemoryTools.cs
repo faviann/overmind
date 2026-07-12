@@ -9,18 +9,20 @@ namespace MemSrv.Server;
 [McpServerToolType]
 public sealed class McpMemoryTools
 {
+    // Session identity is server-derived (transport session over HTTP,
+    // configuration over stdio) — never a tool argument, the same rule as
+    // agent_id and namespace. The effective session is echoed in the response.
     [McpServerTool(Name = "log_trace")]
     [Description("Append an immutable trace event for the current agent and namespace.")]
     public static Task<ToolEnvelope<TraceResult>> LogTrace(
         MemoryService memory,
         MemoryContext context,
-        [Description("Session identifier for this agent run.")] string session_id,
         [Description("Trace event type from the Phase 1 taxonomy.")] string event_type,
         [Description("JSON content for the event.")] JsonElement content,
         [Description("Optional memory UUIDs consumed or produced by this event.")] Guid[]? refs = null,
         [Description("Optional namespace for this event. Must be within the agent's allowlist; defaults to the agent's default namespace.")] string? @namespace = null,
         CancellationToken cancellationToken = default) =>
-        memory.LogTraceAsync(context, session_id, event_type, content, refs, @namespace, cancellationToken);
+        memory.LogTraceAsync(context, event_type, content, refs, @namespace, cancellationToken);
 
     [McpServerTool(Name = "search_memory")]
     [Description("Search approved shared memories and this agent's private memories. Returns previews only.")]

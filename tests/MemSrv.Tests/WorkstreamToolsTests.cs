@@ -270,7 +270,6 @@ public sealed class WorkstreamToolsTests : HttpSeamTestBase
         // by reference, never inlined.
         var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
         {
-            ["session_id"] = $"handoff-src-{Guid.NewGuid():N}",
             ["event_type"] = "note",
             ["content"] = new { text = "work happened here" }
         });

@@ -7,7 +7,9 @@ public sealed record ToolEnvelope<T>(
     [property: JsonPropertyName("data")] T Data,
     [property: JsonPropertyName("next")] string Next);
 
-public sealed record TraceResult(Guid TraceUuid);
+// SessionId echoes the server-derived session so agents can reference their
+// own run and legacy callers can observe the substitution.
+public sealed record TraceResult(Guid TraceUuid, string SessionId);
 
 public sealed record MemoryWriteResult(Guid Uuid, string Status);
 

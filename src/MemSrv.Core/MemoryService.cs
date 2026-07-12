@@ -13,7 +13,6 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
 
     public async Task<ToolEnvelope<TraceResult>> LogTraceAsync(
         MemoryContext context,
-        string sessionId,
         string eventType,
         object content,
         Guid[]? refs = null,
@@ -21,9 +20,9 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         CancellationToken cancellationToken = default)
     {
         var targetNamespace = ResolveNamespace(context, @namespace);
-        var traceUuid = await InsertTraceRawAsync(context.AgentId, targetNamespace, sessionId, eventType, content, refs, cancellationToken);
+        var traceUuid = await InsertTraceRawAsync(context.AgentId, targetNamespace, context.SessionId, eventType, content, refs, cancellationToken);
         return new ToolEnvelope<TraceResult>(
-            new TraceResult(traceUuid),
+            new TraceResult(traceUuid, context.SessionId),
             "If this event contains a durable decision or fact, call propose_memory referencing this trace_uuid as source_id.");
     }
 

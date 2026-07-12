@@ -29,12 +29,23 @@ tree_digest() {
   local directory=$1
   (
     cd "$directory"
-    find . -type f ! -name .overmind-reference -print0 \
-      | sort -z \
-      | xargs -0 -r sha256sum \
-      | sha256sum \
-      | cut -d' ' -f1
-  )
+    while IFS= read -r -d '' path; do
+      relative_path=${path#./}
+      mode=$(stat -c '%a' -- "$path")
+      if [[ -L "$path" ]]; then
+        printf 'symlink\0%s\0%s\0' "$relative_path" "$mode"
+        readlink -n -- "$path"
+        printf '\0'
+      elif [[ -f "$path" ]]; then
+        printf 'file\0%s\0%s\0' "$relative_path" "$mode"
+        sha256sum < "$path" | cut -d' ' -f1
+      elif [[ -d "$path" ]]; then
+        printf 'directory\0%s\0%s\0' "$relative_path" "$mode"
+      else
+        printf 'other\0%s\0%s\0%s\0' "$relative_path" "$mode" "$(stat -c '%F' -- "$path")"
+      fi
+    done < <(find . -mindepth 1 ! -path './.overmind-reference' -print0 | sort -z)
+  ) | sha256sum | cut -d' ' -f1
 }
 
 if [[ -e "$target" ]]; then

@@ -76,7 +76,7 @@ public sealed class McpMemoryTools
         MemoryService memory,
         MemoryContext context,
         [Description("Optional namespace. Must be within the agent's allowlist; defaults to the agent's default namespace.")] string? @namespace = null,
-        [Description("Optional status filter: open, checked_out, done, or abandoned.")] string? status = null,
+        [Description("Optional inflight status filter: open or checked_out.")] string? status = null,
         CancellationToken cancellationToken = default) =>
         Coordinate(() => memory.ListWorkstreamsAsync(context, @namespace, status, cancellationToken));
 

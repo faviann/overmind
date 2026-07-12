@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using MemSrv.Core;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace MemSrv.Server;
@@ -68,4 +69,63 @@ public sealed class McpMemoryTools
         [Description("Optional source identifier.")] string? source_id = null,
         CancellationToken cancellationToken = default) =>
         memory.SaveNoteAsync(context, @namespace, type, content, source_type, source_id, cancellationToken);
+
+    [McpServerTool(Name = "list_workstreams")]
+    [Description("List workstreams with status and owners — check inflight work to avoid conflicts.")]
+    public static Task<ToolEnvelope<IReadOnlyList<WorkstreamRecord>>> ListWorkstreams(
+        MemoryService memory,
+        MemoryContext context,
+        [Description("Optional namespace. Must be within the agent's allowlist; defaults to the agent's default namespace.")] string? @namespace = null,
+        [Description("Optional inflight status filter: open or checked_out.")] string? status = null,
+        CancellationToken cancellationToken = default) =>
+        Coordinate(() => memory.ListWorkstreamsAsync(context, @namespace, status, cancellationToken));
+
+    [McpServerTool(Name = "checkout_workstream")]
+    [Description("Check out a workstream by uuid or by title (creates it if no live workstream bears that title). Fails if it is already checked out — no force-steal.")]
+    public static Task<ToolEnvelope<WorkstreamCheckoutResult>> CheckoutWorkstream(
+        MemoryService memory,
+        MemoryContext context,
+        [Description("UUID of an existing workstream to check out.")] Guid? uuid = null,
+        [Description("Title to check out; creates the workstream in the default namespace if missing.")] string? title = null,
+        CancellationToken cancellationToken = default) =>
+        Coordinate(() => memory.CheckoutWorkstreamAsync(context, uuid, title, cancellationToken));
+
+    [McpServerTool(Name = "checkin_workstream")]
+    [Description("Check a workstream back in with a status. Owner-only. Status open makes the notes the handoff summary for the next agent; done and abandoned are terminal.")]
+    public static Task<ToolEnvelope<WorkstreamRecord>> CheckinWorkstream(
+        MemoryService memory,
+        MemoryContext context,
+        [Description("UUID of the checked-out workstream.")] Guid uuid,
+        [Description("Resulting status: open (handoff), done, or abandoned.")] string status,
+        [Description("Freeform state notes; on status open they become the handoff summary.")] string notes,
+        [Description("Optional related memory/trace UUIDs to attach.")] Guid[]? refs = null,
+        CancellationToken cancellationToken = default) =>
+        Coordinate(() => memory.CheckinWorkstreamAsync(context, uuid, status, notes, refs, cancellationToken));
+
+    [McpServerTool(Name = "create_handoff")]
+    [Description("Create a handoff: an open workstream carrying a compact summary and reference UUIDs for the receiving agent. Full context stays retrievable by reference, never inlined.")]
+    public static Task<ToolEnvelope<WorkstreamRecord>> CreateHandoff(
+        MemoryService memory,
+        MemoryContext context,
+        [Description("Handoff summary the receiving agent starts from.")] string summary,
+        [Description("Related memory/trace UUIDs the summary refers to.")] Guid[] refs,
+        [Description("Optional namespace. Must be within the agent's allowlist; defaults to the agent's default namespace.")] string? @namespace = null,
+        CancellationToken cancellationToken = default) =>
+        Coordinate(() => memory.CreateHandoffAsync(context, @namespace, summary, refs, cancellationToken));
+
+    // Workstream coordination failures (conflicts, ownership, terminal states)
+    // must reach the calling agent verbatim — e.g. WHO owns a checked-out
+    // stream. The SDK masks plain exceptions with a generic message, so they
+    // are re-thrown as McpException.
+    private static async Task<T> Coordinate<T>(Func<Task<T>> action)
+    {
+        try
+        {
+            return await action();
+        }
+        catch (WorkstreamException ex)
+        {
+            throw new McpException(ex.Message);
+        }
+    }
 }

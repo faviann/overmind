@@ -2,5 +2,5 @@ bin/
 obj/
 appsettings.Development.json
 
-# Vendored SDK reference samples; clone locally when working on MCP hosting.
+# Version-matched SDK reference tree provisioned by `make sdk-reference`.
 reference/csharp-sdk/

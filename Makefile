@@ -1,4 +1,7 @@
-.PHONY: db-up test test-one test-db-reset migrate-dev accept
+.PHONY: db-up test test-one test-db-reset migrate-dev accept sdk-reference
+
+sdk-reference:
+	@tools/provision-sdk-reference.sh
 
 db-up:
 	docker compose up -d --wait postgres

@@ -74,7 +74,7 @@ CREATE TABLE traces (
   namespace   TEXT NOT NULL REFERENCES namespaces(name),
   event_type  TEXT NOT NULL,        -- see event taxonomy below
   content     JSONB NOT NULL,
-  refs        UUID[],               -- memory uuids consumed/produced
+  refs        UUID[],               -- memory/trace uuids consumed/produced
   ts          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_traces_session ON traces(session_id, ts);
@@ -194,7 +194,7 @@ GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO memsrv;
 
 ### Trace event taxonomy (event_type)
 
-`user_msg`, `assistant_msg`, `tool_call`, `tool_result`, `memory_consumed`, `memory_proposed`, `memory_written`, `approval`, `rejection`, `retirement`, `handoff`, `workstream_checkout`, `workstream_checkin`, `compaction_boundary`, `note`.
+`user_msg`, `assistant_msg`, `tool_call`, `tool_result`, `memory_consumed`, `trace_consumed`, `memory_proposed`, `memory_written`, `approval`, `rejection`, `retirement`, `handoff`, `workstream_checkout`, `workstream_checkin`, `compaction_boundary`, `note`.
 
 `event_type` is open text, not an enum — consumers may add types as they earn them. Pre-blessed additions (from the predecessor project's event contract): `error`, `command_run`, `file_observed`, `file_modified`.
 
@@ -224,6 +224,7 @@ Do not rely on agents to report what they used. The server logs it:
 
 - Every `search_memory` call → trace event `tool_call` with the query.
 - Every `get_by_id` call → trace event `memory_consumed` with `refs=[uuid]`, session, agent.
+- Every `retrieve_trace` call → trace event `trace_consumed` with `refs=[trace_uuid]`, session, agent.
 - Every `propose_memory`/`save_note` → `memory_proposed`/`memory_written` with the new uuid in `refs`.
 
 This makes acceptance tests 1 and 4 (below) pure queries, with zero agent cooperation required.
@@ -292,6 +293,8 @@ genuinely snake_case and remain so.
    `next`: "Call get_by_id with a uuid to read full content. Nothing relevant? Consider propose_memory to fill the gap."
 3. **`get_by_id`** `{uuid}` → full record incl. all provenance columns + version chain (`supersedes` / superseded-by).
    `next`: "This memory derives from source_id=<...>; retrieve_trace on it for full context." (Server logs `memory_consumed`.)
+3b. **`retrieve_trace`** `{trace_uuid}` → the full trace record: `{traceUuid, sessionId, agentId, namespace, eventType, content, refs, createdAt}`. Readable iff the caller's key allows the trace's namespace — the same open-door boundary as every other read; a disallowed namespace raises the same namespace-forbidden error as `get_by_id`, an unknown uuid is a plain not-found.
+   `next`: "This trace references refs=[...]; call get_by_id (memories) or retrieve_trace (traces) on them for surrounding context." A refs-less trace must not dead-end the caller: "This trace carries no refs; the provenance walk ends here. Call search_memory for related context, or propose_memory if it holds a durable fact worth keeping." (Server logs `trace_consumed`.)
 4. **`propose_memory`** `{namespace, type, content, source_type, source_id, supersedes?}` → `{uuid, status:'proposed'}`
    `next`: "Proposal recorded; an operator must approve before it becomes shared knowledge. Continue your task."
 5. **`save_note`** `{namespace, type, content, source_type?, source_id?}` → private, auto-approved, owner-scoped.
@@ -315,10 +318,10 @@ v1.1 notes: `--by` is **required** on approve/reject (see §6b); `--edit` opens 
 
 Ship these as an executable test script against a seeded, disposable local `memory_test` database (see §2):
 
-1. **"Why did you say that?"** Given a session_id, list all `memory_consumed` events and resolve each uuid to its source trace/document. (`memctl consumed` + `memctl why`.)
+1. **"Why did you say that?"** Given a session_id, list all `memory_consumed` and `trace_consumed` events and resolve each uuid to its source trace/document. (`memctl consumed` + `memctl why`.)
 2. **"This source changed — what depends on it?"** Given a source_id, list every memory derived from it (index on `source_id`). *(The nightly reconciliation worker that automates this is Phase 3 — the query must work now.)*
 3. **"Adjudicate these two facts."** Given two uuids, show capture timestamps, sources, versions, and supersession chain side by side — including who approved each (from the review events), distinctly from who proposed each.
-4. **"Was this hallucinated?"** Given a session_id and a claim, show whether any consumed memory in that session contains it (FTS over the consumed set).
+4. **"Was this hallucinated?"** Given a session_id and a claim, show whether any consumed memory or consumed trace in that session contains it (FTS over the consumed set).
 
 Plus mechanical tests: UPDATE/DELETE on traces fails **both** via trigger and via the `memsrv` role's grants; private memories invisible to other agents; shared writes cannot be born approved; never-store gate **blocks** a seeded fake secret on the memory path and **redacts** it on the trace path (event recorded, secret absent); RRF returns per-lane scores; namespace isolation holds; **(v1.1)** every memory row has a valid `content_hash`; approval without `--by` fails; approval trace event carries `review:<uuid>` session and a reviewer agent_id distinct from the proposer; `--edit` approval preserves original content and marks `amended: true`; **(v1.4)** successful retirement of approved shared and private memories records the normalized actor and reason, is replayable through `memctl trace retirement:<uuid>`, and exposes the status change and trace together; missing `--by`/`--reason`, a missing uuid, an invalid source status, and repeated retirement fail without changing the row or appending a retirement event.
 

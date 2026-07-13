@@ -300,6 +300,100 @@ public sealed class HttpTransportTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RetrieveTraceReturnsFullRecordOnTheWireAndLogsTraceConsumed()
+    {
+        var marker = $"retrieve-{Guid.NewGuid():N}";
+        await using var client = await ConnectAsync(AgentAKey);
+
+        var seedMemory = await SeedApprovedMemoryAsync(client, "memory-system");
+        var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "assistant_msg",
+            ["content"] = new { text = $"wire-shape evidence {marker}" },
+            ["refs"] = new[] { seedMemory }
+        });
+        var traceUuid = logged.GetProperty("data").GetProperty("traceUuid").GetGuid();
+
+        var retrieved = await CallToolAsync(client, "retrieve_trace", new Dictionary<string, object?>
+        {
+            ["trace_uuid"] = traceUuid
+        });
+
+        // The full trace record, camelCase on the wire, with content as real
+        // JSON (not a double-encoded string) and the timestamp as createdAt.
+        AssertNext(retrieved);
+        Assert.Contains("refs", retrieved.GetProperty("next").GetString());
+        var record = retrieved.GetProperty("data");
+        Assert.Equal(traceUuid, record.GetProperty("traceUuid").GetGuid());
+        Assert.Equal(client.SessionId, record.GetProperty("sessionId").GetString());
+        Assert.Equal("agent-a", record.GetProperty("agentId").GetString());
+        Assert.Equal("memory-system", record.GetProperty("namespace").GetString());
+        Assert.Equal("assistant_msg", record.GetProperty("eventType").GetString());
+        Assert.Equal(JsonValueKind.Object, record.GetProperty("content").ValueKind);
+        Assert.Equal($"wire-shape evidence {marker}", record.GetProperty("content").GetProperty("text").GetString());
+        Assert.Equal(seedMemory, Assert.Single(record.GetProperty("refs").EnumerateArray()).GetGuid());
+        Assert.True(record.TryGetProperty("createdAt", out var createdAt));
+        Assert.True(createdAt.GetDateTimeOffset() > DateTimeOffset.UtcNow.AddMinutes(-5));
+
+        // The read is audited under the transport session, observable through
+        // the operator seam.
+        var trace = await RunMemCtlAsync("trace", client.SessionId!);
+        var consumedLine = trace.Split('\n').FirstOrDefault(line => line.Contains("trace_consumed"));
+        Assert.NotNull(consumedLine);
+        Assert.Contains($"refs={traceUuid}", consumedLine, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetrieveTraceForbiddenNamespaceDetailsCrossTheMcpBoundary()
+    {
+        await using var writer = await ConnectAsync(AgentAKey);
+        var logged = await CallToolAsync(writer, "log_trace", new Dictionary<string, object?>
+        {
+            ["namespace"] = "homelab",
+            ["event_type"] = "note",
+            ["content"] = new { text = "homelab-only trace" }
+        });
+        var traceUuid = logged.GetProperty("data").GetProperty("traceUuid").GetGuid();
+
+        // agent-b's allowlist is memory-system only: the read fails as a tool
+        // execution error naming the exact rejected namespace, the same shape
+        // as get_by_id (per #25), without leaking credentials.
+        await using var outsider = await ConnectAsync(ScopedKey);
+        var result = await outsider.CallToolAsync("retrieve_trace", new Dictionary<string, object?>
+        {
+            ["trace_uuid"] = traceUuid
+        });
+
+        Assert.True(result.IsError == true, "retrieving a trace outside the allowlist must be rejected");
+        var errorText = string.Join(Environment.NewLine,
+            result.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        Assert.Contains("'homelab'", errorText);
+        Assert.DoesNotContain(ScopedKey, errorText);
+    }
+
+    [Fact]
+    public async Task RetrieveTraceUnknownUuidFailsAcrossTheMcpBoundary()
+    {
+        await using var client = await ConnectAsync(AgentAKey);
+        var unknown = Guid.NewGuid();
+
+        var result = await client.CallToolAsync("retrieve_trace", new Dictionary<string, object?>
+        {
+            ["trace_uuid"] = unknown
+        });
+
+        // The current boundary contract, matching get_by_id's not-found: a
+        // tool execution error whose text the SDK masks generically ("An error
+        // occurred invoking 'retrieve_trace'") — plain not-found detail does
+        // not cross the boundary, unlike namespace-forbidden (which Relay
+        // deliberately converts to McpException).
+        Assert.True(result.IsError == true, "an unknown trace uuid must fail as not-found");
+        var errorText = string.Join(Environment.NewLine,
+            result.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        Assert.Contains("retrieve_trace", errorText);
+    }
+
+    [Fact]
     public async Task UnqualifiedCallLandsInDefaultNamespace()
     {
         await using var client = await ConnectAsync(AgentAKey);

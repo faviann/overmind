@@ -168,11 +168,7 @@ Committed — do not re-litigate without the maintainer:
 
 ## Open boundaries (surface to the human; do not settle silently)
 
-- **`retrieve_trace` is referenced but never specified.** The `get_by_id`
-  `next` hint in spec §8 points agents at `retrieve_trace`, and the handoff
-  lists it in the tool surface, but the spec's tool list does not define it
-  and the server does not implement it. Its contract — or the hint's removal
-  — is a spec gap for the maintainer.
+None currently.
 
 ## Not owned here
 

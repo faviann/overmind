@@ -243,7 +243,9 @@ static async Task ConsumedAsync(MemSrvOptions options, string sessionId)
     var entries = await Service(options).ConsumedAsync(sessionId);
     foreach (var entry in entries)
     {
-        Console.WriteLine($"{entry.Ts:O} {entry.MemoryUuid} type={entry.Type} source={entry.SourceType}:{entry.SourceId ?? "<none>"}");
+        Console.WriteLine(entry.Kind == "trace"
+            ? $"{entry.Ts:O} trace {entry.Uuid} event={entry.Type}"
+            : $"{entry.Ts:O} memory {entry.Uuid} type={entry.Type} source={entry.SourceType}:{entry.SourceId ?? "<none>"}");
     }
 }
 

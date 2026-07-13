@@ -170,17 +170,63 @@ public sealed class AcceptanceTests : HttpSeamTestBase
             "a claim only present in unconsumed memory must not be attributed to the session");
     }
 
+    [Fact]
+    public async Task WasThisHallucinated_ConsumedTraceContentCountsInTheConsumedSet()
+    {
+        // Traces ground answers too (retrieve_trace, decision 2026-07-13): a
+        // claim read from a trace must be attributable exactly like one read
+        // from a memory — and only when the trace was actually consumed.
+        var marker = $"chronon{Guid.NewGuid():N}";
+        await using var client = await ConnectAsync(AgentAKey);
+
+        var consumedTrace = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "assistant_msg",
+            ["content"] = new { text = $"The cesium fountain clock drifts nanoseconds weekly {marker}" }
+        });
+        await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "assistant_msg",
+            ["content"] = new { text = $"The rubidium standby clock drifts microseconds weekly {marker}" }
+        });
+
+        await CallToolAsync(client, "retrieve_trace", new Dictionary<string, object?>
+        {
+            ["trace_uuid"] = consumedTrace.GetProperty("data").GetProperty("traceUuid").GetGuid()
+        });
+
+        var sessionId = client.SessionId!;
+        await using var connection = new NpgsqlConnection(AdminConnection);
+        await connection.OpenAsync();
+
+        Assert.True(await ClaimInConsumedSetAsync(connection, sessionId, "cesium fountain clock"),
+            "a claim present in a consumed trace must be found");
+        Assert.False(await ClaimInConsumedSetAsync(connection, sessionId, "rubidium standby clock"),
+            "a claim only present in an unconsumed trace must not be attributed to the session");
+    }
+
     private static async Task<bool> ClaimInConsumedSetAsync(NpgsqlConnection connection, string sessionId, string claim)
     {
+        // Consumed memories use the indexed search_tsv; consumed traces have no
+        // FTS index (deliberately — the consumed set per session is small), so
+        // the trace leg computes an ad-hoc tsvector over just those rows.
         var matches = await connection.ExecuteScalarAsync<long>(
             """
-            SELECT COUNT(*)
-            FROM memories m
-            WHERE m.search_tsv @@ websearch_to_tsquery('english', @Claim)
-              AND m.uuid IN (
-                  SELECT unnest(refs)
-                  FROM traces
-                  WHERE session_id = @SessionId AND event_type = 'memory_consumed')
+            SELECT
+              (SELECT COUNT(*)
+               FROM memories m
+               WHERE m.search_tsv @@ websearch_to_tsquery('english', @Claim)
+                 AND m.uuid IN (
+                     SELECT unnest(refs)
+                     FROM traces
+                     WHERE session_id = @SessionId AND event_type = 'memory_consumed'))
+            + (SELECT COUNT(*)
+               FROM traces r
+               WHERE to_tsvector('english', r.content::text) @@ websearch_to_tsquery('english', @Claim)
+                 AND r.trace_uuid IN (
+                     SELECT unnest(refs)
+                     FROM traces
+                     WHERE session_id = @SessionId AND event_type = 'trace_consumed'))
             """,
             new { Claim = claim, SessionId = sessionId });
         return matches > 0;

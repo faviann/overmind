@@ -45,6 +45,15 @@ public sealed class McpMemoryTools
         CancellationToken cancellationToken = default) =>
         Relay(() => memory.GetByIdAsync(context, uuid, cancellationToken));
 
+    [McpServerTool(Name = "retrieve_trace")]
+    [Description("Fetch a full trace record by UUID for provenance context and log a trace_consumed event. Readable iff the trace's namespace is within the agent's allowlist.")]
+    public static Task<ToolEnvelope<RetrievedTraceRecord>> RetrieveTrace(
+        MemoryService memory,
+        MemoryContext context,
+        [Description("Trace UUID, e.g. a memory's source_id or an entry in another trace's refs.")] Guid trace_uuid,
+        CancellationToken cancellationToken = default) =>
+        Relay(() => memory.RetrieveTraceAsync(context, trace_uuid, cancellationToken));
+
     [McpServerTool(Name = "propose_memory")]
     [Description("Create a shared proposed memory that requires operator approval.")]
     public static Task<ToolEnvelope<MemoryWriteResult>> ProposeMemory(

@@ -64,11 +64,15 @@ public sealed record WorkstreamRecord(
 
 public sealed record WorkstreamCheckoutResult(WorkstreamRecord Workstream, bool Created);
 
+// One read in a session's consumed set. Kind is "memory" (memory_consumed;
+// Type/SourceType/SourceId describe the memory) or "trace" (trace_consumed;
+// Type carries the read trace's event_type, source columns are null).
 public sealed record ConsumedEntry(
     DateTimeOffset Ts,
-    Guid MemoryUuid,
+    string Kind,
+    Guid Uuid,
     string Type,
-    string SourceType,
+    string? SourceType,
     string? SourceId);
 
 public sealed record WhyStep(
@@ -79,6 +83,19 @@ public sealed record WhyStep(
     string? SourceId,
     Guid? Supersedes,
     TraceRecord? SourceTrace);
+
+// The agent-facing retrieve_trace response. Distinct from TraceRecord: content
+// is real JSON on the wire (not a double-encoded string) and the timestamp
+// serializes as createdAt per the §8 camelCase wire convention.
+public sealed record RetrievedTraceRecord(
+    Guid TraceUuid,
+    string SessionId,
+    string AgentId,
+    string Namespace,
+    string EventType,
+    JsonElement Content,
+    Guid[]? Refs,
+    DateTimeOffset CreatedAt);
 
 public sealed class TraceRecord
 {

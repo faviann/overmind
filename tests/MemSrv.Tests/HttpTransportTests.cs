@@ -39,13 +39,8 @@ public sealed class HttpTransportTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        await using (var connection = new NpgsqlConnection(AdminConnection))
-        {
-            await connection.OpenAsync();
-            await connection.ExecuteAsync("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
-            await connection.ExecuteAsync("GRANT ALL ON SCHEMA public TO overmind;");
-            DatabaseMigrator.Migrate(AdminConnection, Path.Combine(_root, "migrations"), logToConsole: false);
-        }
+        await TestDatabase.ResetSessionDatabaseOnceAsync(
+            typeof(HttpTransportTests), Path.Combine(_root, "migrations"));
 
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");
         await File.WriteAllTextAsync(_keysPath, KeyFileYaml());
@@ -460,13 +455,8 @@ public sealed class HttpTransportTests : IAsyncLifetime
     // Runs a memctl command (the sanctioned operator seam), asserts it succeeded,
     // and returns its stdout so tests can observe operator-visible state instead of
     // reading the database directly.
-    private static async Task<string> RunMemCtlAsync(params string[] args)
-    {
-        var (exitCode, stdout, stderr) = await TestProcessRunner.RunMemCtlToExitAsync(
-            new Dictionary<string, string> { ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection }, args);
-        Assert.True(exitCode == 0, $"memctl {string.Join(' ', args)} failed with exit {exitCode}. stdout={stdout} stderr={stderr}");
-        return stdout;
-    }
+    private static Task<string> RunMemCtlAsync(params string[] args) =>
+        TestProcessRunner.RunMemCtlAsync(RuntimeConnection, null, args);
 
     private Process StartHttpServerProcess() =>
         TestProcessRunner.StartServer(new Dictionary<string, string>

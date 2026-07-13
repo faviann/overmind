@@ -16,14 +16,8 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     private readonly string _root = TestProcessRunner.RepoRoot;
     private readonly List<string> _serverErrorLines = [];
 
-    public async Task InitializeAsync()
-    {
-        await using var connection = new NpgsqlConnection(AdminConnection);
-        await connection.OpenAsync();
-        await connection.ExecuteAsync("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
-        await connection.ExecuteAsync("GRANT ALL ON SCHEMA public TO overmind;");
-        DatabaseMigrator.Migrate(AdminConnection, Path.Combine(_root, "migrations"), logToConsole: false);
-    }
+    public Task InitializeAsync() => TestDatabase.ResetSessionDatabaseOnceAsync(
+        typeof(MemoryServiceTests), Path.Combine(_root, "migrations"));
 
     public Task DisposeAsync() => Task.CompletedTask;
 
@@ -738,7 +732,10 @@ public sealed class MemoryServiceTests : IAsyncLifetime
             Name = "MemSrv.Server",
             InheritEnvironmentVariables = false,
             EnvironmentVariables = env,
-            ShutdownTimeout = TimeSpan.FromSeconds(5),
+            // The SDK waits this full interval before killing a stdio child
+            // which has already completed the test exchange. Keep disposal
+            // bounded without adding five seconds to every client instance.
+            ShutdownTimeout = TimeSpan.FromSeconds(1),
             StandardErrorLines = line => _serverErrorLines.Add(line)
         }));
     }
@@ -763,29 +760,15 @@ public sealed class MemoryServiceTests : IAsyncLifetime
             ["MEMSRV_SESSION_ID"] = "session-stdout",
         });
 
-    private async Task RunMemCtlAsync(params string[] args)
-    {
-        var result = await RunMemCtlForResultAsync(args);
-        Assert.True(result.ExitCode == 0, $"memctl failed with exit {result.ExitCode}. stdout={result.Stdout} stderr={result.Stderr}");
-    }
+    private async Task RunMemCtlAsync(params string[] args) =>
+        _ = await TestProcessRunner.RunMemCtlAsync(RuntimeConnection, null, args);
 
     private Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(params string[] args) =>
         RunMemCtlForResultAsync(extraEnvironment: null, args);
 
     private static Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
         IReadOnlyDictionary<string, string>? extraEnvironment, params string[] args)
-    {
-        var environment = new Dictionary<string, string>
-        {
-            ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection
-        };
-        foreach (var (key, value) in extraEnvironment ?? new Dictionary<string, string>())
-        {
-            environment[key] = value;
-        }
-
-        return TestProcessRunner.RunMemCtlToExitAsync(environment, args);
-    }
+        => TestProcessRunner.RunMemCtlToExitAsync(RuntimeConnection, extraEnvironment, args);
 
     private static void AssertNext(JsonElement envelope)
     {

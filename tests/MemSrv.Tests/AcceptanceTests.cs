@@ -21,6 +21,8 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class AcceptanceTests : HttpSeamTestBase
 {
+    private static readonly SemaphoreSlim ScenarioLock = new(1, 1);
+    private static ProvenanceScenario? _sharedScenario;
     // Shared fixture language: the seeder writes these phrases and the
     // provenance and hallucination checks assert on them, so the seeded
     // scenario and the queries cannot drift apart silently.
@@ -38,7 +40,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     [Fact]
     public async Task WhyDidYouSayThat_ConsumedEventsResolveToSourceTraces()
     {
-        var scenario = await SeedProvenanceScenarioAsync();
+        var scenario = await SharedProvenanceScenarioAsync();
 
         // "What did the agent read in this session?" — every consumed memory,
         // already decorated with its source.
@@ -73,7 +75,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     [Fact]
     public async Task SourceChanged_EveryMemoryDerivedFromSourceIdIsListed()
     {
-        var scenario = await SeedProvenanceScenarioAsync();
+        var scenario = await SharedProvenanceScenarioAsync();
 
         // Spec §10.2: the nightly reconciliation worker is Phase 3, but the
         // query must work now — a plain lookup on the indexed source_id.
@@ -92,7 +94,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     [Fact]
     public async Task AdjudicateTwoFacts_ShowsProvenanceSideBySideWithDistinctApprovers()
     {
-        var scenario = await SeedProvenanceScenarioAsync();
+        var scenario = await SharedProvenanceScenarioAsync();
 
         // Side by side: capture timestamps, sources, versions, and the
         // supersession chain, all from the operator seam.
@@ -145,7 +147,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     [Fact]
     public async Task WasThisHallucinated_FtsOverConsumedSetAnswersClaims()
     {
-        var scenario = await SeedProvenanceScenarioAsync();
+        var scenario = await SharedProvenanceScenarioAsync();
 
         // Spec §10.4: given a session and a claim, FTS over the memories the
         // session actually consumed answers whether the claim was in memory.
@@ -189,7 +191,7 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     [Fact]
     public async Task RetrievedResultsCarrySourceVersionStatusDecorationAndLaneScores()
     {
-        var scenario = await SeedProvenanceScenarioAsync();
+        var scenario = await SharedProvenanceScenarioAsync();
 
         // Every search result carries source type, version, and status — plus
         // per-lane scores (spec: never discard lane scores).
@@ -545,6 +547,25 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         JsonElement RevisedRecord,
         JsonElement OriginalRecord);
 
+    private async Task<ProvenanceScenario> SharedProvenanceScenarioAsync()
+    {
+        if (_sharedScenario is not null)
+        {
+            return _sharedScenario;
+        }
+
+        await ScenarioLock.WaitAsync();
+        try
+        {
+            _sharedScenario ??= await SeedProvenanceScenarioAsync();
+            return _sharedScenario;
+        }
+        finally
+        {
+            ScenarioLock.Release();
+        }
+    }
+
     // Agent-a logs source traces, proposes memories citing them, distinct human
     // reviewers approve via memctl (one approval supersedes the original fact),
     // and the agent consumes memories via search + get_by_id so memory_consumed
@@ -594,9 +615,24 @@ public sealed class AcceptanceTests : HttpSeamTestBase
 
         // Consumption: search, then read full records — the server logs
         // memory_consumed events under the transport session.
+        // Fill the requested public result window with scenario-owned matches.
+        // Retrieval deliberately fuses an FTS lane with a recency lane; without
+        // this data, rows written by an independently ordered test can correctly
+        // enter through recency alone and make this lane-decoration assertion
+        // depend on an empty database.
+        for (var i = 0; i < 9; i++)
+        {
+            await CallToolAsync(client, "save_note", new Dictionary<string, object?>
+            {
+                ["namespace"] = "memory-system",
+                ["type"] = "note",
+                ["content"] = $"Recalibration scenario support note {i} ({marker})"
+            });
+        }
+
         var search = await CallToolAsync(client, "search_memory", new Dictionary<string, object?>
         {
-            ["query"] = marker,
+            ["query"] = $"recalibration {marker}",
             ["limit"] = 10
         });
         var revisedRecord = await CallToolAsync(client, "get_by_id", new Dictionary<string, object?> { ["uuid"] = revisedUuid });

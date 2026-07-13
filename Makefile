@@ -1,4 +1,4 @@
-.PHONY: db-up test test-one test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference
+.PHONY: db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference
 
 sdk-reference:
 	@tools/provision-sdk-reference.sh
@@ -9,11 +9,14 @@ db-up:
 
 test: db-up
 	dotnet build memsrv.sln
-	dotnet test tests/MemSrv.Tests --no-build
+	@tools/run-test-suite.sh
 
 test-one: db-up
 	dotnet build memsrv.sln
 	dotnet test tests/MemSrv.Tests --no-build --filter "$(T)"
+
+benchmark-test:
+	@tools/benchmark-test.sh
 
 test-db-reset: db-up
 	@tools/test-db.sh reset "$${MEMSRV_TEST_DATABASE:-memory_test}"

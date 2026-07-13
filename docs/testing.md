@@ -47,10 +47,16 @@ assert that mechanism directly:
   current template. `make test-db-sweep` removes databases leaked for more than
   six hours by crashed runs, but never the template or a database with an active
   connection. `make db-up` runs the same conservative sweep.
-- Tests are order-independent: each test creates its own namespace/session ids;
-  never share mutable fixtures across tests. The session database is lifecycle
-  infrastructure, not mutable test state: database-backed classes still reset
-  and migrate their own schema as required by their existing test seam.
+- Tests are order-independent: each test creates unique namespace/session,
+  workstream, source, and search identifiers; never share mutable fixtures
+  across tests. The session database is lifecycle infrastructure, not mutable
+  test state. The suite fixture provisions the session database and each
+  database-backed class starts from a fresh clone of the current migrated
+  template. Tests within a class reuse that schema and isolate their rows
+  through unique public identifiers. Expensive immutable scenario data may be
+  initialized once per class behind a synchronized fixture. A test which
+  deliberately mutates schema or grants must use its own disposable clone and
+  restore cluster-wide role state.
 
 ## Child processes (memctl, MemSrv.Server)
 - All subprocess launches go through `tests/MemSrv.Tests/TestProcessRunner.cs`,
@@ -63,6 +69,49 @@ assert that mechanism directly:
 - Like `--no-build`, tests never build the child projects; the runner fails
   with instructions if an apphost is missing. Configuration/TFM are derived
   from the test assembly's own output path, so Release runs Release apphosts.
+
+## Runtime benchmark
+
+- `make benchmark-test` is the repeatable warm-suite benchmark. It reports
+  Docker/PostgreSQL readiness, build/restore, test discovery/host startup,
+  template validation/migration, disposable database cloning, isolated memctl
+  no-command apphost startup, direct server-apphost startup through the public
+  HTTP health endpoint, full test wall time, and separate TRX command/test-body
+  durations. It also names the slowest successful tests and flags any over ten
+  seconds.
+- `make test` runs four disjoint test-host shards concurrently. Each shard gets
+  the isolated session database and LOGIN role described above; their filters
+  partition the suite, so the reported shard totals sum to the unchanged full
+  test count. The fourth shard is the mutually exclusive catch-all, ensuring a
+  newly added test class runs without requiring an edit to the shard list.
+  `make test-one` intentionally remains one filtered host.
+- Run it three times against the same warm checkout and report all three test
+  phase values plus their median. Do not compare a green run with an aborted or
+  skipped run.
+- `DisposableCloneRevalidatesTemplateAfterDifferentMigrationSet` can sit at the
+  ten-second boundary on a loaded benchmark host. Its cost is intentional: the
+  mechanical lifecycle test serially installs migration set A, replaces it
+  with B, restores A, validates all three clones, and finally restores the real
+  template under the cross-process lock.
+- The historical 30-failure profiling run is not a performance baseline for
+  completed behavior. The merged #30 direct-apphost lifecycle fix and #33
+  per-suite database/template isolation precede this benchmark; the post-merge
+  baseline is 92 passing, zero failed, zero skipped in three runs.
+
+### Issue #29 measurements (2026-07-13, same warm workspace)
+
+| Run | Before: `make test` wall | After: `make test` wall | Result |
+| --- | ---: | ---: | --- |
+| 1 | 201.738s | 58.164s | 92 passed, 0 failed, 0 skipped |
+| 2 | 194.541s | 58.123s | 92 passed, 0 failed, 0 skipped |
+| 3 | 202.458s | 51.562s | 92 passed, 0 failed, 0 skipped |
+| Median | 201.738s | 58.123s | unchanged full test count |
+
+The checked-in benchmark command subsequently reported a 50.339s full test
+phase, 92/0/0, and no successful test over ten seconds. The four shard-reported
+test durations in the three post-change `make test` runs had maxima of 45s,
+45s, and 42s; the command-level wall values above conservatively include
+Docker readiness and the warm build as well.
 
 ## Anti-patterns (stop and flag to the human if you catch yourself)
 - Weakening an assertion to reach green

@@ -159,9 +159,10 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             row.ContentHash,
             ParseMetadata(row.MetadataJson));
 
-        return new ToolEnvelope<MemoryRecord>(
-            record,
-            $"This memory derives from source_id={record.SourceId ?? "<none>"}; retrieve_trace on it for full context.");
+        var next = record.SourceId is not null
+            ? $"This memory derives from source_id={record.SourceId}; retrieve_trace on it for full context."
+            : "This memory has no recorded source; call search_memory for related context, or log_trace to capture supporting evidence.";
+        return new ToolEnvelope<MemoryRecord>(record, next);
     }
 
     public async Task<ToolEnvelope<RetrievedTraceRecord>> RetrieveTraceAsync(

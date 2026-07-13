@@ -292,7 +292,7 @@ genuinely snake_case and remain so.
 2. **`search_memory`** `{query, namespaces?, types?, limit?}` → `{results: [{uuid, type, tier, status, preview, sourceType, sourceId, version, laneScores, fusedScore}], next}`
    `next`: "Call get_by_id with a uuid to read full content. Nothing relevant? Consider propose_memory to fill the gap."
 3. **`get_by_id`** `{uuid}` → full record incl. all provenance columns + version chain (`supersedes` / superseded-by).
-   `next`: "This memory derives from source_id=<...>; retrieve_trace on it for full context." (Server logs `memory_consumed`.)
+   `next` when `source_id` is present: "This memory derives from source_id=<...>; retrieve_trace on it for full context." When `source_id` is null: "This memory has no recorded source; call search_memory for related context, or log_trace to capture supporting evidence." (Server logs `memory_consumed`.)
 3b. **`retrieve_trace`** `{trace_uuid}` → the full trace record: `{traceUuid, sessionId, agentId, namespace, eventType, content, refs, createdAt}`. Readable iff the caller's key allows the trace's namespace — the same open-door boundary as every other read; a disallowed namespace raises the same namespace-forbidden error as `get_by_id`, an unknown uuid is a plain not-found.
    `next`: "This trace references refs=[...]; call get_by_id (memories) or retrieve_trace (traces) on them for surrounding context." A refs-less trace must not dead-end the caller: "This trace carries no refs; the provenance walk ends here. Call search_memory for related context, or propose_memory if it holds a durable fact worth keeping." (Server logs `trace_consumed`.)
 4. **`propose_memory`** `{namespace, type, content, source_type, source_id, supersedes?}` → `{uuid, status:'proposed'}`

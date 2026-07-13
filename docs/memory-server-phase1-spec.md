@@ -13,7 +13,7 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > 8. Test-DB location reconciled (see §2/§12): dev/test/CI use a disposable local `memory_test`; the LXC hosts production `memory` only. Language bullet aligned to the committed .NET stack in handoff v4.
 
 > **v1.2 changelog (2026-07-07 — production substrate pinned, see `docs/decisions.md` and `docs/deployment-contract.md`):**
-> Postgres major pinned to **18** everywhere (was "15+"). Migrations no longer create the `memsrv` role — provisioning owns roles (Ansible in prod, `docker/postgres-init/` in dev/CI). Image contract: `ghcr.io/faviann/overmind:<version>`, immutable tags. Service runtime contract (HTTP port/health) explicitly deferred to Session 2.
+> Postgres major pinned to **18** everywhere (was "15+"). Migrations no longer create the `memsrv` role — provisioning owns roles (Ansible in prod, the Compose bootstrap in dev/CI). Image contract: `ghcr.io/faviann/overmind:<version>`, immutable tags. Service runtime contract (HTTP port/health) explicitly deferred to Session 2.
 
 > **v1.3 changelog (2026-07-10 — `log_trace` session selection, issue #17, see `docs/decisions.md`):**
 > `session_id` removed from the `log_trace` input schema; session identity is always server-derived (Mcp-Session-Id over HTTP; `MEMSRV_SESSION_ID` or a generated per-process id over stdio). A caller-supplied `session_id` is ignored; the response now returns `{traceUuid, sessionId}`. Import-time session preservation is an operator-path feature deferred to the conversation-capture wayfinder (#15). Must land before the v1.0.0 tag.

@@ -1,6 +1,18 @@
+name: overmind
+
 services:
   postgres:
     image: postgres:18
+    entrypoint:
+      - /bin/bash
+      - -ec
+      - |
+        cat > /docker-entrypoint-initdb.d/01-roles-and-databases.sql <<'SQL'
+        CREATE ROLE memsrv LOGIN PASSWORD 'memsrv_dev';
+        CREATE DATABASE memory_dev;
+        CREATE DATABASE memory_test;
+        SQL
+        exec /usr/local/bin/docker-entrypoint.sh postgres
     environment:
       POSTGRES_USER: overmind
       POSTGRES_PASSWORD: overmind_dev
@@ -9,7 +21,6 @@ services:
       - "127.0.0.1:55432:5432"
     volumes:
       - pgdata:/var/lib/postgresql
-      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U overmind -d postgres"]
       interval: 2s

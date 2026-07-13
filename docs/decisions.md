@@ -172,7 +172,7 @@ Recorded so the homelab infra PRD can converge without guessing (see
 - Ansible owns the database, roles, secrets, backups, and migration
   invocation; the app owns schema content through its migrations.
 - **Migrations never create roles.** `memsrv` must pre-exist (Ansible in prod,
-  `docker/postgres-init/` in dev/CI). Rationale: the previous guarded
+  the Compose bootstrap in dev/CI). Rationale: the previous guarded
   `CREATE ROLE` produced a NOLOGIN dev role diverging from the Ansible-created
   LOGIN role; one provisioning path, dev mirrors prod.
 - Admin path is Ansible → SSH → docker exec; consumers never get direct

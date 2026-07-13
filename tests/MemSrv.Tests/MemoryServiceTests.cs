@@ -11,8 +11,8 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class MemoryServiceTests : IAsyncLifetime
 {
-    private const string AdminConnection = "Host=127.0.0.1;Port=55432;Database=memory_test;Username=overmind;Password=overmind_dev";
-    private const string RuntimeConnection = "Host=127.0.0.1;Port=55432;Database=memory_test;Username=memsrv;Password=memsrv_dev";
+    private static string AdminConnection => TestDatabase.AdminConnection;
+    private static string RuntimeConnection => TestDatabase.RuntimeConnection;
     private readonly string _root = FindRepoRoot();
     private readonly List<string> _serverErrorLines = [];
 
@@ -23,7 +23,6 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         await connection.ExecuteAsync("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
         await connection.ExecuteAsync("GRANT ALL ON SCHEMA public TO overmind;");
         DatabaseMigrator.Migrate(AdminConnection, Path.Combine(_root, "migrations"), logToConsole: false);
-        await connection.ExecuteAsync("ALTER ROLE memsrv LOGIN PASSWORD 'memsrv_dev';");
     }
 
     public Task DisposeAsync() => Task.CompletedTask;
@@ -638,7 +637,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     {
         var env = new Dictionary<string, string>
         {
-            ["MEMSRV_ADMIN_CONNECTION_STRING"] = "postgres://overmind:overmind_dev@127.0.0.1:55432/memory_test"
+            ["MEMSRV_ADMIN_CONNECTION_STRING"] = TestDatabase.AdminUrl
         };
 
         var result = await RunMemCtlForResultAsync(env, "migrate");

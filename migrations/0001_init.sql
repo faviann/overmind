@@ -1,5 +1,5 @@
 -- Requires the memsrv role to already exist. Roles are owned by provisioning
--- (Ansible in production, docker/postgres-init in dev/CI); migrations grant to
+-- (Ansible in production, Compose bootstrap in dev/CI); migrations grant to
 -- memsrv but never create roles or manage passwords.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 

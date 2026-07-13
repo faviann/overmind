@@ -23,8 +23,8 @@ namespace MemSrv.Tests;
 // the spec'd behavior may connect directly.
 public abstract class HttpSeamTestBase : IAsyncLifetime
 {
-    protected const string AdminConnection = "Host=127.0.0.1;Port=55432;Database=memory_test;Username=overmind;Password=overmind_dev";
-    protected const string RuntimeConnection = "Host=127.0.0.1;Port=55432;Database=memory_test;Username=memsrv;Password=memsrv_dev";
+    protected static string AdminConnection => TestDatabase.AdminConnection;
+    protected static string RuntimeConnection => TestDatabase.RuntimeConnection;
 
     // agent-a reaches memory-system (default) and homelab; agent-b is confined to
     // memory-system so foreign-namespace calls can be rejected.
@@ -44,7 +44,6 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
             await connection.ExecuteAsync("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
             await connection.ExecuteAsync("GRANT ALL ON SCHEMA public TO overmind;");
             DatabaseMigrator.Migrate(AdminConnection, Path.Combine(_root, "migrations"), logToConsole: false);
-            await connection.ExecuteAsync("ALTER ROLE memsrv LOGIN PASSWORD 'memsrv_dev';");
         }
 
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");

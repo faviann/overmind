@@ -767,17 +767,57 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task RetireAsync(Guid uuid, CancellationToken cancellationToken = default)
+    public async Task RetireAsync(
+        Guid uuid,
+        string retiredBy,
+        string reason,
+        CancellationToken cancellationToken = default)
     {
-        await using var connection = await OpenAsync(cancellationToken);
-        var affected = await connection.ExecuteAsync(
-            "UPDATE memories SET status = 'retired', retired_at = now() WHERE uuid = @Uuid",
-            new { Uuid = uuid });
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new ArgumentException("Retirement reason is required.", nameof(reason));
+        }
 
-        if (affected == 0)
+        var @operator = NormalizeOperatorIdentity(retiredBy);
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<MemoryRow>(
+            """
+            SELECT uuid, namespace, status
+            FROM memories
+            WHERE uuid = @Uuid
+            FOR UPDATE
+            """,
+            new { Uuid = uuid },
+            transaction);
+
+        if (row is null)
         {
             throw new InvalidOperationException($"Memory '{uuid}' was not found.");
         }
+
+        if (row.Status != "approved")
+        {
+            throw new InvalidOperationException(
+                $"Memory '{uuid}' has status '{row.Status}' and cannot be retired; only approved memories are eligible.");
+        }
+
+        await connection.ExecuteAsync(
+            "UPDATE memories SET status = 'retired', retired_at = now() WHERE uuid = @Uuid AND status = 'approved'",
+            new { Uuid = uuid },
+            transaction);
+
+        await InsertTraceRawAsync(
+            @operator,
+            row.Namespace,
+            $"retirement:{uuid}",
+            "retirement",
+            new { @operator, reason },
+            [uuid],
+            cancellationToken,
+            connection,
+            transaction);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task<MemoryRecord> ShowAsync(Guid uuid)
@@ -1192,6 +1232,16 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         }
 
         return reviewer.Contains(':', StringComparison.Ordinal) ? reviewer : $"human:{reviewer}";
+    }
+
+    private static string NormalizeOperatorIdentity(string @operator)
+    {
+        if (string.IsNullOrWhiteSpace(@operator))
+        {
+            throw new ArgumentException("Operator identity is required.", nameof(@operator));
+        }
+
+        return @operator.Contains(':', StringComparison.Ordinal) ? @operator : $"human:{@operator}";
     }
 
     private static string ReviewSessionId(Guid proposalUuid) => $"review:{proposalUuid}";

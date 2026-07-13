@@ -369,6 +369,8 @@ public sealed class HttpTransportTests : IAsyncLifetime
             result.Content.OfType<TextContentBlock>().Select(block => block.Text));
         Assert.Contains("'homelab'", errorText);
         Assert.DoesNotContain(ScopedKey, errorText);
+        var trace = await RunMemCtlAsync("trace", outsider.SessionId!);
+        Assert.DoesNotContain("trace_consumed", trace, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -391,6 +393,8 @@ public sealed class HttpTransportTests : IAsyncLifetime
         var errorText = string.Join(Environment.NewLine,
             result.Content.OfType<TextContentBlock>().Select(block => block.Text));
         Assert.Contains("retrieve_trace", errorText);
+        var trace = await RunMemCtlAsync("trace", client.SessionId!);
+        Assert.DoesNotContain("trace_consumed", trace, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -415,6 +419,96 @@ public sealed class HttpTransportTests : IAsyncLifetime
         var eventLine = trace.Split('\n').FirstOrDefault(line => line.Contains(uuid.ToString()));
         Assert.NotNull(eventLine);
         Assert.Contains("ns=memory-system", eventLine);
+    }
+
+    [Fact]
+    public async Task ExplicitAllowedNamespaceLogTraceLandsThere()
+    {
+        await using var client = await ConnectAsync(AgentAKey);
+
+        var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["namespace"] = "homelab",
+            ["event_type"] = "note",
+            ["content"] = new { text = "allowlisted namespace trace" }
+        });
+
+        var trace = await RunMemCtlAsync("trace", client.SessionId!);
+        Assert.Contains(logged.GetProperty("data").GetProperty("traceUuid").GetGuid().ToString(), trace);
+        Assert.Contains("ns=homelab", trace);
+    }
+
+    [Fact]
+    public async Task ForeignNamespaceLogTraceAndSearchAreRejectedAtTheMcpBoundary()
+    {
+        await using var client = await ConnectAsync(ScopedKey);
+
+        foreach (var (tool, arguments) in new[]
+        {
+            ("log_trace", new Dictionary<string, object?>
+            {
+                ["namespace"] = "homelab",
+                ["event_type"] = "note",
+                ["content"] = new { text = "must not land" }
+            }),
+            ("search_memory", new Dictionary<string, object?>
+            {
+                ["query"] = "anything",
+                ["namespaces"] = new[] { "homelab" }
+            })
+        })
+        {
+            var result = await client.CallToolAsync(tool, arguments);
+            Assert.True(result.IsError == true, $"{tool} outside the allowlist must fail");
+            var message = string.Join(Environment.NewLine, result.Content.OfType<TextContentBlock>().Select(block => block.Text));
+            Assert.Contains("'homelab'", message);
+        }
+
+        var trace = await RunMemCtlAsync("trace", client.SessionId!);
+        Assert.DoesNotContain("must not land", trace, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AllowlistedSearchCrossesNamespacesButFetchDoesNotBypassTheAllowlist()
+    {
+        await using var allowed = await ConnectAsync(AgentAKey);
+        var memorySystem = await SeedApprovedMemoryAsync(allowed, "memory-system");
+        var homelab = await SeedApprovedMemoryAsync(allowed, "homelab");
+
+        var crossNamespace = await CallToolAsync(allowed, "search_memory", new Dictionary<string, object?>
+        {
+            ["query"] = "httpseed",
+            ["namespaces"] = new[] { "memory-system", "homelab" }
+        });
+        var results = crossNamespace.GetProperty("data").EnumerateArray().ToList();
+        Assert.Contains(results, result => result.GetProperty("uuid").GetGuid() == memorySystem);
+        Assert.Contains(results, result => result.GetProperty("uuid").GetGuid() == homelab);
+
+        await using var confined = await ConnectAsync(ScopedKey);
+        var fetch = await confined.CallToolAsync("get_by_id", new Dictionary<string, object?> { ["uuid"] = homelab });
+        Assert.True(fetch.IsError == true, "a foreign memory must not be fetchable by UUID");
+        var message = string.Join(Environment.NewLine, fetch.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        Assert.Contains("'homelab'", message);
+    }
+
+    [Fact]
+    public async Task RetrieveTraceWithoutRefsOffersAnAlternativeInsteadOfADeadEnd()
+    {
+        await using var client = await ConnectAsync(AgentAKey);
+        var logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+        {
+            ["event_type"] = "note",
+            ["content"] = new { text = "leaf trace" }
+        });
+
+        var retrieved = await CallToolAsync(client, "retrieve_trace", new Dictionary<string, object?>
+        {
+            ["trace_uuid"] = logged.GetProperty("data").GetProperty("traceUuid").GetGuid()
+        });
+        var next = retrieved.GetProperty("next").GetString()!;
+        Assert.DoesNotContain("<none>", next, StringComparison.Ordinal);
+        Assert.Contains("no refs", next, StringComparison.Ordinal);
+        Assert.Contains("search_memory", next, StringComparison.Ordinal);
     }
 
     [Fact]

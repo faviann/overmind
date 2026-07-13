@@ -4,6 +4,7 @@ set -euo pipefail
 readonly template=memory_test_template
 readonly lock_file=/tmp/overmind-test-template.lock
 readonly command=${1:-}
+readonly memctl_apphost=${MEMCTL_APPHOST:-src/MemCtl/bin/Debug/net10.0/MemCtl}
 
 maintenance_psql() {
   docker compose exec -T postgres psql -U overmind -d postgres "$@"
@@ -41,8 +42,12 @@ ensure_template() {
     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$template' AND pid <> pg_backend_pid()" \
     -c "DROP DATABASE IF EXISTS $template" \
     -c "CREATE DATABASE $template"
+  [[ -x $memctl_apphost ]] || {
+    printf 'MemCtl apphost not found at %s; run dotnet build memsrv.sln first.\n' "$memctl_apphost" >&2
+    exit 1
+  }
   MEMSRV_ADMIN_CONNECTION_STRING="postgres://overmind:overmind_dev@127.0.0.1:55432/$template" \
-    dotnet run --project src/MemCtl -- migrate
+    "$memctl_apphost" migrate
   maintenance_psql -Xv ON_ERROR_STOP=1 \
     -c "COMMENT ON DATABASE $template IS '$fingerprint'"
 }

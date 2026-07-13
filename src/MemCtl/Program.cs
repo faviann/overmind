@@ -60,6 +60,15 @@ try
             await ReleaseAsync(options, Guid.Parse(args[1]));
             return 0;
 
+        case "workstream":
+            RequireArgs(args, 3);
+            if (!string.Equals(args[1], "release", StringComparison.Ordinal))
+            {
+                throw new ArgumentException($"Unknown workstream command '{args[1]}'.");
+            }
+            await ReleaseAsync(options, Guid.Parse(args[2]));
+            return 0;
+
         case "why":
             RequireArgs(args, 2);
             await WhyAsync(options, Guid.Parse(args[1]));
@@ -299,7 +308,8 @@ static void Usage()
     Console.Error.WriteLine("memctl approve <uuid> --by name [--edit | --content-file path]");
     Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
     Console.Error.WriteLine("memctl retire <uuid> --by name --reason reason");
-    Console.Error.WriteLine("memctl release <uuid>");
+    Console.Error.WriteLine("memctl workstream release <uuid>");
+    Console.Error.WriteLine("memctl release <uuid>  # compatibility alias");
     Console.Error.WriteLine("memctl why <uuid>");
     Console.Error.WriteLine("memctl consumed <session_id>");
     Console.Error.WriteLine("memctl trace <session_id>");

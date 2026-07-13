@@ -161,13 +161,17 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         Assert.False(await ClaimInConsumedSetAsync(connection, scenario.ConsumerSessionId, FabricatedClaim),
             "a fabricated claim must not be found");
 
-        // The join is over the consumed set, not the whole store: this claim
-        // exists — exactly as the approved-but-unconsumed memory the scenario
-        // seeded — yet was never consumed in the session.
-        var unconsumedMatches = (await connection.QueryAsync<Guid>(
-            "SELECT uuid FROM memories WHERE search_tsv @@ websearch_to_tsquery('english', @Claim)",
-            new { Claim = UnconsumedClaim })).ToList();
-        Assert.Equal(scenario.UnconsumedMemoryUuid, Assert.Single(unconsumedMatches));
+        // Establish the approved-but-unconsumed record through the agent's
+        // public retrieval seam. The only SQL in this test remains the binding
+        // §10.4 FTS query over the consumed set.
+        await using var client = await ConnectAsync(AgentAKey);
+        var unconsumedSearch = await CallToolAsync(client, "search_memory", new Dictionary<string, object?>
+        {
+            ["query"] = UnconsumedClaim
+        });
+        Assert.Contains(
+            unconsumedSearch.GetProperty("data").EnumerateArray(),
+            result => result.GetProperty("uuid").GetGuid() == scenario.UnconsumedMemoryUuid);
         Assert.False(await ClaimInConsumedSetAsync(connection, scenario.ConsumerSessionId, UnconsumedClaim),
             "a claim only present in unconsumed memory must not be attributed to the session");
     }

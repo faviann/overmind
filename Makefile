@@ -19,9 +19,11 @@ benchmark-test:
 	@tools/benchmark-test.sh
 
 test-db-reset: db-up
+	dotnet build memsrv.sln
 	@tools/test-db.sh reset "$${MEMSRV_TEST_DATABASE:-memory_test}"
 
 test-db-template: db-up
+	dotnet build memsrv.sln
 	@tools/test-db.sh template
 
 test-db-sweep: db-up

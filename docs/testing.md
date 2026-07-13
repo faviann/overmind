@@ -10,19 +10,44 @@
   matching production; `make db-up` provisions it). No mocking of the database
   or internal services — the DB constraints are part of the behavior under test.
 
-## The only DB-level tests allowed (mechanical tests)
+## The only direct-DB access allowed
+MCP tools and `memctl` remain the preferred test seams. Use them for agent and
+operator behavior, and assert on their responses or subsequent public reads.
+Direct database access is limited to the two categories below; it is not a
+general license to inspect internal tables.
+
+### Binding acceptance queries
+Spec §10 requires these queries to work now, but Phase 1 has no corresponding
+MCP tool or `memctl` command. The acceptance suite may therefore execute their
+specified SQL directly:
+- §10.2: given a `source_id`, list every memory derived from it using the
+  indexed `memories.source_id` lookup
+- §10.4: given a session and claim, run FTS over the memories and traces that
+  session actually consumed, including proof that unconsumed records do not
+  satisfy the query
+
+These are binding acceptance queries, not mechanical database checks. Keep
+them at the exact query seams required by §10; do not generalize them into
+arbitrary table assertions.
+
+### Mechanical database checks
 Where the database mechanism IS the spec'd behavior, tests connect directly and
 assert that mechanism directly:
 - trace mutation blocked by the `forbid_mutation` trigger AND by grants —
   **verify the grants, not just the trigger** (connect as `memsrv`, attempt
   UPDATE/DELETE, expect permission denied)
 - no DELETE granted on any table
-- never-store gate blocks a seeded synthetic secret (fake `AKIA...` pattern)
-- namespace isolation holds across agents
-- private memories invisible to other agent credentials
+- never-store persistence absence for a seeded synthetic secret (fake
+  `AKIA...` pattern)
+- every memory row's `content_hash` is the valid server-computed SHA-256 of its
+  content
 - migration-keyed test-template lifecycle: changing the migration fingerprint
   rebuilds the template, and each atomic clone exposes exactly the schema for
   the migration set that requested it
+
+Namespace isolation and private-memory invisibility are binding acceptance
+behaviors, but their seam is keyed MCP agents. Verify them through public
+searches and reads, not direct table assertions.
 
 ## Database lifecycle
 - The xUnit host owns one lazily created database per suite run. With no caller

@@ -9,15 +9,15 @@ using System.Text.RegularExpressions;
 namespace MemSrv.Tests;
 
 // Slice 7 (issue #9): the spec §10 acceptance suite, consolidated. One
-// end-to-end scenario is seeded through the public surface (MCP tools as keyed
-// agents over HTTP, memctl as the operator), then the four provenance
+// end-to-end scenario is seeded through the preferred public seams (MCP tools
+// as keyed agents over HTTP, memctl as the operator), then the four provenance
 // questions are asserted as queries: memctl where a command exists (consumed,
-// why, show, trace), SQL where none does — the source_id listing, which spec
-// §10.2 requires to work now, and the FTS-over-consumed-set join, per the
-// issue's "assert the four provenance questions as queries". Mechanical checks
-// follow docs/testing.md: direct DB access only where the database mechanism IS the
-// spec'd behavior (trigger + grants append-only, content_hash validity);
-// operator-facing checks run the real memctl CLI as a subprocess.
+// why, show, trace), SQL only for the binding queries with no public command —
+// the §10.2 source_id listing and §10.4 FTS-over-consumed-set query. Those are
+// acceptance queries, not mechanical checks. The separate sanctioned
+// mechanical DB checks cover trace grants/trigger and absence of DELETE,
+// never-store persistence absence, and content_hash validity. No direct access
+// authorizes arbitrary internal-table assertions; see docs/testing.md.
 [Collection("database")]
 public sealed class AcceptanceTests : HttpSeamTestBase
 {
@@ -77,8 +77,9 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     {
         var scenario = await SharedProvenanceScenarioAsync();
 
-        // Spec §10.2: the nightly reconciliation worker is Phase 3, but the
-        // query must work now — a plain lookup on the indexed source_id.
+        // Binding acceptance query (not a mechanical DB check): spec §10.2
+        // says the nightly reconciliation worker is Phase 3, but this indexed
+        // source_id lookup must work now and has no public command.
         await using var connection = new NpgsqlConnection(AdminConnection);
         await connection.OpenAsync();
         var derived = (await connection.QueryAsync<Guid>(
@@ -149,8 +150,9 @@ public sealed class AcceptanceTests : HttpSeamTestBase
     {
         var scenario = await SharedProvenanceScenarioAsync();
 
-        // Spec §10.4: given a session and a claim, FTS over the memories the
-        // session actually consumed answers whether the claim was in memory.
+        // Binding acceptance query (not a mechanical DB check): spec §10.4
+        // requires FTS over the set this session consumed, and Phase 1 has no
+        // public command for the claim query.
         await using var connection = new NpgsqlConnection(AdminConnection);
         await connection.OpenAsync();
 

@@ -61,9 +61,12 @@ Authority order (same as `AGENTS.md`):
   `approved` memories can be retired, atomically with their `retirement`
   trace event (spec §6c; decisions 2026-07-10 #18;
   `docs/adr/0001-provenance-carrying-memory-retirement.md`).
-- **`agent_id`, `session_id`, and namespace are server-derived**, never
-  trusted from tool arguments, and namespace isolation is enforced
-  server-side (spec §3; spec v1.3 changelog and decisions 2026-07-10 #17).
+- **`agent_id` and `session_id` are server-derived**, never trusted from
+  tool arguments (spec §3; spec v1.3 changelog and decisions 2026-07-10 #17).
+  Namespace is a caller argument (spec §8), but the server validates it
+  against the credential's allowed namespaces and enforces isolation
+  server-side — isolation never depends on trusting the argument (spec §3;
+  decisions 2026-07-07 "Session 2 design", namespace selection).
 - **Review and retirement events carry their own actor** in synthetic
   sessions (`review:<proposal_uuid>`, `retirement:<memory_uuid>`) — never the
   proposing agent's identity, never anonymous (spec §6b–6c).
@@ -104,10 +107,10 @@ Authority order (same as `AGENTS.md`):
 
 Committed — do not re-litigate without the maintainer:
 
-- **.NET with the official MCP C# SDK over PostgreSQL, major pinned to 18**
-  (minor floats). The schema and tool contracts are the product; the language
-  is the vehicle (spec §2; decisions 2026-07-07 "Production substrate and
-  deployment contract").
+- **.NET with the official MCP C# SDK, over PostgreSQL pinned to major
+  version 18** (minor floats). The schema and tool contracts are the product;
+  the language is the vehicle (spec §2; decisions 2026-07-07 "Production
+  substrate and deployment contract").
 - **One datastore, period.** No ClickHouse, Redis, vector DB, or queue as a
   second store: trace↔memory joins are load-bearing (acceptance tests 1 and
   4 *are* joins), and scale-out, if ever needed, is partitioning in place
@@ -118,9 +121,11 @@ Committed — do not re-litigate without the maintainer:
   and **never create roles** — provisioning owns roles (Ansible in prod, the
   Compose bootstrap in dev/CI) (`docs/deployment-contract.md`; decisions
   2026-07-07).
-- **Package versions are centrally pinned** in `Directory.Packages.props`;
+- **Package versions live in one central manifest**,
+  `Directory.Packages.props` (a repo-observable fact, not a documented rule);
   any MCP hosting or tool change starts with `make sdk-reference` and the
-  version-matched evidence in `reference/csharp-sdk/` (`AGENTS.md`).
+  version-matched evidence in `reference/csharp-sdk/` (`AGENTS.md`, "Read
+  before changing").
 - **Dev/test/CI use a disposable local database, never the production LXC** —
   contamination of an append-only, no-delete ledger is unrecoverable, so it
   is made structurally impossible rather than avoided by care (spec §2;

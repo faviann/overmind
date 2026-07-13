@@ -16,7 +16,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     private readonly string _root = TestProcessRunner.RepoRoot;
     private readonly List<string> _serverErrorLines = [];
 
-    public Task InitializeAsync() => TestDatabase.ResetSessionDatabaseOnceAsync(
+    public Task InitializeAsync() => TestDatabase.PrepareClassDatabaseAsync(
         typeof(MemoryServiceTests), Path.Combine(_root, "migrations"));
 
     public Task DisposeAsync() => Task.CompletedTask;

@@ -39,7 +39,7 @@ public sealed class HttpTransportTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        await TestDatabase.ResetSessionDatabaseOnceAsync(
+        await TestDatabase.PrepareClassDatabaseAsync(
             typeof(HttpTransportTests), Path.Combine(_root, "migrations"));
 
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");

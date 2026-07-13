@@ -33,6 +33,8 @@ public static class TestDatabase
     public static string ResolveDatabaseName(string? explicitName) =>
         string.IsNullOrWhiteSpace(explicitName) ? $"memory_test_{Guid.NewGuid():N}" : explicitName;
 
+    public static string CreatedAtComment() => $"overmind-test-created-at={DateTimeOffset.UtcNow:O}";
+
     internal static void SetDatabaseName(string databaseName) => _databaseName = databaseName;
     internal static void SetRuntimeRole(string runtimeRole) => _runtimeRole = runtimeRole;
 
@@ -108,7 +110,7 @@ public sealed class TestDatabaseFixture : IAsyncLifetime
         await ExecuteMaintenanceAsync(
             $"CREATE DATABASE {QuoteIdentifier(databaseName)} TEMPLATE {QuoteIdentifier(TestDatabase.TemplateName)}");
         await ExecuteMaintenanceAsync(
-            $"COMMENT ON DATABASE {QuoteIdentifier(databaseName)} IS {QuoteLiteral($"overmind-test-created-at={DateTimeOffset.UtcNow:O}")}");
+            $"COMMENT ON DATABASE {QuoteIdentifier(databaseName)} IS {QuoteLiteral(TestDatabase.CreatedAtComment())}");
     }
 
     private string MigrationFingerprint()

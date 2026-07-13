@@ -177,6 +177,9 @@ public sealed class SchemaVerifierTests
         var adminConnection = TestDatabase.BuildAdminConnection(dbName);
 
         await ExecuteAsync(MaintenanceConnection, $"CREATE DATABASE \"{dbName}\" TEMPLATE {TestDatabase.TemplateName}");
+        await ExecuteAsync(
+            MaintenanceConnection,
+            $"COMMENT ON DATABASE \"{dbName}\" IS '{TestDatabase.CreatedAtComment()}'");
         try
         {
             await body(adminConnection);

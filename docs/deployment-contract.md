@@ -34,7 +34,7 @@ docker run --rm \
 - Journal: DbUp `schemaversions` table in the target database. Production never
   applies migration files via raw `psql`.
 - **The `memsrv` role must exist before migrations run.** Roles are owned by
-  provisioning (Ansible in production, `docker/postgres-init/` in dev/CI).
+  provisioning (Ansible in production, the invariant Compose bootstrap in dev/CI).
   Migrations grant to `memsrv` but never create roles or manage passwords.
 
 ## Schema verification — FINAL

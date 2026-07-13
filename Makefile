@@ -1,4 +1,4 @@
-.PHONY: db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference
+.PHONY: db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference smoke-image
 
 sdk-reference:
 	@tools/provision-sdk-reference.sh
@@ -33,3 +33,11 @@ migrate-dev:
 accept: db-up
 	dotnet build memsrv.sln
 	dotnet test tests/MemSrv.Tests --no-build --filter "FullyQualifiedName~MemSrv.Tests.AcceptanceTests"
+
+smoke-image:
+	@test -n "$(IMAGE)" || { printf 'usage: make smoke-image IMAGE=<image> [PULL=1]\n' >&2; exit 2; }
+	@if [ "$(PULL)" = 1 ]; then \
+		tools/smoke-release-image.sh --pull "$(IMAGE)"; \
+	else \
+		tools/smoke-release-image.sh "$(IMAGE)"; \
+	fi

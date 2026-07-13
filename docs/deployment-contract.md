@@ -9,12 +9,12 @@ address, key file) is defined below rather than deferred.
 
 - `ghcr.io/faviann/overmind:<version>` — immutable tags, published by CI on git
   tags `v*` (tag `v0.3.0` → image `0.3.0`).
-- Pre-Session-2 tags are `0.x`: the migration contract below is stable, but the
-  service runtime shape will change when Session 2 lands. Do not treat `0.x` as
-  a compatibility promise beyond this document. No `latest` tag is published.
-- The image contains the memory server runtime (`MemSrv.Server`, MCP over
-  stdio) and the operator/migration CLI (`memctl`, on `PATH`), with migrations
-  baked in at `/app/migrations`.
+- `v1.0.0` is the first compatibility release for the complete contract in this
+  document. Pre-1.0 (`0.x`) tags promise only the migration contract that
+  accompanied that tag. No `latest` tag is published.
+- The image contains the memory server runtime (`MemSrv.Server`, streamable
+  HTTP by default and stdio on request) and the operator/migration CLI
+  (`memctl`, on `PATH`), with migrations baked in at `/app/migrations`.
 
 ## Migration contract — FINAL
 
@@ -99,6 +99,7 @@ Optional:
 | `MEMSRV_TRANSPORT` | `stdio` selects the local stdio transport; unset (default) serves HTTP. `--stdio` on the command line is equivalent. |
 | `MEMSRV_HTTP_URL` | Kestrel bind address; defaults to `http://0.0.0.0:8080`. |
 | `MEMSRV_AGENT_ID`, `MEMSRV_NAMESPACE`, `MEMSRV_SESSION_ID` | stdio-mode identity/session (defaults are sensible for a single-agent local setup). Ignored in HTTP mode, where identity comes from the bearer key and the session is transport-derived. |
+| `MEMSRV_ALLOWED_NAMESPACES` | Comma-separated stdio-mode namespace allowlist. Unset confines the process to its default `MEMSRV_NAMESPACE`. Ignored in HTTP mode. |
 
 No other configuration is required; `config/never_store.yaml` ships in the
 image.
@@ -133,3 +134,29 @@ modes run from the same image.
 - **Day-1 agent URL:** `http://overmind.faviann.vms:8080/mcp` — DNS name, plain
   HTTP on the LAN. Traefik/TLS is a later, purely infra-side add-on requiring no
   app or contract change.
+
+## Release verification
+
+From an overmind source checkout, exercise an exact image reference against a
+disposable PostgreSQL 18 container:
+
+```sh
+make smoke-image IMAGE=ghcr.io/faviann/overmind:1.0.0 PULL=1
+```
+
+Published-image mode pulls the tag, prints its registry digest, and runs that
+digest before the smoke begins, preventing a stale or subsequently moved local
+tag from posing as the CI artifact. The run applies the image's baked-in
+migrations through `memctl`, starts the image through its default entrypoint
+with a disposable bearer-key file, requires a database-backed `200` from
+`/healthz`, requires unauthenticated `/mcp` to reject with `401`, and completes
+an authenticated MCP initialization. Application semantics such as migration
+idempotency and unhealthy-database behavior remain in the .NET suite; this
+command checks only OCI packaging and runtime wiring. It creates no persistent
+volume and removes its containers and network on exit.
+
+Tag CI runs this smoke against the locally built release candidate before it
+pushes the immutable image tag, then runs published-image mode after the push
+to verify the registry artifact by digest. A release is green only when both
+adapters pass; downstream deployment may therefore consume the image as a
+working implementation of this contract rather than re-testing it.

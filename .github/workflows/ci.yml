@@ -50,9 +50,23 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push immutable release tag
+      - name: Build release image
         run: |
           IMAGE=ghcr.io/${{ github.repository }}
           VERSION=${GITHUB_REF_NAME#v}
           docker build -t "$IMAGE:$VERSION" .
+      - name: Verify release candidate image
+        run: |
+          IMAGE=ghcr.io/${{ github.repository }}
+          VERSION=${GITHUB_REF_NAME#v}
+          tools/smoke-release-image.sh "$IMAGE:$VERSION"
+      - name: Push immutable release tag
+        run: |
+          IMAGE=ghcr.io/${{ github.repository }}
+          VERSION=${GITHUB_REF_NAME#v}
           docker push "$IMAGE:$VERSION"
+      - name: Verify published release image
+        run: |
+          IMAGE=ghcr.io/${{ github.repository }}
+          VERSION=${GITHUB_REF_NAME#v}
+          tools/smoke-release-image.sh --pull "$IMAGE:$VERSION"

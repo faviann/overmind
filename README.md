@@ -79,27 +79,24 @@ check its connection.
 
 ### Claude Code over stdio
 
-On a trusted machine that can reach PostgreSQL, export the runtime credential
-in the shell that launches Claude Code, then register the immutable image as a
-user-scoped stdio server:
+Stdio is restricted to trusted host-local use. Ask the operator to provision a
+launcher at `/usr/local/bin/overmind-stdio` that starts the immutable image in
+stdio mode and injects its runtime database credential *after* the consumer
+process boundary. The launcher must not accept arbitrary arguments, expose its
+environment, or write application logs to stdout.
+
+Register that launcher as a user-scoped server:
 
 ```sh
-export MEMSRV_CONNECTION_STRING='postgres://memsrv:<password>@postgres:5432/memory'
-
 claude mcp add --scope user --transport stdio overmind -- \
-  docker run --rm -i \
-    -e MEMSRV_CONNECTION_STRING \
-    -e MEMSRV_TRANSPORT=stdio \
-    -e MEMSRV_AGENT_ID=claude-code \
-    -e MEMSRV_NAMESPACE=memory-system \
-    -e MEMSRV_ALLOWED_NAMESPACES=memory-system \
-    ghcr.io/faviann/overmind:1.0.0
+  /usr/local/bin/overmind-stdio
 ```
 
-The command stores no password: Docker forwards `MEMSRV_CONNECTION_STRING`
-from the launching environment only to the server subprocess. If `postgres`
-is a container-only hostname, add the appropriate `--network` argument after
-`docker run`. Run `claude mcp get overmind` to inspect the saved configuration.
+The Claude Code configuration contains neither a connection string nor a path
+to a readable secret. The operator-owned launcher fixes the agent identity,
+default namespace, and namespace allowlist; it is the privilege boundary, not
+an agent-customizable convenience script. Run `claude mcp get overmind` to
+inspect the saved consumer configuration.
 
 ## Operator path
 

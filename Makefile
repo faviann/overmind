@@ -35,5 +35,9 @@ accept: db-up
 	dotnet test tests/MemSrv.Tests --no-build --filter "FullyQualifiedName~MemSrv.Tests.AcceptanceTests"
 
 smoke-image:
-	@test -n "$(IMAGE)" || { printf 'usage: make smoke-image IMAGE=<image>\n' >&2; exit 2; }
-	@tools/smoke-release-image.sh "$(IMAGE)"
+	@test -n "$(IMAGE)" || { printf 'usage: make smoke-image IMAGE=<image> [PULL=1]\n' >&2; exit 2; }
+	@if [ "$(PULL)" = 1 ]; then \
+		tools/smoke-release-image.sh --pull "$(IMAGE)"; \
+	else \
+		tools/smoke-release-image.sh "$(IMAGE)"; \
+	fi

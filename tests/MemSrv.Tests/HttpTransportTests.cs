@@ -32,7 +32,7 @@ public sealed class HttpTransportTests : IAsyncLifetime
     private const string ScopedKey = "agent-b-key-0987654321";
     private const string UnknownKey = "not-a-real-key";
 
-    private readonly string _root = FindRepoRoot();
+    private readonly string _root = TestProcessRunner.RepoRoot;
     private WebApplication _app = null!;
     private string _baseUrl = "";
     private string _keysPath = "";
@@ -461,73 +461,22 @@ public sealed class HttpTransportTests : IAsyncLifetime
     // Runs a memctl command (the sanctioned operator seam), asserts it succeeded,
     // and returns its stdout so tests can observe operator-visible state instead of
     // reading the database directly.
-    private async Task<string> RunMemCtlAsync(params string[] args)
+    private static async Task<string> RunMemCtlAsync(params string[] args)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = _root,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("run");
-        startInfo.ArgumentList.Add("--project");
-        startInfo.ArgumentList.Add(Path.Combine(_root, "src/MemCtl/MemCtl.csproj"));
-        startInfo.ArgumentList.Add("--no-build");
-        startInfo.ArgumentList.Add("--");
-        foreach (var arg in args)
-        {
-            startInfo.ArgumentList.Add(arg);
-        }
-        startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
-
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start memctl.");
-        // Drain both streams concurrently so a full pipe buffer can't deadlock the
-        // process, and bound the wait so a hung memctl fails the test instead of
-        // hanging the suite.
-        var stdoutPump = process.StandardOutput.ReadToEndAsync();
-        var stderrPump = process.StandardError.ReadToEndAsync();
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        try
-        {
-            await process.WaitForExitAsync(cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
-            await Task.WhenAll(stdoutPump, stderrPump);
-            throw new Xunit.Sdk.XunitException($"memctl {string.Join(' ', args)} did not exit within 60s.");
-        }
-
-        var stdout = await stdoutPump;
-        var stderr = await stderrPump;
-        Assert.True(process.ExitCode == 0, $"memctl {string.Join(' ', args)} failed with exit {process.ExitCode}. stdout={stdout} stderr={stderr}");
+        var (exitCode, stdout, stderr) = await TestProcessRunner.RunMemCtlToExitAsync(
+            new Dictionary<string, string> { ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection }, args);
+        Assert.True(exitCode == 0, $"memctl {string.Join(' ', args)} failed with exit {exitCode}. stdout={stdout} stderr={stderr}");
         return stdout;
     }
 
-    private Process StartHttpServerProcess()
-    {
-        var startInfo = new ProcessStartInfo("dotnet")
+    private Process StartHttpServerProcess() =>
+        TestProcessRunner.StartServer(new Dictionary<string, string>
         {
-            WorkingDirectory = _root,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("run");
-        startInfo.ArgumentList.Add("--project");
-        startInfo.ArgumentList.Add(Path.Combine(_root, "src/MemSrv.Server/MemSrv.Server.csproj"));
-        startInfo.ArgumentList.Add("--no-build");
-        startInfo.Environment["MEMSRV_TRANSPORT"] = "http";
-        startInfo.Environment["MEMSRV_HTTP_URL"] = "http://127.0.0.1:0";
-        startInfo.Environment["MEMSRV_AGENT_KEYS_PATH"] = _keysPath;
-        startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
-
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start MemSrv.Server.");
-    }
+            ["MEMSRV_TRANSPORT"] = "http",
+            ["MEMSRV_HTTP_URL"] = "http://127.0.0.1:0",
+            ["MEMSRV_AGENT_KEYS_PATH"] = _keysPath,
+            ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection,
+        });
 
     private static async Task StopProcessAsync(Process process)
     {
@@ -585,15 +534,4 @@ public sealed class HttpTransportTests : IAsyncLifetime
             default_namespace: memory-system
             allowed_namespaces: [memory-system]
         """;
-
-    private static string FindRepoRoot()
-    {
-        var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
-        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "migrations")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new InvalidOperationException("Could not find repo root.");
-    }
 }

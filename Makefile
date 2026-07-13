@@ -30,6 +30,6 @@ test-db-sweep: db-up
 migrate-dev:
 	docker compose run --rm migrate
 
-accept:
-	@echo "make accept: acceptance script is Session 2 scope (docs/memory-server-phase1-spec.md §12); not implemented yet."
-	@exit 1
+accept: db-up
+	dotnet build memsrv.sln
+	dotnet test tests/MemSrv.Tests --no-build --filter "FullyQualifiedName~MemSrv.Tests.AcceptanceTests"

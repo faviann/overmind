@@ -52,6 +52,18 @@ assert that mechanism directly:
   infrastructure, not mutable test state: database-backed classes still reset
   and migrate their own schema as required by their existing test seam.
 
+## Child processes (memctl, MemSrv.Server)
+- All subprocess launches go through `tests/MemSrv.Tests/TestProcessRunner.cs`,
+  which executes the built apphosts directly — or, where another component owns
+  the process lifecycle (e.g. `StdioClientTransport`), launch the apphost path
+  the runner resolves (`TestProcessRunner.ServerPath`). Never launch children with
+  `dotnet run`: its per-launch MSBuild evaluation races concurrent launches
+  from parallel test classes on `obj/` state and intermittently corrupts
+  unrelated tests (issue #30). Direct apphost execution is also ~8x faster.
+- Like `--no-build`, tests never build the child projects; the runner fails
+  with instructions if an apphost is missing. Configuration/TFM are derived
+  from the test assembly's own output path, so Release runs Release apphosts.
+
 ## Anti-patterns (stop and flag to the human if you catch yourself)
 - Weakening an assertion to reach green
 - Asserting on internal tables to "verify" a tool worked (outside mechanical tests)

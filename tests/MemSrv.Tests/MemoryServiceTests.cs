@@ -13,7 +13,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
 {
     private static string AdminConnection => TestDatabase.AdminConnection;
     private static string RuntimeConnection => TestDatabase.RuntimeConnection;
-    private readonly string _root = FindRepoRoot();
+    private readonly string _root = TestProcessRunner.RepoRoot;
     private readonly List<string> _serverErrorLines = [];
 
     public async Task InitializeAsync()
@@ -729,10 +729,11 @@ public sealed class MemoryServiceTests : IAsyncLifetime
             env["MEMSRV_SESSION_ID"] = sessionId;
         }
 
+        // The MCP SDK owns the process lifecycle here, so it gets the resolved
+        // apphost path from the shared runner instead of a Start* API.
         return await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
         {
-            Command = "dotnet",
-            Arguments = ["run", "--project", Path.Combine(_root, "src/MemSrv.Server/MemSrv.Server.csproj"), "--no-build"],
+            Command = TestProcessRunner.ServerPath,
             WorkingDirectory = _root,
             Name = "MemSrv.Server",
             InheritEnvironmentVariables = false,
@@ -752,28 +753,15 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         return json.Clone();
     }
 
-    private Process StartServerProcess()
-    {
-        var startInfo = new ProcessStartInfo("dotnet")
+    private static Process StartServerProcess() =>
+        TestProcessRunner.StartServer(new Dictionary<string, string>
         {
-            WorkingDirectory = _root,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("run");
-        startInfo.ArgumentList.Add("--project");
-        startInfo.ArgumentList.Add(Path.Combine(_root, "src/MemSrv.Server/MemSrv.Server.csproj"));
-        startInfo.ArgumentList.Add("--no-build");
-        startInfo.Environment["MEMSRV_TRANSPORT"] = "stdio";
-        startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
-        startInfo.Environment["MEMSRV_AGENT_ID"] = "agent-a";
-        startInfo.Environment["MEMSRV_NAMESPACE"] = "memory-system";
-        startInfo.Environment["MEMSRV_SESSION_ID"] = "session-stdout";
-
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start MemSrv.Server.");
-    }
+            ["MEMSRV_TRANSPORT"] = "stdio",
+            ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection,
+            ["MEMSRV_AGENT_ID"] = "agent-a",
+            ["MEMSRV_NAMESPACE"] = "memory-system",
+            ["MEMSRV_SESSION_ID"] = "session-stdout",
+        });
 
     private async Task RunMemCtlAsync(params string[] args)
     {
@@ -784,37 +772,19 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     private Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(params string[] args) =>
         RunMemCtlForResultAsync(extraEnvironment: null, args);
 
-    private async Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
+    private static Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
         IReadOnlyDictionary<string, string>? extraEnvironment, params string[] args)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
+        var environment = new Dictionary<string, string>
         {
-            WorkingDirectory = _root,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
+            ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection
         };
-        startInfo.ArgumentList.Add("run");
-        startInfo.ArgumentList.Add("--project");
-        startInfo.ArgumentList.Add(Path.Combine(_root, "src/MemCtl/MemCtl.csproj"));
-        startInfo.ArgumentList.Add("--no-build");
-        startInfo.ArgumentList.Add("--");
-        foreach (var arg in args)
-        {
-            startInfo.ArgumentList.Add(arg);
-        }
-
-        startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
         foreach (var (key, value) in extraEnvironment ?? new Dictionary<string, string>())
         {
-            startInfo.Environment[key] = value;
+            environment[key] = value;
         }
 
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start memctl.");
-        var stderr = await process.StandardError.ReadToEndAsync();
-        var stdout = await process.StandardOutput.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        return (process.ExitCode, stdout, stderr);
+        return TestProcessRunner.RunMemCtlToExitAsync(environment, args);
     }
 
     private static void AssertNext(JsonElement envelope)
@@ -850,16 +820,5 @@ public sealed class MemoryServiceTests : IAsyncLifetime
 
         await process.WaitForExitAsync();
         process.Dispose();
-    }
-
-    private static string FindRepoRoot()
-    {
-        var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
-        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "migrations")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new InvalidOperationException("Could not find repo root.");
     }
 }

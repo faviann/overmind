@@ -1,7 +1,6 @@
 using Dapper;
 using MemSrv.Core;
 using Npgsql;
-using System.Diagnostics;
 
 namespace MemSrv.Tests;
 
@@ -14,7 +13,7 @@ namespace MemSrv.Tests;
 public sealed class SchemaVerifierTests
 {
     private static string MaintenanceConnection => TestDatabase.MaintenanceConnection;
-    private readonly string _root = FindRepoRoot();
+    private readonly string _root = TestProcessRunner.RepoRoot;
 
     [Fact]
     public async Task VerifyPassesOnFreshlyMigratedSchema()
@@ -254,40 +253,10 @@ public sealed class SchemaVerifierTests
             new { tableName });
     }
 
-    private async Task<(int ExitCode, string Stdout, string Stderr)> RunVerifySchemaAsync(string adminConnection)
-    {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = _root,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("run");
-        startInfo.ArgumentList.Add("--project");
-        startInfo.ArgumentList.Add(Path.Combine(_root, "src/MemCtl/MemCtl.csproj"));
-        startInfo.ArgumentList.Add("--no-build");
-        startInfo.ArgumentList.Add("--");
-        startInfo.ArgumentList.Add("verify-schema");
-        startInfo.Environment["MEMSRV_ADMIN_CONNECTION_STRING"] = adminConnection;
-
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start memctl.");
-        var stderr = await process.StandardError.ReadToEndAsync();
-        var stdout = await process.StandardOutput.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        return (process.ExitCode, stdout, stderr);
-    }
-
-    private static string FindRepoRoot()
-    {
-        var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
-        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "migrations")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new InvalidOperationException("Could not find repo root.");
-    }
+    private static Task<(int ExitCode, string Stdout, string Stderr)> RunVerifySchemaAsync(string adminConnection) =>
+        TestProcessRunner.RunMemCtlToExitAsync(
+            new Dictionary<string, string> { ["MEMSRV_ADMIN_CONNECTION_STRING"] = adminConnection },
+            "verify-schema");
 }
 
 // Shared no-fixture collection: serializes SchemaVerifierTests with

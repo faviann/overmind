@@ -8,7 +8,6 @@ using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using Npgsql;
-using System.Diagnostics;
 using System.Text.Json;
 
 namespace MemSrv.Tests;
@@ -31,7 +30,7 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     protected const string AgentAKey = "agent-a-key-1234567890";
     protected const string ScopedKey = "agent-b-key-0987654321";
 
-    protected readonly string _root = FindRepoRoot();
+    protected readonly string _root = TestProcessRunner.RepoRoot;
     protected WebApplication _app = null!;
     protected string _baseUrl = "";
     protected string _keysPath = "";
@@ -97,53 +96,21 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
 
     // The failure-tolerant core: returns the exit code and both streams so tests
     // can assert on memctl refusals too; extraEnvironment lets a test inject
-    // process environment such as a stub $EDITOR.
-    protected async Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
+    // process environment such as a stub $EDITOR. Launch mechanics (direct
+    // apphost, bounded wait, concurrent drains) live in TestProcessRunner.
+    protected Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
         IReadOnlyDictionary<string, string>? extraEnvironment, params string[] args)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
+        var environment = new Dictionary<string, string>
         {
-            WorkingDirectory = _root,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
+            ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection
         };
-        startInfo.ArgumentList.Add("run");
-        startInfo.ArgumentList.Add("--project");
-        startInfo.ArgumentList.Add(Path.Combine(_root, "src/MemCtl/MemCtl.csproj"));
-        startInfo.ArgumentList.Add("--no-build");
-        startInfo.ArgumentList.Add("--");
-        foreach (var arg in args)
-        {
-            startInfo.ArgumentList.Add(arg);
-        }
-        startInfo.Environment["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
         foreach (var (key, value) in extraEnvironment ?? new Dictionary<string, string>())
         {
-            startInfo.Environment[key] = value;
+            environment[key] = value;
         }
 
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start memctl.");
-        // Drain both streams concurrently so a full pipe buffer can't deadlock the
-        // process, and bound the wait so a hung memctl fails the test instead of
-        // hanging the suite.
-        var stdoutPump = process.StandardOutput.ReadToEndAsync();
-        var stderrPump = process.StandardError.ReadToEndAsync();
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        try
-        {
-            await process.WaitForExitAsync(cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
-            await Task.WhenAll(stdoutPump, stderrPump);
-            throw new Xunit.Sdk.XunitException($"memctl {string.Join(' ', args)} did not exit within 60s.");
-        }
-
-        return (process.ExitCode, await stdoutPump, await stderrPump);
+        return TestProcessRunner.RunMemCtlToExitAsync(environment, args);
     }
 
     protected static async Task<JsonElement> CallToolAsync(McpClient client, string toolName, Dictionary<string, object?> arguments)
@@ -174,15 +141,4 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
             default_namespace: memory-system
             allowed_namespaces: [memory-system]
         """;
-
-    private static string FindRepoRoot()
-    {
-        var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
-        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "migrations")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new InvalidOperationException("Could not find repo root.");
-    }
 }

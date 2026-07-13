@@ -14,10 +14,12 @@ namespace MemSrv.Tests;
 // Postgres, a test key file) exercised by real keyed agents speaking
 // MCP-over-HTTP, plus memctl run as a subprocess (the operator seam). Test
 // classes inherit this and assert through the public surface only: MCP tools
-// for agent actions, memctl for operator-visible state. No direct database
-// reads — with one sanctioned exception (docs/testing.md): mechanical tests
-// where the database mechanism itself (grants, triggers, content hashes) is
-// the spec'd behavior may connect directly.
+// for agent actions, memctl for operator-visible state. Direct database access
+// is limited to the exceptions in docs/testing.md: binding spec §10.2
+// source_id and §10.4 FTS-over-consumed-set queries where no public command
+// exists; and mechanical checks of trace grants/trigger and absence of DELETE,
+// never-store persistence absence, and content_hash validity. Binding
+// acceptance queries and mechanical database checks are distinct categories.
 public abstract class HttpSeamTestBase : IAsyncLifetime
 {
     protected static string AdminConnection => TestDatabase.AdminConnection;

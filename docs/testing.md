@@ -38,6 +38,11 @@ assert that mechanism directly:
   than running migrations again. Template validation and each clone happen
   under one cross-process lock, so a different worktree cannot replace the
   template between the fingerprint check and `CREATE DATABASE ... TEMPLATE`.
+- The template name and migration-fingerprint contract intentionally have two
+  implementations: C# owns bare `dotnet test` lifecycle, while
+  `tools/test-db.sh` owns Make/operator lifecycle. This keeps both entry points
+  independently usable. Any change to that contract must update both
+  implementations and validate their compatibility.
 - `make test-db-reset` recreates `${MEMSRV_TEST_DATABASE:-memory_test}` from the
   current template. `make test-db-sweep` removes databases leaked for more than
   six hours by crashed runs, but never the template or a database with an active

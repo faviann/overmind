@@ -41,51 +41,33 @@ public static class TestDatabase
     public static string BuildAdminConnection(string databaseName) =>
         BuildConnection(databaseName, AdminUser, AdminPassword);
 
-    private static string BuildConnection(string databaseName, string username, string password) =>
-        new NpgsqlConnectionStringBuilder
-        {
-            Host = Host,
-            Port = Port,
-            Database = databaseName,
-            Username = username,
-            Password = password
-        }.ConnectionString;
-}
-
-public sealed class TestDatabaseFixture : IAsyncLifetime
-{
-    private readonly string _root = FindRepoRoot();
-    private readonly string _databaseName = TestDatabase.ResolveDatabaseName(
-        Environment.GetEnvironmentVariable(TestDatabase.EnvironmentVariable));
-    private readonly string _runtimeRole = $"memory_test_role_{Guid.NewGuid():N}";
-
-    public async Task InitializeAsync()
+    public static async Task EnsureCurrentTemplateAndCloneAsync(string databaseName, string migrationsPath)
     {
-        TestDatabase.SetDatabaseName(_databaseName);
-        TestDatabase.SetRuntimeRole(_runtimeRole);
         await using var templateLock = await AcquireTemplateLockAsync();
-        await EnsureCurrentTemplateAsync();
+        await EnsureCurrentTemplateUnderLockAsync(migrationsPath);
         NpgsqlConnection.ClearAllPools();
+        await ExecuteMaintenanceAsync($"DROP DATABASE IF EXISTS {QuoteIdentifier(databaseName)} WITH (FORCE)");
         await ExecuteMaintenanceAsync(
-            $"CREATE ROLE {QuoteIdentifier(_runtimeRole)} LOGIN PASSWORD 'memsrv_dev' IN ROLE memsrv");
-        await RecreateDatabaseFromTemplateAsync(_databaseName);
+            $"CREATE DATABASE {QuoteIdentifier(databaseName)} TEMPLATE {QuoteIdentifier(TemplateName)}");
+        await ExecuteMaintenanceAsync(
+            $"COMMENT ON DATABASE {QuoteIdentifier(databaseName)} IS {QuoteLiteral(CreatedAtComment())}");
     }
 
-    public async Task DisposeAsync()
+    public static async Task EnsureCurrentTemplateAsync(string migrationsPath)
     {
+        await using var templateLock = await AcquireTemplateLockAsync();
+        await EnsureCurrentTemplateUnderLockAsync(migrationsPath);
         NpgsqlConnection.ClearAllPools();
-        await ExecuteMaintenanceAsync($"DROP DATABASE IF EXISTS {QuoteIdentifier(_databaseName)} WITH (FORCE)");
-        await ExecuteMaintenanceAsync($"DROP ROLE IF EXISTS {QuoteIdentifier(_runtimeRole)}");
     }
 
-    private async Task EnsureCurrentTemplateAsync()
+    private static async Task EnsureCurrentTemplateUnderLockAsync(string migrationsPath)
     {
-        var fingerprint = MigrationFingerprint();
-        await using var connection = new NpgsqlConnection(TestDatabase.MaintenanceConnection);
+        var fingerprint = MigrationFingerprint(migrationsPath);
+        await using var connection = new NpgsqlConnection(MaintenanceConnection);
         await connection.OpenAsync();
         var currentFingerprint = await connection.QuerySingleOrDefaultAsync<string?>(
             "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = @name",
-            new { name = TestDatabase.TemplateName });
+            new { name = TemplateName });
 
         if (currentFingerprint == fingerprint)
         {
@@ -94,29 +76,19 @@ public sealed class TestDatabaseFixture : IAsyncLifetime
 
         await connection.ExecuteAsync(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = @name AND pid <> pg_backend_pid()",
-            new { name = TestDatabase.TemplateName });
-        await connection.ExecuteAsync($"DROP DATABASE IF EXISTS {QuoteIdentifier(TestDatabase.TemplateName)}");
-        await connection.ExecuteAsync($"CREATE DATABASE {QuoteIdentifier(TestDatabase.TemplateName)}");
+            new { name = TemplateName });
+        await connection.ExecuteAsync($"DROP DATABASE IF EXISTS {QuoteIdentifier(TemplateName)}");
+        await connection.ExecuteAsync($"CREATE DATABASE {QuoteIdentifier(TemplateName)}");
 
-        var templateConnection = TestDatabase.BuildAdminConnection(TestDatabase.TemplateName);
-        DatabaseMigrator.Migrate(templateConnection, Path.Combine(_root, "migrations"), logToConsole: false);
+        DatabaseMigrator.Migrate(BuildAdminConnection(TemplateName), migrationsPath, logToConsole: false);
         await connection.ExecuteAsync(
-            $"COMMENT ON DATABASE {QuoteIdentifier(TestDatabase.TemplateName)} IS {QuoteLiteral(fingerprint)}");
+            $"COMMENT ON DATABASE {QuoteIdentifier(TemplateName)} IS {QuoteLiteral(fingerprint)}");
     }
 
-    private async Task RecreateDatabaseFromTemplateAsync(string databaseName)
-    {
-        await ExecuteMaintenanceAsync($"DROP DATABASE IF EXISTS {QuoteIdentifier(databaseName)} WITH (FORCE)");
-        await ExecuteMaintenanceAsync(
-            $"CREATE DATABASE {QuoteIdentifier(databaseName)} TEMPLATE {QuoteIdentifier(TestDatabase.TemplateName)}");
-        await ExecuteMaintenanceAsync(
-            $"COMMENT ON DATABASE {QuoteIdentifier(databaseName)} IS {QuoteLiteral(TestDatabase.CreatedAtComment())}");
-    }
-
-    private string MigrationFingerprint()
+    private static string MigrationFingerprint(string migrationsPath)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        foreach (var path in Directory.EnumerateFiles(Path.Combine(_root, "migrations"), "*.sql").Order(StringComparer.Ordinal))
+        foreach (var path in Directory.EnumerateFiles(migrationsPath, "*.sql").Order(StringComparer.Ordinal))
         {
             hash.AppendData(Encoding.UTF8.GetBytes(Path.GetFileName(path)));
             hash.AppendData(File.ReadAllBytes(path));
@@ -142,7 +114,7 @@ public sealed class TestDatabaseFixture : IAsyncLifetime
 
     private static async Task ExecuteMaintenanceAsync(string sql)
     {
-        await using var connection = new NpgsqlConnection(TestDatabase.MaintenanceConnection);
+        await using var connection = new NpgsqlConnection(MaintenanceConnection);
         await connection.OpenAsync();
         await connection.ExecuteAsync(sql);
     }
@@ -150,6 +122,50 @@ public sealed class TestDatabaseFixture : IAsyncLifetime
     private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
     private static string QuoteLiteral(string value) => $"'{value.Replace("'", "''")}'";
 
+    private static string BuildConnection(string databaseName, string username, string password) =>
+        new NpgsqlConnectionStringBuilder
+        {
+            Host = Host,
+            Port = Port,
+            Database = databaseName,
+            Username = username,
+            Password = password
+        }.ConnectionString;
+}
+
+public sealed class TestDatabaseFixture : IAsyncLifetime
+{
+    private readonly string _root = FindRepoRoot();
+    private readonly string _databaseName = TestDatabase.ResolveDatabaseName(
+        Environment.GetEnvironmentVariable(TestDatabase.EnvironmentVariable));
+    private readonly string _runtimeRole = $"memory_test_role_{Guid.NewGuid():N}";
+
+    public async Task InitializeAsync()
+    {
+        TestDatabase.SetDatabaseName(_databaseName);
+        TestDatabase.SetRuntimeRole(_runtimeRole);
+        await ExecuteMaintenanceAsync(
+            $"CREATE ROLE {QuoteIdentifier(_runtimeRole)} LOGIN PASSWORD 'memsrv_dev' IN ROLE memsrv");
+        await TestDatabase.EnsureCurrentTemplateAndCloneAsync(
+            _databaseName,
+            Path.Combine(_root, "migrations"));
+    }
+
+    public async Task DisposeAsync()
+    {
+        NpgsqlConnection.ClearAllPools();
+        await ExecuteMaintenanceAsync($"DROP DATABASE IF EXISTS {QuoteIdentifier(_databaseName)} WITH (FORCE)");
+        await ExecuteMaintenanceAsync($"DROP ROLE IF EXISTS {QuoteIdentifier(_runtimeRole)}");
+    }
+
+    private static async Task ExecuteMaintenanceAsync(string sql)
+    {
+        await using var connection = new NpgsqlConnection(TestDatabase.MaintenanceConnection);
+        await connection.OpenAsync();
+        await connection.ExecuteAsync(sql);
+    }
+
+    private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
     private static string FindRepoRoot()
     {
         var directory = new DirectoryInfo(Directory.GetCurrentDirectory());

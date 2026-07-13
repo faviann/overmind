@@ -171,15 +171,62 @@ public sealed class SchemaVerifierTests
         });
     }
 
+    [Fact]
+    public async Task DisposableCloneRevalidatesTemplateAfterDifferentMigrationSet()
+    {
+        var migrationA = Path.Combine(Path.GetTempPath(), $"memsrv-migrations-a-{Guid.NewGuid():N}");
+        var migrationB = Path.Combine(Path.GetTempPath(), $"memsrv-migrations-b-{Guid.NewGuid():N}");
+        var databaseA = $"memory_test_{Guid.NewGuid():N}_branch_a";
+        var databaseB = $"memory_test_{Guid.NewGuid():N}_branch_b";
+        var databaseAAfterB = $"memory_test_{Guid.NewGuid():N}_branch_a_again";
+        Directory.CreateDirectory(migrationA);
+        Directory.CreateDirectory(migrationB);
+
+        var sourceMigration = Path.Combine(_root, "migrations", "0001_init.sql");
+        await File.WriteAllTextAsync(
+            Path.Combine(migrationA, "0001_init.sql"),
+            await File.ReadAllTextAsync(sourceMigration) + "\nCREATE TABLE branch_marker_a (id integer);\n");
+        await File.WriteAllTextAsync(
+            Path.Combine(migrationB, "0001_init.sql"),
+            await File.ReadAllTextAsync(sourceMigration) + "\nCREATE TABLE branch_marker_b (id integer);\n");
+
+        try
+        {
+            await TestDatabase.EnsureCurrentTemplateAndCloneAsync(databaseA, migrationA);
+            Assert.True(await HasTableAsync(databaseA, "branch_marker_a"));
+            Assert.False(await HasTableAsync(databaseA, "branch_marker_b"));
+
+            await TestDatabase.EnsureCurrentTemplateAndCloneAsync(databaseB, migrationB);
+            Assert.True(await HasTableAsync(databaseB, "branch_marker_b"));
+            Assert.False(await HasTableAsync(databaseB, "branch_marker_a"));
+
+            await TestDatabase.EnsureCurrentTemplateAndCloneAsync(databaseAAfterB, migrationA);
+            Assert.True(await HasTableAsync(databaseAAfterB, "branch_marker_a"));
+            Assert.False(await HasTableAsync(databaseAAfterB, "branch_marker_b"));
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            foreach (var database in new[] { databaseA, databaseB, databaseAAfterB })
+            {
+                await ExecuteAsync(
+                    MaintenanceConnection,
+                    $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
+            }
+            await TestDatabase.EnsureCurrentTemplateAsync(Path.Combine(_root, "migrations"));
+            Directory.Delete(migrationA, recursive: true);
+            Directory.Delete(migrationB, recursive: true);
+        }
+    }
+
     private async Task WithDisposableDbAsync(Func<string, Task> body)
     {
         var dbName = $"memory_test_{Guid.NewGuid():N}_verify";
         var adminConnection = TestDatabase.BuildAdminConnection(dbName);
 
-        await ExecuteAsync(MaintenanceConnection, $"CREATE DATABASE \"{dbName}\" TEMPLATE {TestDatabase.TemplateName}");
-        await ExecuteAsync(
-            MaintenanceConnection,
-            $"COMMENT ON DATABASE \"{dbName}\" IS '{TestDatabase.CreatedAtComment()}'");
+        await TestDatabase.EnsureCurrentTemplateAndCloneAsync(
+            dbName,
+            Path.Combine(_root, "migrations"));
         try
         {
             await body(adminConnection);
@@ -196,6 +243,15 @@ public sealed class SchemaVerifierTests
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
         await connection.ExecuteAsync(sql);
+    }
+
+    private static async Task<bool> HasTableAsync(string databaseName, string tableName)
+    {
+        await using var connection = new NpgsqlConnection(TestDatabase.BuildAdminConnection(databaseName));
+        await connection.OpenAsync();
+        return await connection.ExecuteScalarAsync<bool>(
+            "SELECT to_regclass('public.' || @tableName) IS NOT NULL",
+            new { tableName });
     }
 
     private async Task<(int ExitCode, string Stdout, string Stderr)> RunVerifySchemaAsync(string adminConnection)

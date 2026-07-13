@@ -12,7 +12,7 @@
 
 ## The only DB-level tests allowed (mechanical tests)
 Where the database mechanism IS the spec'd behavior, tests connect directly and
-assert forbidden operations FAIL:
+assert that mechanism directly:
 - trace mutation blocked by the `forbid_mutation` trigger AND by grants —
   **verify the grants, not just the trigger** (connect as `memsrv`, attempt
   UPDATE/DELETE, expect permission denied)
@@ -20,6 +20,9 @@ assert forbidden operations FAIL:
 - never-store gate blocks a seeded synthetic secret (fake `AKIA...` pattern)
 - namespace isolation holds across agents
 - private memories invisible to other agent credentials
+- migration-keyed test-template lifecycle: changing the migration fingerprint
+  rebuilds the template, and each atomic clone exposes exactly the schema for
+  the migration set that requested it
 
 ## Database lifecycle
 - The xUnit host owns one database per suite run. With no caller configuration,
@@ -32,7 +35,9 @@ assert forbidden operations FAIL:
   production still has only the canonical `memsrv` runtime role.
 - `memory_test_template` is refreshed automatically when the migration-file
   fingerprint changes. Disposable schema-verifier databases clone it rather
-  than running migrations again.
+  than running migrations again. Template validation and each clone happen
+  under one cross-process lock, so a different worktree cannot replace the
+  template between the fingerprint check and `CREATE DATABASE ... TEMPLATE`.
 - `make test-db-reset` recreates `${MEMSRV_TEST_DATABASE:-memory_test}` from the
   current template. `make test-db-sweep` removes databases leaked for more than
   six hours by crashed runs, but never the template or a database with an active

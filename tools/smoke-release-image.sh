@@ -116,11 +116,12 @@ readonly health="${endpoint%/mcp}/healthz"
 wait_until 'database-backed health endpoint' http_healthy
 [[ $(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$health") == 200 ]]
 
+readonly initialize_request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1.0"}}}'
 readonly unauthenticated_status=$(curl --silent --show-error \
   --output /dev/null --write-out '%{http_code}' \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1.0"}}}' \
+  --data "$initialize_request" \
   "$endpoint")
 [[ $unauthenticated_status == 401 ]]
 
@@ -130,7 +131,7 @@ curl --fail-with-body --silent --show-error \
   -H 'Authorization: Bearer release-smoke-key' \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1.0"}}}' \
+  --data "$initialize_request" \
   "$endpoint"
 
 grep -Eiq '^Mcp-Session-Id:' "$headers"

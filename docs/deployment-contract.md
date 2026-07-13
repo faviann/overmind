@@ -154,3 +154,9 @@ an authenticated MCP initialization. Application semantics such as migration
 idempotency and unhealthy-database behavior remain in the .NET suite; this
 command checks only OCI packaging and runtime wiring. It creates no persistent
 volume and removes its containers and network on exit.
+
+Tag CI runs this smoke against the locally built release candidate before it
+pushes the immutable image tag, then runs published-image mode after the push
+to verify the registry artifact by digest. A release is green only when both
+adapters pass; downstream deployment may therefore consume the image as a
+working implementation of this contract rather than re-testing it.

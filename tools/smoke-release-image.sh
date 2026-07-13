@@ -103,7 +103,6 @@ docker exec "$postgres" psql -v ON_ERROR_STOP=1 -U overmind -d postgres \
   -c "CREATE DATABASE memory" >/dev/null
 
 run_migration
-run_migration
 
 docker run -d --name "$server" --network "$network" \
   -p 127.0.0.1::8080 \
@@ -136,10 +135,5 @@ curl --fail-with-body --silent --show-error \
 
 grep -Eiq '^Mcp-Session-Id:' "$headers"
 grep -Fq '"serverInfo"' "$response"
-
-docker stop "$postgres" >/dev/null
-readonly unhealthy_status=$(curl --silent --show-error \
-  --output /dev/null --write-out '%{http_code}' "$health")
-[[ $unhealthy_status == 503 ]]
 
 printf 'release image smoke passed: %s\n' "$image"

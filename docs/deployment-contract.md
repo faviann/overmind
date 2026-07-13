@@ -146,11 +146,11 @@ make smoke-image IMAGE=ghcr.io/faviann/overmind:1.0.0 PULL=1
 
 Published-image mode pulls the tag, prints its registry digest, and runs that
 digest before the smoke begins, preventing a stale or subsequently moved local
-tag from posing as the CI artifact. The
-run applies the image's baked-in migrations through `memctl` twice (proving the
-idempotent path), starts the image in default HTTP mode with a disposable
-bearer-key file, requires a database-backed `200` from `/healthz`, requires
-unauthenticated `/mcp` to reject with `401`, and completes an authenticated MCP
-initialization. It then stops PostgreSQL and requires `/healthz` to return
-`503`. The command creates no persistent volume and removes its containers and
-network on exit.
+tag from posing as the CI artifact. The run applies the image's baked-in
+migrations through `memctl`, starts the image through its default entrypoint
+with a disposable bearer-key file, requires a database-backed `200` from
+`/healthz`, requires unauthenticated `/mcp` to reject with `401`, and completes
+an authenticated MCP initialization. Application semantics such as migration
+idempotency and unhealthy-database behavior remain in the .NET suite; this
+command checks only OCI packaging and runtime wiring. It creates no persistent
+volume and removes its containers and network on exit.

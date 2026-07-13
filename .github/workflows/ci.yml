@@ -56,3 +56,8 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           docker build -t "$IMAGE:$VERSION" .
           docker push "$IMAGE:$VERSION"
+      - name: Verify published release image
+        run: |
+          IMAGE=ghcr.io/${{ github.repository }}
+          VERSION=${GITHUB_REF_NAME#v}
+          tools/smoke-release-image.sh --pull "$IMAGE:$VERSION"

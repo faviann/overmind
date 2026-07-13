@@ -28,9 +28,9 @@ shared memory unreviewed.
 
 ## Status
 
-Phase 1, Session 2 in progress — HTTP transport, coordination tools, and
-`memctl` completion, releasing as `v1.0.0`. Session 1 (schema, stdio MCP,
-retrieval, approval flow) is done.
+Phase 1 is complete. `v1.0.0` is the first compatibility release: it serves
+streamable HTTP MCP with bearer-key identity by default, retains stdio MCP for
+trusted local agents, and includes the `memctl` operator CLI.
 
 ## Documents
 
@@ -42,5 +42,83 @@ retrieval, approval flow) is done.
 | [`CONTEXT.md`](CONTEXT.md) | Domain vocabulary |
 | [`docs/articles/`](docs/articles/) | The article series on agentic memory the design draws from |
 
-Consumer wiring instructions (Claude Code stdio, HTTP + bearer keys, operator
-path) land with the `v1.0.0` release.
+## Connect an agent
+
+Agents use MCP; they never receive an administrative database credential.
+Choose HTTP for normal LAN use. Stdio is the trusted host-local option where a
+Claude Code-spawned server process can reach PostgreSQL directly.
+
+### Claude Code over HTTP
+
+Ask the operator for your bearer key, export it before starting Claude Code,
+and put this in the project `.mcp.json` (or the equivalent user-scoped MCP
+configuration):
+
+```sh
+export OVERMIND_BEARER_KEY='<key provisioned for this agent>'
+```
+
+```json
+{
+  "mcpServers": {
+    "overmind": {
+      "type": "http",
+      "url": "http://overmind.faviann.vms:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer ${OVERMIND_BEARER_KEY}"
+      }
+    }
+  }
+}
+```
+
+The checked-in configuration contains only an environment-variable reference,
+never the key itself. The day-1 endpoint is intentionally plain HTTP on the
+trusted LAN. Run `/mcp` inside Claude Code to approve the project server and
+check its connection.
+
+### Claude Code over stdio
+
+On a trusted machine that can reach PostgreSQL, export the runtime credential
+in the shell that launches Claude Code, then register the immutable image as a
+user-scoped stdio server:
+
+```sh
+export MEMSRV_CONNECTION_STRING='postgres://memsrv:<password>@postgres:5432/memory'
+
+claude mcp add --scope user --transport stdio overmind -- \
+  docker run --rm -i \
+    -e MEMSRV_CONNECTION_STRING \
+    -e MEMSRV_TRANSPORT=stdio \
+    -e MEMSRV_AGENT_ID=claude-code \
+    -e MEMSRV_NAMESPACE=memory-system \
+    -e MEMSRV_ALLOWED_NAMESPACES=memory-system \
+    ghcr.io/faviann/overmind:1.0.0
+```
+
+The command stores no password: Docker forwards `MEMSRV_CONNECTION_STRING`
+from the launching environment only to the server subprocess. If `postgres`
+is a container-only hostname, add the appropriate `--network` argument after
+`docker run`. Run `claude mcp get overmind` to inspect the saved configuration.
+
+## Operator path
+
+Operator actions stay on the server host. SSH in, identify the service
+container, and run the in-image CLI with its existing runtime environment:
+
+```sh
+ssh overmind.faviann.vms
+docker ps --filter ancestor=ghcr.io/faviann/overmind:1.0.0
+
+docker exec -it <overmind-container> memctl pending memory-system
+docker exec -it <overmind-container> memctl show <proposal-uuid>
+docker exec -it <overmind-container> \
+  memctl approve <proposal-uuid> --by human:<name> --edit
+```
+
+The image includes `nano` for the interactive edit path. Approval, rejection,
+retirement, audit, release, and migration remain operator-only; none is exposed
+as an agent-facing MCP tool. See the
+[deployment contract](docs/deployment-contract.md) for key-file provisioning,
+the one-shot migration command, health semantics, and the complete runtime
+contract.

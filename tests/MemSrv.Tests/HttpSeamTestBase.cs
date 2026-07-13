@@ -1,4 +1,3 @@
-using Dapper;
 using MemSrv.Core;
 using MemSrv.Server;
 using Microsoft.AspNetCore.Builder;
@@ -7,7 +6,6 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
-using Npgsql;
 using System.Text.Json;
 
 namespace MemSrv.Tests;
@@ -22,6 +20,8 @@ namespace MemSrv.Tests;
 // the spec'd behavior may connect directly.
 public abstract class HttpSeamTestBase : IAsyncLifetime
 {
+    private static readonly Dictionary<Type, Task> ClassDatabaseResets = [];
+    private static readonly object ClassDatabaseResetLock = new();
     protected static string AdminConnection => TestDatabase.AdminConnection;
     protected static string RuntimeConnection => TestDatabase.RuntimeConnection;
 
@@ -37,13 +37,7 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        await using (var connection = new NpgsqlConnection(AdminConnection))
-        {
-            await connection.OpenAsync();
-            await connection.ExecuteAsync("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
-            await connection.ExecuteAsync("GRANT ALL ON SCHEMA public TO overmind;");
-            DatabaseMigrator.Migrate(AdminConnection, Path.Combine(_root, "migrations"), logToConsole: false);
-        }
+        await ResetDatabaseOnceForClassAsync();
 
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");
         await File.WriteAllTextAsync(_keysPath, KeyFileYaml());
@@ -53,6 +47,19 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
         await _app.StartAsync();
         _baseUrl = _app.Services.GetRequiredService<IServer>()
             .Features.Get<IServerAddressesFeature>()!.Addresses.First();
+    }
+
+    private Task ResetDatabaseOnceForClassAsync()
+    {
+        lock (ClassDatabaseResetLock)
+        {
+            if (!ClassDatabaseResets.TryGetValue(GetType(), out var reset))
+            {
+                reset = TestDatabase.ResetSessionDatabaseAsync(Path.Combine(_root, "migrations"));
+                ClassDatabaseResets.Add(GetType(), reset);
+            }
+            return reset;
+        }
     }
 
     public async Task DisposeAsync()
@@ -87,12 +94,8 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     // Runs a memctl command (the sanctioned operator seam), asserts it succeeded,
     // and returns its stdout so tests can observe operator-visible state instead of
     // reading the database directly.
-    protected async Task<string> RunMemCtlAsync(params string[] args)
-    {
-        var (exitCode, stdout, stderr) = await RunMemCtlForResultAsync(null, args);
-        Assert.True(exitCode == 0, $"memctl {string.Join(' ', args)} failed with exit {exitCode}. stdout={stdout} stderr={stderr}");
-        return stdout;
-    }
+    protected Task<string> RunMemCtlAsync(params string[] args) =>
+        TestProcessRunner.RunMemCtlAsync(RuntimeConnection, null, args);
 
     // The failure-tolerant core: returns the exit code and both streams so tests
     // can assert on memctl refusals too; extraEnvironment lets a test inject
@@ -100,18 +103,7 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     // apphost, bounded wait, concurrent drains) live in TestProcessRunner.
     protected Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
         IReadOnlyDictionary<string, string>? extraEnvironment, params string[] args)
-    {
-        var environment = new Dictionary<string, string>
-        {
-            ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection
-        };
-        foreach (var (key, value) in extraEnvironment ?? new Dictionary<string, string>())
-        {
-            environment[key] = value;
-        }
-
-        return TestProcessRunner.RunMemCtlToExitAsync(environment, args);
-    }
+        => TestProcessRunner.RunMemCtlToExitAsync(RuntimeConnection, extraEnvironment, args);
 
     protected static async Task<JsonElement> CallToolAsync(McpClient client, string toolName, Dictionary<string, object?> arguments)
     {

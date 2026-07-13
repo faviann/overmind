@@ -47,6 +47,36 @@ internal static class TestProcessRunner
             TimeSpan.FromSeconds(60),
             $"memctl {string.Join(' ', args)}");
 
+    public static Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlToExitAsync(
+        string runtimeConnection,
+        IReadOnlyDictionary<string, string>? extraEnvironment,
+        params string[] args)
+    {
+        var environment = new Dictionary<string, string>
+        {
+            ["MEMSRV_CONNECTION_STRING"] = runtimeConnection
+        };
+        foreach (var (key, value) in extraEnvironment ?? new Dictionary<string, string>())
+        {
+            environment[key] = value;
+        }
+
+        return RunMemCtlToExitAsync(environment, args);
+    }
+
+    public static async Task<string> RunMemCtlAsync(
+        string runtimeConnection,
+        IReadOnlyDictionary<string, string>? extraEnvironment,
+        params string[] args)
+    {
+        var (exitCode, stdout, stderr) =
+            await RunMemCtlToExitAsync(runtimeConnection, extraEnvironment, args);
+        Assert.True(
+            exitCode == 0,
+            $"memctl {string.Join(' ', args)} failed with exit {exitCode}. stdout={stdout} stderr={stderr}");
+        return stdout;
+    }
+
     // Runs MemSrv.Server expecting it to exit on its own (e.g. fail-closed
     // startup tests). The timeout bounds how long a wedged server can hang the
     // suite before it is killed (entire tree) and the test fails; description

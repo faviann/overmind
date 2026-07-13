@@ -60,6 +60,9 @@ public static class TestDatabase
         NpgsqlConnection.ClearAllPools();
     }
 
+    public static Task ResetSessionDatabaseAsync(string migrationsPath) =>
+        EnsureCurrentTemplateAndCloneAsync(DatabaseName, migrationsPath);
+
     private static async Task EnsureCurrentTemplateUnderLockAsync(string migrationsPath)
     {
         var fingerprint = MigrationFingerprint(migrationsPath);

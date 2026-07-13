@@ -270,7 +270,7 @@ static string? FindOption(string[] args, string name)
     {
         if (args[i] == name)
         {
-            return args[i + 1];
+            return args[i + 1].StartsWith("--", StringComparison.Ordinal) ? null : args[i + 1];
         }
     }
 

@@ -1224,24 +1224,20 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    private static string NormalizeReviewerIdentity(string reviewer)
+    private static string NormalizeReviewerIdentity(string reviewer) =>
+        NormalizeActorIdentity(reviewer, "Reviewer identity is required.", nameof(reviewer));
+
+    private static string NormalizeOperatorIdentity(string @operator) =>
+        NormalizeActorIdentity(@operator, "Operator identity is required.", nameof(@operator));
+
+    private static string NormalizeActorIdentity(string actor, string requiredMessage, string parameterName)
     {
-        if (string.IsNullOrWhiteSpace(reviewer))
+        if (string.IsNullOrWhiteSpace(actor))
         {
-            throw new ArgumentException("Reviewer identity is required.", nameof(reviewer));
+            throw new ArgumentException(requiredMessage, parameterName);
         }
 
-        return reviewer.Contains(':', StringComparison.Ordinal) ? reviewer : $"human:{reviewer}";
-    }
-
-    private static string NormalizeOperatorIdentity(string @operator)
-    {
-        if (string.IsNullOrWhiteSpace(@operator))
-        {
-            throw new ArgumentException("Operator identity is required.", nameof(@operator));
-        }
-
-        return @operator.Contains(':', StringComparison.Ordinal) ? @operator : $"human:{@operator}";
+        return actor.Contains(':', StringComparison.Ordinal) ? actor : $"human:{actor}";
     }
 
     private static string ReviewSessionId(Guid proposalUuid) => $"review:{proposalUuid}";

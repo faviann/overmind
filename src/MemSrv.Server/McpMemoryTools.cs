@@ -22,7 +22,7 @@ public sealed class McpMemoryTools
         [Description("Optional memory UUIDs consumed or produced by this event.")] Guid[]? refs = null,
         [Description("Optional namespace for this event. Must be within the agent's allowlist; defaults to the agent's default namespace.")] string? @namespace = null,
         CancellationToken cancellationToken = default) =>
-        memory.LogTraceAsync(context, event_type, content, refs, @namespace, cancellationToken);
+        Relay(() => memory.LogTraceAsync(context, event_type, content, refs, @namespace, cancellationToken));
 
     [McpServerTool(Name = "search_memory")]
     [Description("Search approved shared memories and this agent's private memories. Returns previews only.")]
@@ -34,7 +34,7 @@ public sealed class McpMemoryTools
         [Description("Optional memory types to include.")] string[]? types = null,
         [Description("Optional result limit, capped by retrieval_config.")] int? limit = null,
         CancellationToken cancellationToken = default) =>
-        memory.SearchMemoryAsync(context, query, namespaces, types, limit, cancellationToken);
+        Relay(() => memory.SearchMemoryAsync(context, query, namespaces, types, limit, cancellationToken));
 
     [McpServerTool(Name = "get_by_id")]
     [Description("Fetch full memory content by UUID and log a memory_consumed trace event.")]
@@ -43,7 +43,7 @@ public sealed class McpMemoryTools
         MemoryContext context,
         [Description("Memory UUID returned by search_memory.")] Guid uuid,
         CancellationToken cancellationToken = default) =>
-        memory.GetByIdAsync(context, uuid, cancellationToken);
+        Relay(() => memory.GetByIdAsync(context, uuid, cancellationToken));
 
     [McpServerTool(Name = "propose_memory")]
     [Description("Create a shared proposed memory that requires operator approval.")]
@@ -57,7 +57,7 @@ public sealed class McpMemoryTools
         [Description("Source identifier such as trace_uuid or file path.")] string? source_id = null,
         [Description("UUID superseded by this proposal, if any.")] Guid? supersedes = null,
         CancellationToken cancellationToken = default) =>
-        memory.ProposeMemoryAsync(context, @namespace, type, content, source_type, source_id, supersedes, cancellationToken);
+        Relay(() => memory.ProposeMemoryAsync(context, @namespace, type, content, source_type, source_id, supersedes, cancellationToken));
 
     [McpServerTool(Name = "save_note")]
     [Description("Save a private approved note visible only to the current agent.")]
@@ -70,7 +70,7 @@ public sealed class McpMemoryTools
         [Description("Source type. Defaults to human.")] string source_type = "human",
         [Description("Optional source identifier.")] string? source_id = null,
         CancellationToken cancellationToken = default) =>
-        memory.SaveNoteAsync(context, @namespace, type, content, source_type, source_id, cancellationToken);
+        Relay(() => memory.SaveNoteAsync(context, @namespace, type, content, source_type, source_id, cancellationToken));
 
     [McpServerTool(Name = "list_workstreams")]
     [Description("List workstreams with status and owners — check inflight work to avoid conflicts.")]
@@ -80,7 +80,7 @@ public sealed class McpMemoryTools
         [Description("Optional namespace. Must be within the agent's allowlist; defaults to the agent's default namespace.")] string? @namespace = null,
         [Description("Optional inflight status filter: open or checked_out.")] string? status = null,
         CancellationToken cancellationToken = default) =>
-        Coordinate(() => memory.ListWorkstreamsAsync(context, @namespace, status, cancellationToken));
+        Relay(() => memory.ListWorkstreamsAsync(context, @namespace, status, cancellationToken));
 
     [McpServerTool(Name = "checkout_workstream")]
     [Description("Check out a workstream by uuid or by title (creates it if no live workstream bears that title). Fails if it is already checked out — no force-steal.")]
@@ -90,7 +90,7 @@ public sealed class McpMemoryTools
         [Description("UUID of an existing workstream to check out.")] Guid? uuid = null,
         [Description("Title to check out; creates the workstream in the default namespace if missing.")] string? title = null,
         CancellationToken cancellationToken = default) =>
-        Coordinate(() => memory.CheckoutWorkstreamAsync(context, uuid, title, cancellationToken));
+        Relay(() => memory.CheckoutWorkstreamAsync(context, uuid, title, cancellationToken));
 
     [McpServerTool(Name = "checkin_workstream")]
     [Description("Check a workstream back in with a status. Owner-only. Status open makes the notes the handoff summary for the next agent; done and abandoned are terminal.")]
@@ -102,7 +102,7 @@ public sealed class McpMemoryTools
         [Description("Freeform state notes; on status open they become the handoff summary.")] string notes,
         [Description("Optional related memory/trace UUIDs to attach.")] Guid[]? refs = null,
         CancellationToken cancellationToken = default) =>
-        Coordinate(() => memory.CheckinWorkstreamAsync(context, uuid, status, notes, refs, cancellationToken));
+        Relay(() => memory.CheckinWorkstreamAsync(context, uuid, status, notes, refs, cancellationToken));
 
     [McpServerTool(Name = "create_handoff")]
     [Description("Create a handoff: an open workstream carrying a compact summary and reference UUIDs for the receiving agent. Full context stays retrievable by reference, never inlined.")]
@@ -113,19 +113,26 @@ public sealed class McpMemoryTools
         [Description("Related memory/trace UUIDs the summary refers to.")] Guid[] refs,
         [Description("Optional namespace. Must be within the agent's allowlist; defaults to the agent's default namespace.")] string? @namespace = null,
         CancellationToken cancellationToken = default) =>
-        Coordinate(() => memory.CreateHandoffAsync(context, @namespace, summary, refs, cancellationToken));
+        Relay(() => memory.CreateHandoffAsync(context, @namespace, summary, refs, cancellationToken));
 
-    // Workstream coordination failures (conflicts, ownership, terminal states)
-    // must reach the calling agent verbatim — e.g. WHO owns a checked-out
-    // stream. The SDK masks plain exceptions with a generic message, so they
-    // are re-thrown as McpException.
-    private static async Task<T> Coordinate<T>(Func<Task<T>> action)
+    // Agent-facing failures must reach the calling agent verbatim: workstream
+    // coordination failures (conflicts, ownership, terminal states — e.g. WHO
+    // owns a checked-out stream) and namespace rejections (WHICH namespace was
+    // outside the allowlist). The SDK masks plain exceptions with a generic
+    // message, so they are re-thrown as McpException — still a tool execution
+    // error (IsError = true), not a JSON-RPC protocol error. Any tool can hit
+    // namespace authorization, so every tool goes through this adapter.
+    private static async Task<T> Relay<T>(Func<Task<T>> action)
     {
         try
         {
             return await action();
         }
         catch (WorkstreamException ex)
+        {
+            throw new McpException(ex.Message);
+        }
+        catch (NamespaceForbiddenException ex)
         {
             throw new McpException(ex.Message);
         }

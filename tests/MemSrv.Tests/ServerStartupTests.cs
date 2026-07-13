@@ -80,5 +80,6 @@ public sealed class ServerStartupTests
             // A connection string is read into options but never used: key loading
             // throws before the host (and any DB connection) is built.
             ["MEMSRV_CONNECTION_STRING"] = "Host=127.0.0.1;Port=1;Database=unused;Username=none;Password=none",
-        }, timeout: TimeSpan.FromSeconds(30));
+        }, timeout: TimeSpan.FromSeconds(30),
+        description: "MemSrv.Server on a malformed key file (expected fail-closed exit)");
 }

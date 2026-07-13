@@ -49,10 +49,12 @@ internal static class TestProcessRunner
 
     // Runs MemSrv.Server expecting it to exit on its own (e.g. fail-closed
     // startup tests). The timeout bounds how long a wedged server can hang the
-    // suite before it is killed (entire tree) and the test fails.
+    // suite before it is killed (entire tree) and the test fails; description
+    // lets the caller name its scenario in that timeout diagnostic.
     public static Task<(int ExitCode, string Stdout, string Stderr)> RunServerToExitAsync(
-        IReadOnlyDictionary<string, string> environment, TimeSpan timeout) =>
-        RunToExitAsync(CreateStartInfo(ServerPath, [], environment), timeout, "MemSrv.Server");
+        IReadOnlyDictionary<string, string> environment, TimeSpan timeout,
+        string description = "MemSrv.Server") =>
+        RunToExitAsync(CreateStartInfo(ServerPath, [], environment), timeout, description);
 
     // Starts a long-running MemSrv.Server (stdio or HTTP transport, chosen by
     // the caller's environment) with stdin/stdout/stderr redirected. The caller

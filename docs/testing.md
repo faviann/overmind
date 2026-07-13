@@ -30,7 +30,9 @@ assert forbidden operations FAIL:
 
 ## Child processes (memctl, MemSrv.Server)
 - All subprocess launches go through `tests/MemSrv.Tests/TestProcessRunner.cs`,
-  which executes the built apphosts directly. Never launch children with
+  which executes the built apphosts directly — or, where another component owns
+  the process lifecycle (e.g. `StdioClientTransport`), launch the apphost path
+  the runner resolves (`TestProcessRunner.ServerPath`). Never launch children with
   `dotnet run`: its per-launch MSBuild evaluation races concurrent launches
   from parallel test classes on `obj/` state and intermittently corrupts
   unrelated tests (issue #30). Direct apphost execution is also ~8x faster.

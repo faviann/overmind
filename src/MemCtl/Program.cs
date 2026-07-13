@@ -48,7 +48,11 @@ try
 
         case "retire":
             RequireArgs(args, 2);
-            await RetireAsync(options, Guid.Parse(args[1]));
+            await RetireAsync(
+                options,
+                Guid.Parse(args[1]),
+                RequireOption(args, "--by"),
+                RequireOption(args, "--reason"));
             return 0;
 
         case "release":
@@ -207,9 +211,9 @@ static async Task RejectAsync(MemSrvOptions options, Guid uuid, string by, strin
     Console.WriteLine($"rejected {uuid} by {by}");
 }
 
-static async Task RetireAsync(MemSrvOptions options, Guid uuid)
+static async Task RetireAsync(MemSrvOptions options, Guid uuid, string by, string reason)
 {
-    await Service(options).RetireAsync(uuid);
+    await Service(options).RetireAsync(uuid, by, reason);
     Console.WriteLine($"retired {uuid}");
 }
 
@@ -266,7 +270,7 @@ static string? FindOption(string[] args, string name)
     {
         if (args[i] == name)
         {
-            return args[i + 1];
+            return args[i + 1].StartsWith("--", StringComparison.Ordinal) ? null : args[i + 1];
         }
     }
 
@@ -294,7 +298,7 @@ static void Usage()
     Console.Error.WriteLine("memctl show <uuid>");
     Console.Error.WriteLine("memctl approve <uuid> --by name [--edit | --content-file path]");
     Console.Error.WriteLine("memctl reject <uuid> --by name --reason reason");
-    Console.Error.WriteLine("memctl retire <uuid>");
+    Console.Error.WriteLine("memctl retire <uuid> --by name --reason reason");
     Console.Error.WriteLine("memctl release <uuid>");
     Console.Error.WriteLine("memctl why <uuid>");
     Console.Error.WriteLine("memctl consumed <session_id>");

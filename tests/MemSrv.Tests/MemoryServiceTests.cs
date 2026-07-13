@@ -773,15 +773,19 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task MemCtlRetireFlipsStatusKeepsRowAndLeavesRetrieval()
+    public async Task MemCtlRetireApprovedSharedMemoryRecordsProvenanceAndLeavesItAuditable()
     {
         var service = Service();
-        var context = new MemoryContext("agent-a", "memory-system", "session-retire");
+        var context = new MemoryContext("agent-a", "memory-system", $"session-retire-{Guid.NewGuid():N}");
         var term = $"retire-marker-{Guid.NewGuid():N}";
-        var proposed = await service.ProposeMemoryAsync(context, "memory-system", "fact", $"Stale fact {term}", "human", "test-source");
-        await service.ApproveAsync(proposed.Data.Uuid, "test-operator");
+        var operatorName = $"operator-{Guid.NewGuid():N}";
+        const string reason = "superseded by validated documentation";
+        var proposed = await service.ProposeMemoryAsync(
+            context, "memory-system", "fact", $"Stale fact {term}", "human", $"source-{Guid.NewGuid():N}");
+        await service.ApproveAsync(proposed.Data.Uuid, $"reviewer-{Guid.NewGuid():N}");
 
-        var retire = await RunMemCtlForResultAsync("retire", proposed.Data.Uuid.ToString());
+        var retire = await RunMemCtlForResultAsync(
+            "retire", proposed.Data.Uuid.ToString(), "--by", operatorName, "--reason", reason);
         Assert.True(retire.ExitCode == 0, $"retire failed: {retire.Stderr}");
         Assert.Contains($"retired {proposed.Data.Uuid}", retire.Stdout, StringComparison.Ordinal);
 
@@ -790,8 +794,190 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.Contains("shared/retired", show.Stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("retired=<none>", show.Stdout, StringComparison.Ordinal);
 
-        var afterRetire = await service.SearchMemoryAsync(context, term);
-        Assert.DoesNotContain(afterRetire.Data, result => result.Uuid == proposed.Data.Uuid);
+        await using var client = await CreateMcpClientAsync($"session-retire-search-{Guid.NewGuid():N}");
+        var afterRetire = await CallToolAsync(client, "search_memory", new Dictionary<string, object?>
+        {
+            ["query"] = term
+        });
+        Assert.DoesNotContain(
+            afterRetire.GetProperty("data").EnumerateArray(),
+            result => result.GetProperty("uuid").GetGuid() == proposed.Data.Uuid);
+
+        var trace = await RunMemCtlForResultAsync("trace", $"retirement:{proposed.Data.Uuid}");
+        Assert.Equal(0, trace.ExitCode);
+        Assert.Contains(" retirement ", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains($"agent=human:{operatorName}", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains("ns=memory-system", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains($"refs={proposed.Data.Uuid}", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains($"\"operator\": \"human:{operatorName}\"", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains($"\"reason\": \"{reason}\"", trace.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MemCtlRetireRequiresNamedOperatorAndNonBlankReasonWithoutChangingMemory()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-retire-validation-{Guid.NewGuid():N}");
+        var proposed = await service.ProposeMemoryAsync(
+            context, "memory-system", "fact", "Still-current validated fact", "human", $"source-{Guid.NewGuid():N}");
+        await service.ApproveAsync(proposed.Data.Uuid, $"reviewer-{Guid.NewGuid():N}");
+        var operatorName = $"operator-{Guid.NewGuid():N}";
+
+        var missingOperator = await RunMemCtlForResultAsync(
+            "retire", proposed.Data.Uuid.ToString(), "--reason", "no longer current");
+        Assert.NotEqual(0, missingOperator.ExitCode);
+        Assert.Contains("--by is required", missingOperator.Stderr, StringComparison.Ordinal);
+
+        var missingReason = await RunMemCtlForResultAsync(
+            "retire", proposed.Data.Uuid.ToString(), "--by", operatorName);
+        Assert.NotEqual(0, missingReason.ExitCode);
+        Assert.Contains("--reason is required", missingReason.Stderr, StringComparison.Ordinal);
+
+        var blankReason = await RunMemCtlForResultAsync(
+            "retire", proposed.Data.Uuid.ToString(), "--by", operatorName, "--reason", "   ");
+        Assert.NotEqual(0, blankReason.ExitCode);
+        Assert.Contains("reason", blankReason.Stderr, StringComparison.OrdinalIgnoreCase);
+
+        var flagAsOperator = await RunMemCtlForResultAsync(
+            "retire", proposed.Data.Uuid.ToString(), "--by", "--reason", "obsolete");
+        Assert.NotEqual(0, flagAsOperator.ExitCode);
+        Assert.Contains("--by is required", flagAsOperator.Stderr, StringComparison.Ordinal);
+
+        var flagAsReason = await RunMemCtlForResultAsync(
+            "retire", proposed.Data.Uuid.ToString(), "--reason", "--by", operatorName);
+        Assert.NotEqual(0, flagAsReason.ExitCode);
+        Assert.Contains("--reason is required", flagAsReason.Stderr, StringComparison.Ordinal);
+
+        var show = await RunMemCtlForResultAsync("show", proposed.Data.Uuid.ToString());
+        Assert.Contains("shared/approved", show.Stdout, StringComparison.Ordinal);
+        Assert.Contains("retired=<none>", show.Stdout, StringComparison.Ordinal);
+
+        var trace = await RunMemCtlForResultAsync("trace", $"retirement:{proposed.Data.Uuid}");
+        Assert.Equal(0, trace.ExitCode);
+        Assert.Empty(trace.Stdout);
+    }
+
+    [Fact]
+    public async Task MemCtlRetireMissingMemoryReportsNotFoundWithoutAppendingTrace()
+    {
+        var unknown = Guid.NewGuid();
+
+        var retire = await RunMemCtlForResultAsync(
+            "retire", unknown.ToString(), "--by", $"operator-{Guid.NewGuid():N}", "--reason", "obsolete");
+
+        Assert.NotEqual(0, retire.ExitCode);
+        Assert.Contains($"Memory '{unknown}' was not found.", retire.Stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("status", retire.Stderr, StringComparison.OrdinalIgnoreCase);
+
+        var trace = await RunMemCtlForResultAsync("trace", $"retirement:{unknown}");
+        Assert.Equal(0, trace.ExitCode);
+        Assert.Empty(trace.Stdout);
+    }
+
+    [Fact]
+    public async Task MemCtlRetireApprovedPrivateMemoryRecordsQualifiedOperatorAndLeavesItAuditable()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-retire-private-{Guid.NewGuid():N}");
+        var term = $"private-retire-marker-{Guid.NewGuid():N}";
+        var operatorName = $"service:maintenance-{Guid.NewGuid():N}";
+        var saved = await service.SaveNoteAsync(
+            context, "memory-system", "note", $"Private stale note {term}", "human", $"source-{Guid.NewGuid():N}");
+
+        var retire = await RunMemCtlForResultAsync(
+            "retire", saved.Data.Uuid.ToString(), "--by", operatorName, "--reason", "private note expired");
+
+        Assert.Equal(0, retire.ExitCode);
+        var show = await RunMemCtlForResultAsync("show", saved.Data.Uuid.ToString());
+        Assert.Contains("private/retired", show.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("retired=<none>", show.Stdout, StringComparison.Ordinal);
+
+        await using var client = await CreateMcpClientAsync($"session-private-retire-search-{Guid.NewGuid():N}");
+        var search = await CallToolAsync(client, "search_memory", new Dictionary<string, object?>
+        {
+            ["query"] = term
+        });
+        Assert.DoesNotContain(
+            search.GetProperty("data").EnumerateArray(),
+            result => result.GetProperty("uuid").GetGuid() == saved.Data.Uuid);
+
+        var trace = await RunMemCtlForResultAsync("trace", $"retirement:{saved.Data.Uuid}");
+        Assert.Contains(" retirement ", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains($"agent={operatorName}", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains($"refs={saved.Data.Uuid}", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains($"\"operator\": \"{operatorName}\"", trace.Stdout, StringComparison.Ordinal);
+        Assert.Contains("\"reason\": \"private note expired\"", trace.Stdout, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("proposed")]
+    [InlineData("rejected")]
+    [InlineData("superseded")]
+    public async Task MemCtlRetireNonApprovedMemoryReportsStatusWithoutChangingIt(string status)
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-retire-{status}-{Guid.NewGuid():N}");
+        var target = await service.ProposeMemoryAsync(
+            context, "memory-system", "fact", $"A {status} memory cannot be retired", "human", $"source-{Guid.NewGuid():N}");
+        var reviewer = $"reviewer-{Guid.NewGuid():N}";
+
+        if (status == "rejected")
+        {
+            await service.RejectAsync(target.Data.Uuid, reviewer, "not accepted");
+        }
+        else if (status == "superseded")
+        {
+            await service.ApproveAsync(target.Data.Uuid, reviewer);
+            var replacement = await service.ProposeMemoryAsync(
+                context,
+                "memory-system",
+                "fact",
+                "Replacement approved memory",
+                "human",
+                $"source-{Guid.NewGuid():N}",
+                target.Data.Uuid);
+            await service.ApproveAsync(replacement.Data.Uuid, $"reviewer-{Guid.NewGuid():N}");
+        }
+
+        var before = await RunMemCtlForResultAsync("show", target.Data.Uuid.ToString());
+        Assert.Contains($"shared/{status}", before.Stdout, StringComparison.Ordinal);
+
+        var retire = await RunMemCtlForResultAsync(
+            "retire", target.Data.Uuid.ToString(), "--by", $"operator-{Guid.NewGuid():N}", "--reason", "obsolete");
+
+        Assert.NotEqual(0, retire.ExitCode);
+        Assert.Contains($"status '{status}'", retire.Stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("was not found", retire.Stderr, StringComparison.Ordinal);
+
+        var after = await RunMemCtlForResultAsync("show", target.Data.Uuid.ToString());
+        Assert.Equal(before.Stdout, after.Stdout);
+        var trace = await RunMemCtlForResultAsync("trace", $"retirement:{target.Data.Uuid}");
+        Assert.Empty(trace.Stdout);
+    }
+
+    [Fact]
+    public async Task MemCtlRepeatedRetirementFailsWithoutChangingTimestampOrAppendingTrace()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-repeat-retire-{Guid.NewGuid():N}");
+        var proposed = await service.ProposeMemoryAsync(
+            context, "memory-system", "fact", "Retirement is not idempotent", "human", $"source-{Guid.NewGuid():N}");
+        await service.ApproveAsync(proposed.Data.Uuid, $"reviewer-{Guid.NewGuid():N}");
+        var first = await RunMemCtlForResultAsync(
+            "retire", proposed.Data.Uuid.ToString(), "--by", $"operator-{Guid.NewGuid():N}", "--reason", "obsolete");
+        Assert.Equal(0, first.ExitCode);
+        var showAfterFirst = await RunMemCtlForResultAsync("show", proposed.Data.Uuid.ToString());
+        var traceAfterFirst = await RunMemCtlForResultAsync("trace", $"retirement:{proposed.Data.Uuid}");
+
+        var repeated = await RunMemCtlForResultAsync(
+            "retire", proposed.Data.Uuid.ToString(), "--by", $"operator-{Guid.NewGuid():N}", "--reason", "still obsolete");
+
+        Assert.NotEqual(0, repeated.ExitCode);
+        Assert.Contains("status 'retired'", repeated.Stderr, StringComparison.Ordinal);
+        var showAfterRepeated = await RunMemCtlForResultAsync("show", proposed.Data.Uuid.ToString());
+        Assert.Equal(showAfterFirst.Stdout, showAfterRepeated.Stdout);
+        var traceAfterRepeated = await RunMemCtlForResultAsync("trace", $"retirement:{proposed.Data.Uuid}");
+        Assert.Equal(traceAfterFirst.Stdout, traceAfterRepeated.Stdout);
     }
 
     [Fact]

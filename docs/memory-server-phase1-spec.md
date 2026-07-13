@@ -74,7 +74,7 @@ CREATE TABLE traces (
   namespace   TEXT NOT NULL REFERENCES namespaces(name),
   event_type  TEXT NOT NULL,        -- see event taxonomy below
   content     JSONB NOT NULL,
-  refs        UUID[],               -- memory uuids consumed/produced
+  refs        UUID[],               -- memory/trace uuids consumed/produced
   ts          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_traces_session ON traces(session_id, ts);
@@ -318,10 +318,10 @@ v1.1 notes: `--by` is **required** on approve/reject (see §6b); `--edit` opens 
 
 Ship these as an executable test script against a seeded, disposable local `memory_test` database (see §2):
 
-1. **"Why did you say that?"** Given a session_id, list all `memory_consumed` events and resolve each uuid to its source trace/document. (`memctl consumed` + `memctl why`.)
+1. **"Why did you say that?"** Given a session_id, list all `memory_consumed` and `trace_consumed` events and resolve each uuid to its source trace/document. (`memctl consumed` + `memctl why`.)
 2. **"This source changed — what depends on it?"** Given a source_id, list every memory derived from it (index on `source_id`). *(The nightly reconciliation worker that automates this is Phase 3 — the query must work now.)*
 3. **"Adjudicate these two facts."** Given two uuids, show capture timestamps, sources, versions, and supersession chain side by side — including who approved each (from the review events), distinctly from who proposed each.
-4. **"Was this hallucinated?"** Given a session_id and a claim, show whether any consumed memory in that session contains it (FTS over the consumed set).
+4. **"Was this hallucinated?"** Given a session_id and a claim, show whether any consumed memory or consumed trace in that session contains it (FTS over the consumed set).
 
 Plus mechanical tests: UPDATE/DELETE on traces fails **both** via trigger and via the `memsrv` role's grants; private memories invisible to other agents; shared writes cannot be born approved; never-store gate **blocks** a seeded fake secret on the memory path and **redacts** it on the trace path (event recorded, secret absent); RRF returns per-lane scores; namespace isolation holds; **(v1.1)** every memory row has a valid `content_hash`; approval without `--by` fails; approval trace event carries `review:<uuid>` session and a reviewer agent_id distinct from the proposer; `--edit` approval preserves original content and marks `amended: true`; **(v1.4)** successful retirement of approved shared and private memories records the normalized actor and reason, is replayable through `memctl trace retirement:<uuid>`, and exposes the status change and trace together; missing `--by`/`--reason`, a missing uuid, an invalid source status, and repeated retirement fail without changing the row or appending a retirement event.
 

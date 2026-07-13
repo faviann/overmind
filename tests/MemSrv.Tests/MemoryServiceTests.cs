@@ -130,6 +130,23 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RetrieveTraceWithoutRefsHintsAnAlternativeNotADeadEnd()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-retrieve-norefs-{Guid.NewGuid():N}");
+        var logged = await service.LogTraceAsync(context, "note", new { text = "leaf event without refs" });
+
+        var retrieved = await service.RetrieveTraceAsync(context, logged.Data.TraceUuid);
+
+        // A refs-less trace must not send the caller off to fetch "<none>" —
+        // the exact dead-end hint this tool exists to prevent. The hint says
+        // the walk ends here and offers a real next call instead.
+        Assert.DoesNotContain("<none>", retrieved.Next, StringComparison.Ordinal);
+        Assert.Contains("no refs", retrieved.Next, StringComparison.Ordinal);
+        Assert.Contains("search_memory", retrieved.Next, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RetrieveTraceUnknownUuidIsPlainNotFound()
     {
         var service = Service();

@@ -372,6 +372,28 @@ public sealed class HttpTransportTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RetrieveTraceUnknownUuidFailsAcrossTheMcpBoundary()
+    {
+        await using var client = await ConnectAsync(AgentAKey);
+        var unknown = Guid.NewGuid();
+
+        var result = await client.CallToolAsync("retrieve_trace", new Dictionary<string, object?>
+        {
+            ["trace_uuid"] = unknown
+        });
+
+        // The current boundary contract, matching get_by_id's not-found: a
+        // tool execution error whose text the SDK masks generically ("An error
+        // occurred invoking 'retrieve_trace'") — plain not-found detail does
+        // not cross the boundary, unlike namespace-forbidden (which Relay
+        // deliberately converts to McpException).
+        Assert.True(result.IsError == true, "an unknown trace uuid must fail as not-found");
+        var errorText = string.Join(Environment.NewLine,
+            result.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        Assert.Contains("retrieve_trace", errorText);
+    }
+
+    [Fact]
     public async Task UnqualifiedCallLandsInDefaultNamespace()
     {
         await using var client = await ConnectAsync(AgentAKey);

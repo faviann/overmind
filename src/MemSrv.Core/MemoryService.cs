@@ -206,10 +206,12 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             row.Refs,
             row.Ts);
 
-        var refsHint = record.Refs is { Length: > 0 } ? string.Join(", ", record.Refs) : "<none>";
-        return new ToolEnvelope<RetrievedTraceRecord>(
-            record,
-            $"This trace references refs=[{refsHint}]; call get_by_id (memories) or retrieve_trace (traces) on them for surrounding context.");
+        // A refs-less trace must not instruct the caller to fetch nothing —
+        // that is the dead-end hint this tool exists to remove.
+        var next = record.Refs is { Length: > 0 }
+            ? $"This trace references refs=[{string.Join(", ", record.Refs)}]; call get_by_id (memories) or retrieve_trace (traces) on them for surrounding context."
+            : "This trace carries no refs; the provenance walk ends here. Call search_memory for related context, or propose_memory if it holds a durable fact worth keeping.";
+        return new ToolEnvelope<RetrievedTraceRecord>(record, next);
     }
 
     public async Task<ToolEnvelope<MemoryWriteResult>> ProposeMemoryAsync(

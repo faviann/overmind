@@ -279,7 +279,18 @@ public sealed class HttpTransportTests : IAsyncLifetime
             ["source_id"] = "test-source"
         });
 
+        // Read through the SDK result: a tool execution error (IsError), not a
+        // JSON-RPC protocol error — a protocol error would have thrown from
+        // CallToolAsync instead of returning a result.
         Assert.True(result.IsError == true);
+
+        // The error text must name the exact rejected namespace so the agent
+        // can correct itself, without leaking credential material.
+        var errorText = string.Join(Environment.NewLine,
+            result.Content.OfType<TextContentBlock>().Select(block => block.Text));
+        Assert.Contains("'homelab'", errorText);
+        Assert.DoesNotContain(ScopedKey, errorText);
+        Assert.DoesNotContain("Password", errorText);
 
         // Server-side enforcement: nothing reached the foreign namespace. The
         // operator seam that lists proposals in a namespace (memctl pending) shows

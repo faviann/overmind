@@ -96,6 +96,29 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task GetByIdForSourceLessMemoryOffersAnActionableNextStep()
+    {
+        await using var client = await CreateMcpClientAsync($"session-source-less-{Guid.NewGuid():N}");
+        var saved = await CallToolAsync(client, "save_note", new Dictionary<string, object?>
+        {
+            ["namespace"] = "memory-system",
+            ["type"] = "note",
+            ["content"] = "A private note without recorded provenance"
+        });
+
+        var memoryUuid = saved.GetProperty("data").GetProperty("uuid").GetGuid();
+        var fetched = await CallToolAsync(client, "get_by_id", new Dictionary<string, object?>
+        {
+            ["uuid"] = memoryUuid
+        });
+
+        var next = fetched.GetProperty("next").GetString()!;
+        Assert.DoesNotContain("<none>", next, StringComparison.Ordinal);
+        Assert.DoesNotContain("source_id=", next, StringComparison.Ordinal);
+        Assert.Contains("search_memory", next, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RetrieveTraceReturnsFullRecordAndLogsTraceConsumed()
     {
         var service = Service();
@@ -698,6 +721,8 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         });
         AssertNext(fetched);
         Assert.Equal(memoryUuid, fetched.GetProperty("data").GetProperty("uuid").GetGuid());
+        Assert.Contains($"source_id={traceUuid}", fetched.GetProperty("next").GetString(), StringComparison.Ordinal);
+        Assert.Contains("retrieve_trace", fetched.GetProperty("next").GetString(), StringComparison.Ordinal);
 
         var traceRows = await Service().TraceAsync(sessionId);
         Assert.Contains(traceRows, row => row.EventType == "memory_consumed" && row.Refs?.Contains(memoryUuid) == true);

@@ -119,6 +119,30 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task GetByIdWithEmptySourceIdRetainsTheProvenanceHint()
+    {
+        await using var client = await CreateMcpClientAsync($"session-empty-source-{Guid.NewGuid():N}");
+        var saved = await CallToolAsync(client, "save_note", new Dictionary<string, object?>
+        {
+            ["namespace"] = "memory-system",
+            ["type"] = "note",
+            ["content"] = "A private note with an explicitly empty source identifier",
+            ["source_id"] = ""
+        });
+
+        var memoryUuid = saved.GetProperty("data").GetProperty("uuid").GetGuid();
+        var fetched = await CallToolAsync(client, "get_by_id", new Dictionary<string, object?>
+        {
+            ["uuid"] = memoryUuid
+        });
+
+        var next = fetched.GetProperty("next").GetString()!;
+        Assert.Contains("source_id=", next, StringComparison.Ordinal);
+        Assert.Contains("retrieve_trace", next, StringComparison.Ordinal);
+        Assert.DoesNotContain("search_memory", next, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RetrieveTraceReturnsFullRecordAndLogsTraceConsumed()
     {
         var service = Service();

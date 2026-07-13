@@ -8,6 +8,8 @@ namespace MemSrv.Tests;
 
 public static class TestDatabase
 {
+    private static readonly Dictionary<Type, Task> ClassDatabaseResets = [];
+    private static readonly object ClassDatabaseResetLock = new();
     public const string EnvironmentVariable = "MEMSRV_TEST_DATABASE";
     public const string TemplateName = "memory_test_template";
     private const string Host = "127.0.0.1";
@@ -60,8 +62,18 @@ public static class TestDatabase
         NpgsqlConnection.ClearAllPools();
     }
 
-    public static Task ResetSessionDatabaseAsync(string migrationsPath) =>
-        EnsureCurrentTemplateAndCloneAsync(DatabaseName, migrationsPath);
+    public static Task ResetSessionDatabaseOnceAsync(Type testClass, string migrationsPath)
+    {
+        lock (ClassDatabaseResetLock)
+        {
+            if (!ClassDatabaseResets.TryGetValue(testClass, out var reset))
+            {
+                reset = EnsureCurrentTemplateAndCloneAsync(DatabaseName, migrationsPath);
+                ClassDatabaseResets.Add(testClass, reset);
+            }
+            return reset;
+        }
+    }
 
     private static async Task EnsureCurrentTemplateUnderLockAsync(string migrationsPath)
     {

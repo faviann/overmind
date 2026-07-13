@@ -75,9 +75,10 @@ assert that mechanism directly:
 - `make benchmark-test` is the repeatable warm-suite benchmark. It reports
   Docker/PostgreSQL readiness, build/restore, test discovery/host startup,
   template validation/migration, disposable database cloning, isolated memctl
-  process startup, the five bounded fail-closed server-child startup cases,
-  full test wall time, and TRX command/test-body durations. It also names the
-  slowest successful tests and flags any over ten seconds.
+  no-command apphost startup, direct server-apphost startup through the public
+  HTTP health endpoint, full test wall time, and separate TRX command/test-body
+  durations. It also names the slowest successful tests and flags any over ten
+  seconds.
 - `make test` runs four disjoint test-host shards concurrently. Each shard gets
   the isolated session database and LOGIN role described above; their filters
   partition the suite, so the reported shard totals sum to the unchanged full
@@ -106,7 +107,7 @@ assert that mechanism directly:
 | 3 | 202.458s | 51.562s | 92 passed, 0 failed, 0 skipped |
 | Median | 201.738s | 58.123s | unchanged full test count |
 
-The checked-in benchmark command subsequently reported a 53.686s full test
+The checked-in benchmark command subsequently reported a 50.339s full test
 phase, 92/0/0, and no successful test over ten seconds. The four shard-reported
 test durations in the three post-change `make test` runs had maxima of 45s,
 45s, and 42s; the command-level wall values above conservatively include

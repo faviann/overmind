@@ -23,9 +23,6 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class HttpTransportTests : IAsyncLifetime
 {
-    private static readonly Lazy<Task> ClassDatabaseReset = new(() =>
-        TestDatabase.ResetSessionDatabaseAsync(
-            Path.Combine(TestProcessRunner.RepoRoot, "migrations")));
     private static string AdminConnection => TestDatabase.AdminConnection;
     private static string RuntimeConnection => TestDatabase.RuntimeConnection;
 
@@ -42,7 +39,8 @@ public sealed class HttpTransportTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        await ClassDatabaseReset.Value;
+        await TestDatabase.ResetSessionDatabaseOnceAsync(
+            typeof(HttpTransportTests), Path.Combine(_root, "migrations"));
 
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");
         await File.WriteAllTextAsync(_keysPath, KeyFileYaml());

@@ -11,15 +11,13 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class MemoryServiceTests : IAsyncLifetime
 {
-    private static readonly Lazy<Task> ClassDatabaseReset = new(() =>
-        TestDatabase.ResetSessionDatabaseAsync(
-            Path.Combine(TestProcessRunner.RepoRoot, "migrations")));
     private static string AdminConnection => TestDatabase.AdminConnection;
     private static string RuntimeConnection => TestDatabase.RuntimeConnection;
     private readonly string _root = TestProcessRunner.RepoRoot;
     private readonly List<string> _serverErrorLines = [];
 
-    public Task InitializeAsync() => ClassDatabaseReset.Value;
+    public Task InitializeAsync() => TestDatabase.ResetSessionDatabaseOnceAsync(
+        typeof(MemoryServiceTests), Path.Combine(_root, "migrations"));
 
     public Task DisposeAsync() => Task.CompletedTask;
 

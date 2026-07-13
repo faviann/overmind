@@ -20,8 +20,6 @@ namespace MemSrv.Tests;
 // the spec'd behavior may connect directly.
 public abstract class HttpSeamTestBase : IAsyncLifetime
 {
-    private static readonly Dictionary<Type, Task> ClassDatabaseResets = [];
-    private static readonly object ClassDatabaseResetLock = new();
     protected static string AdminConnection => TestDatabase.AdminConnection;
     protected static string RuntimeConnection => TestDatabase.RuntimeConnection;
 
@@ -37,7 +35,7 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        await ResetDatabaseOnceForClassAsync();
+        await TestDatabase.ResetSessionDatabaseOnceAsync(GetType(), Path.Combine(_root, "migrations"));
 
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");
         await File.WriteAllTextAsync(_keysPath, KeyFileYaml());
@@ -47,19 +45,6 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
         await _app.StartAsync();
         _baseUrl = _app.Services.GetRequiredService<IServer>()
             .Features.Get<IServerAddressesFeature>()!.Addresses.First();
-    }
-
-    private Task ResetDatabaseOnceForClassAsync()
-    {
-        lock (ClassDatabaseResetLock)
-        {
-            if (!ClassDatabaseResets.TryGetValue(GetType(), out var reset))
-            {
-                reset = TestDatabase.ResetSessionDatabaseAsync(Path.Combine(_root, "migrations"));
-                ClassDatabaseResets.Add(GetType(), reset);
-            }
-            return reset;
-        }
     }
 
     public async Task DisposeAsync()

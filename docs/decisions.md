@@ -1,5 +1,31 @@
 # Decisions
 
+## 2026-07-13 — retrieve_trace: build it, open-door reads, audited (#43)
+
+- The dangling `retrieve_trace` reference resolves by building the tool, not
+  by removing the `get_by_id` hint: the provenance walk the hint promises is
+  the design's core grounding commitment, and a read-only trace fetch is
+  compatible with Do Not Build. Spec §8 owns the contract.
+- Trace reads are **open door**: a trace is readable iff the caller's key
+  allows its namespace — the same single trust boundary as search, writes,
+  and workstreams. Provenance-reachability gating (only traces cited as a
+  readable memory's `source_id`) was considered and rejected: it recreates
+  the follow-up block on the trace layer, breaks second hops through a
+  trace's `refs`, and would leave bulk-imported transcripts (#15)
+  agent-invisible. Forbidden namespaces fail with the explicit
+  namespace-forbidden error (matching `get_by_id` and #25); unknown uuids
+  are plain not-found. Revisit gate: an agent grounding on a junk trace and
+  causing a real error.
+- Every successful read appends a `trace_consumed` event mirroring
+  `memory_consumed`; the §4 taxonomy gains the type, and `memctl consumed`
+  plus the acceptance-test-4 consumed-set query include it. Rationale: the
+  tool exists so agents can ground answers on traces, and a grounding read
+  that the audit queries cannot see is causal provenance computed and
+  discarded.
+- Sequencing: lands before #10 — the v1.0.0 tag freezes the runtime contract
+  as a compatibility promise and must not ship a self-guiding hint that
+  dead-ends.
+
 ## 2026-07-12 — tool-response JSON uses camelCase (#31)
 
 - JSON tool-response properties use the MCP SDK's camelCase convention; for

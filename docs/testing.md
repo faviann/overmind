@@ -6,7 +6,7 @@
   public reads.
 - Named for the behavior: `shared_write_cannot_be_born_approved`, not
   `MemoryRepositoryTest_Update`.
-- Runs against the real local `memory_test` Postgres (major pinned to **18**,
+- Runs against a real local session database on Postgres (major pinned to **18**,
   matching production; `make db-up` provisions it). No mocking of the database
   or internal services — the DB constraints are part of the behavior under test.
 
@@ -22,11 +22,25 @@ assert forbidden operations FAIL:
 - private memories invisible to other agent credentials
 
 ## Database lifecycle
-- `memory_test` is owned by xUnit — it may wipe and reseed at will. Never use it
-  as an interactive playground; that's `memory_dev`.
-- `make test-db-reset` → clean `memory_test` + all migrations applied via DbUp.
+- The xUnit host owns one database per suite run. With no caller configuration,
+  it generates `memory_test_<runid>`; `MEMSRV_TEST_DATABASE` pins the name for
+  an IDE or harness that needs a predictable database. The host clones the
+  database from `memory_test_template` and drops it on clean disposal. Never use
+  a test database as an interactive playground; that's `memory_dev`.
+- Each host also provisions a unique LOGIN role that inherits `memsrv` grants.
+  This keeps cluster-level role verification isolated between concurrent suites;
+  production still has only the canonical `memsrv` runtime role.
+- `memory_test_template` is refreshed automatically when the migration-file
+  fingerprint changes. Disposable schema-verifier databases clone it rather
+  than running migrations again.
+- `make test-db-reset` recreates `${MEMSRV_TEST_DATABASE:-memory_test}` from the
+  current template. `make test-db-sweep` removes databases leaked for more than
+  six hours by crashed runs, but never the template or a database with an active
+  connection. `make db-up` runs the same conservative sweep.
 - Tests are order-independent: each test creates its own namespace/session ids;
-  never share mutable fixtures across tests.
+  never share mutable fixtures across tests. The session database is lifecycle
+  infrastructure, not mutable test state: database-backed classes still reset
+  and migrate their own schema as required by their existing test seam.
 
 ## Anti-patterns (stop and flag to the human if you catch yourself)
 - Weakening an assertion to reach green

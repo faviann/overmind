@@ -13,8 +13,7 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class SchemaVerifierTests
 {
-    private const string MaintenanceConnection =
-        "Host=127.0.0.1;Port=55432;Database=postgres;Username=overmind;Password=overmind_dev";
+    private static string MaintenanceConnection => TestDatabase.MaintenanceConnection;
     private readonly string _root = FindRepoRoot();
 
     [Fact]
@@ -152,8 +151,12 @@ public sealed class SchemaVerifierTests
     {
         await WithDisposableDbAsync(async admin =>
         {
-            // memsrv is cluster-wide; restore LOGIN before any concurrent test connects.
-            await ExecuteAsync(MaintenanceConnection, "ALTER ROLE memsrv NOLOGIN");
+            // memsrv is cluster-wide. Hold a session advisory lock so the same
+            // mechanical assertion in another test host cannot race restoration.
+            await using var roleLock = new NpgsqlConnection(MaintenanceConnection);
+            await roleLock.OpenAsync();
+            await roleLock.ExecuteAsync("SELECT pg_advisory_lock(757002524895691804)");
+            await roleLock.ExecuteAsync("ALTER ROLE memsrv NOLOGIN");
             try
             {
                 var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
@@ -162,21 +165,20 @@ public sealed class SchemaVerifierTests
             }
             finally
             {
-                await ExecuteAsync(MaintenanceConnection, "ALTER ROLE memsrv LOGIN");
+                await roleLock.ExecuteAsync("ALTER ROLE memsrv LOGIN");
+                await roleLock.ExecuteAsync("SELECT pg_advisory_unlock(757002524895691804)");
             }
         });
     }
 
     private async Task WithDisposableDbAsync(Func<string, Task> body)
     {
-        var dbName = $"verify_schema_test_{Guid.NewGuid():N}";
-        var adminConnection =
-            $"Host=127.0.0.1;Port=55432;Database={dbName};Username=overmind;Password=overmind_dev";
+        var dbName = $"memory_test_{Guid.NewGuid():N}_verify";
+        var adminConnection = TestDatabase.BuildAdminConnection(dbName);
 
-        await ExecuteAsync(MaintenanceConnection, $"CREATE DATABASE \"{dbName}\"");
+        await ExecuteAsync(MaintenanceConnection, $"CREATE DATABASE \"{dbName}\" TEMPLATE {TestDatabase.TemplateName}");
         try
         {
-            DatabaseMigrator.Migrate(adminConnection, Path.Combine(_root, "migrations"), logToConsole: false);
             await body(adminConnection);
         }
         finally
@@ -232,4 +234,4 @@ public sealed class SchemaVerifierTests
 // Shared no-fixture collection: serializes SchemaVerifierTests with
 // MemoryServiceTests so cluster-wide memsrv role toggles never race a memsrv login.
 [CollectionDefinition("database")]
-public sealed class DatabaseCollection;
+public sealed class DatabaseCollection : ICollectionFixture<TestDatabaseFixture>;

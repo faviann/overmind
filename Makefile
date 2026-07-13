@@ -1,10 +1,11 @@
-.PHONY: db-up test test-one test-db-reset migrate-dev accept sdk-reference
+.PHONY: db-up test test-one test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference
 
 sdk-reference:
 	@tools/provision-sdk-reference.sh
 
 db-up:
 	docker compose up -d --wait postgres
+	@tools/test-db.sh sweep
 
 test: db-up
 	dotnet build memsrv.sln
@@ -15,11 +16,13 @@ test-one: db-up
 	dotnet test tests/MemSrv.Tests --no-build --filter "$(T)"
 
 test-db-reset: db-up
-	docker compose exec postgres psql -U overmind -d postgres \
-		-c "DROP DATABASE IF EXISTS memory_test WITH (FORCE);" \
-		-c "CREATE DATABASE memory_test;"
-	MEMSRV_ADMIN_CONNECTION_STRING="postgres://overmind:overmind_dev@127.0.0.1:55432/memory_test" \
-		dotnet run --project src/MemCtl -- migrate
+	@tools/test-db.sh reset "$${MEMSRV_TEST_DATABASE:-memory_test}"
+
+test-db-template: db-up
+	@tools/test-db.sh template
+
+test-db-sweep: db-up
+	@tools/test-db.sh sweep
 
 migrate-dev:
 	docker compose run --rm migrate

@@ -12,8 +12,7 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class SchemaVerifierTests
 {
-    private const string MaintenanceConnection =
-        "Host=127.0.0.1;Port=55432;Database=postgres;Username=overmind;Password=overmind_dev";
+    private static string MaintenanceConnection => TestDatabase.MaintenanceConnection;
     private readonly string _root = TestProcessRunner.RepoRoot;
 
     [Fact]
@@ -151,8 +150,12 @@ public sealed class SchemaVerifierTests
     {
         await WithDisposableDbAsync(async admin =>
         {
-            // memsrv is cluster-wide; restore LOGIN before any concurrent test connects.
-            await ExecuteAsync(MaintenanceConnection, "ALTER ROLE memsrv NOLOGIN");
+            // memsrv is cluster-wide. Hold a session advisory lock so the same
+            // mechanical assertion in another test host cannot race restoration.
+            await using var roleLock = new NpgsqlConnection(MaintenanceConnection);
+            await roleLock.OpenAsync();
+            await roleLock.ExecuteAsync("SELECT pg_advisory_lock(757002524895691804)");
+            await roleLock.ExecuteAsync("ALTER ROLE memsrv NOLOGIN");
             try
             {
                 var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
@@ -161,21 +164,70 @@ public sealed class SchemaVerifierTests
             }
             finally
             {
-                await ExecuteAsync(MaintenanceConnection, "ALTER ROLE memsrv LOGIN");
+                await roleLock.ExecuteAsync("ALTER ROLE memsrv LOGIN");
+                await roleLock.ExecuteAsync("SELECT pg_advisory_unlock(757002524895691804)");
             }
         });
     }
 
-    private async Task WithDisposableDbAsync(Func<string, Task> body)
+    [Fact]
+    public async Task DisposableCloneRevalidatesTemplateAfterDifferentMigrationSet()
     {
-        var dbName = $"verify_schema_test_{Guid.NewGuid():N}";
-        var adminConnection =
-            $"Host=127.0.0.1;Port=55432;Database={dbName};Username=overmind;Password=overmind_dev";
+        var migrationA = Path.Combine(Path.GetTempPath(), $"memsrv-migrations-a-{Guid.NewGuid():N}");
+        var migrationB = Path.Combine(Path.GetTempPath(), $"memsrv-migrations-b-{Guid.NewGuid():N}");
+        var databaseA = $"memory_test_{Guid.NewGuid():N}_branch_a";
+        var databaseB = $"memory_test_{Guid.NewGuid():N}_branch_b";
+        var databaseAAfterB = $"memory_test_{Guid.NewGuid():N}_branch_a_again";
+        Directory.CreateDirectory(migrationA);
+        Directory.CreateDirectory(migrationB);
 
-        await ExecuteAsync(MaintenanceConnection, $"CREATE DATABASE \"{dbName}\"");
+        var sourceMigration = Path.Combine(_root, "migrations", "0001_init.sql");
+        await File.WriteAllTextAsync(
+            Path.Combine(migrationA, "0001_init.sql"),
+            await File.ReadAllTextAsync(sourceMigration) + "\nCREATE TABLE branch_marker_a (id integer);\n");
+        await File.WriteAllTextAsync(
+            Path.Combine(migrationB, "0001_init.sql"),
+            await File.ReadAllTextAsync(sourceMigration) + "\nCREATE TABLE branch_marker_b (id integer);\n");
+
         try
         {
-            DatabaseMigrator.Migrate(adminConnection, Path.Combine(_root, "migrations"), logToConsole: false);
+            await TestDatabase.EnsureCurrentTemplateAndCloneAsync(databaseA, migrationA);
+            Assert.True(await HasTableAsync(databaseA, "branch_marker_a"));
+            Assert.False(await HasTableAsync(databaseA, "branch_marker_b"));
+
+            await TestDatabase.EnsureCurrentTemplateAndCloneAsync(databaseB, migrationB);
+            Assert.True(await HasTableAsync(databaseB, "branch_marker_b"));
+            Assert.False(await HasTableAsync(databaseB, "branch_marker_a"));
+
+            await TestDatabase.EnsureCurrentTemplateAndCloneAsync(databaseAAfterB, migrationA);
+            Assert.True(await HasTableAsync(databaseAAfterB, "branch_marker_a"));
+            Assert.False(await HasTableAsync(databaseAAfterB, "branch_marker_b"));
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            foreach (var database in new[] { databaseA, databaseB, databaseAAfterB })
+            {
+                await ExecuteAsync(
+                    MaintenanceConnection,
+                    $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
+            }
+            await TestDatabase.EnsureCurrentTemplateAsync(Path.Combine(_root, "migrations"));
+            Directory.Delete(migrationA, recursive: true);
+            Directory.Delete(migrationB, recursive: true);
+        }
+    }
+
+    private async Task WithDisposableDbAsync(Func<string, Task> body)
+    {
+        var dbName = $"memory_test_{Guid.NewGuid():N}_verify";
+        var adminConnection = TestDatabase.BuildAdminConnection(dbName);
+
+        await TestDatabase.EnsureCurrentTemplateAndCloneAsync(
+            dbName,
+            Path.Combine(_root, "migrations"));
+        try
+        {
             await body(adminConnection);
         }
         finally
@@ -192,6 +244,15 @@ public sealed class SchemaVerifierTests
         await connection.ExecuteAsync(sql);
     }
 
+    private static async Task<bool> HasTableAsync(string databaseName, string tableName)
+    {
+        await using var connection = new NpgsqlConnection(TestDatabase.BuildAdminConnection(databaseName));
+        await connection.OpenAsync();
+        return await connection.ExecuteScalarAsync<bool>(
+            "SELECT to_regclass('public.' || @tableName) IS NOT NULL",
+            new { tableName });
+    }
+
     private static Task<(int ExitCode, string Stdout, string Stderr)> RunVerifySchemaAsync(string adminConnection) =>
         TestProcessRunner.RunMemCtlToExitAsync(
             new Dictionary<string, string> { ["MEMSRV_ADMIN_CONNECTION_STRING"] = adminConnection },
@@ -201,4 +262,4 @@ public sealed class SchemaVerifierTests
 // Shared no-fixture collection: serializes SchemaVerifierTests with
 // MemoryServiceTests so cluster-wide memsrv role toggles never race a memsrv login.
 [CollectionDefinition("database")]
-public sealed class DatabaseCollection;
+public sealed class DatabaseCollection : ICollectionFixture<TestDatabaseFixture>;

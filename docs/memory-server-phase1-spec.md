@@ -194,7 +194,7 @@ GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO memsrv;
 
 ### Trace event taxonomy (event_type)
 
-`user_msg`, `assistant_msg`, `tool_call`, `tool_result`, `memory_consumed`, `memory_proposed`, `memory_written`, `approval`, `rejection`, `retirement`, `handoff`, `workstream_checkout`, `workstream_checkin`, `compaction_boundary`, `note`.
+`user_msg`, `assistant_msg`, `tool_call`, `tool_result`, `memory_consumed`, `trace_consumed`, `memory_proposed`, `memory_written`, `approval`, `rejection`, `retirement`, `handoff`, `workstream_checkout`, `workstream_checkin`, `compaction_boundary`, `note`.
 
 `event_type` is open text, not an enum — consumers may add types as they earn them. Pre-blessed additions (from the predecessor project's event contract): `error`, `command_run`, `file_observed`, `file_modified`.
 
@@ -224,6 +224,7 @@ Do not rely on agents to report what they used. The server logs it:
 
 - Every `search_memory` call → trace event `tool_call` with the query.
 - Every `get_by_id` call → trace event `memory_consumed` with `refs=[uuid]`, session, agent.
+- Every `retrieve_trace` call → trace event `trace_consumed` with `refs=[trace_uuid]`, session, agent.
 - Every `propose_memory`/`save_note` → `memory_proposed`/`memory_written` with the new uuid in `refs`.
 
 This makes acceptance tests 1 and 4 (below) pure queries, with zero agent cooperation required.
@@ -292,6 +293,8 @@ genuinely snake_case and remain so.
    `next`: "Call get_by_id with a uuid to read full content. Nothing relevant? Consider propose_memory to fill the gap."
 3. **`get_by_id`** `{uuid}` → full record incl. all provenance columns + version chain (`supersedes` / superseded-by).
    `next`: "This memory derives from source_id=<...>; retrieve_trace on it for full context." (Server logs `memory_consumed`.)
+3b. **`retrieve_trace`** `{trace_uuid}` → the full trace record: `{traceUuid, sessionId, agentId, namespace, eventType, content, refs, createdAt}`. Readable iff the caller's key allows the trace's namespace — the same open-door boundary as every other read; a disallowed namespace raises the same namespace-forbidden error as `get_by_id`, an unknown uuid is a plain not-found.
+   `next`: "This trace references refs=[...]; call get_by_id (memories) or retrieve_trace (traces) on them for surrounding context." (Server logs `trace_consumed`.)
 4. **`propose_memory`** `{namespace, type, content, source_type, source_id, supersedes?}` → `{uuid, status:'proposed'}`
    `next`: "Proposal recorded; an operator must approve before it becomes shared knowledge. Continue your task."
 5. **`save_note`** `{namespace, type, content, source_type?, source_id?}` → private, auto-approved, owner-scoped.

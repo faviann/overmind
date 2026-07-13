@@ -96,6 +96,72 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RetrieveTraceReturnsFullRecordAndLogsTraceConsumed()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-retrieve-trace-{Guid.NewGuid():N}");
+        var referenced = await service.LogTraceAsync(context, "note", new { text = "referenced event" });
+        var logged = await service.LogTraceAsync(
+            context,
+            "assistant_msg",
+            new { text = "grounding evidence for a follow-up read" },
+            refs: [referenced.Data.TraceUuid]);
+
+        var retrieved = await service.RetrieveTraceAsync(context, logged.Data.TraceUuid);
+
+        var record = retrieved.Data;
+        Assert.Equal(logged.Data.TraceUuid, record.TraceUuid);
+        Assert.Equal(context.SessionId, record.SessionId);
+        Assert.Equal("agent-a", record.AgentId);
+        Assert.Equal("memory-system", record.Namespace);
+        Assert.Equal("assistant_msg", record.EventType);
+        Assert.Equal(JsonValueKind.Object, record.Content.ValueKind);
+        Assert.Equal("grounding evidence for a follow-up read", record.Content.GetProperty("text").GetString());
+        Assert.Equal([referenced.Data.TraceUuid], record.Refs ?? []);
+        Assert.True(record.CreatedAt > DateTimeOffset.UtcNow.AddMinutes(-5));
+        Assert.Contains("refs", retrieved.Next, StringComparison.Ordinal);
+
+        // The successful read is itself provenance: a trace_consumed event
+        // mirroring memory_consumed, with the read uuid in refs.
+        var trace = await service.TraceAsync(context.SessionId);
+        var consumedEvent = Assert.Single(trace, row => row.EventType == "trace_consumed");
+        Assert.Equal([logged.Data.TraceUuid], consumedEvent.Refs ?? []);
+        Assert.Contains(logged.Data.TraceUuid.ToString(), consumedEvent.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetrieveTraceUnknownUuidIsPlainNotFound()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-retrieve-missing-{Guid.NewGuid():N}");
+        var unknown = Guid.NewGuid();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RetrieveTraceAsync(context, unknown));
+
+        Assert.Equal($"Trace '{unknown}' was not found.", ex.Message);
+        // A failed read is not a consumption: no trace_consumed event lands.
+        Assert.Empty(await service.TraceAsync(context.SessionId));
+    }
+
+    [Fact]
+    public async Task RetrieveTraceRejectsTraceOutsideAllowlistNamingNamespace()
+    {
+        var service = Service();
+        var insider = new MemoryContext("agent-a", "homelab", new[] { "homelab" }, $"session-retrieve-insider-{Guid.NewGuid():N}");
+        var logged = await service.LogTraceAsync(insider, "note", new { text = "homelab-only event" });
+
+        var outsider = new MemoryContext("agent-b", "memory-system", new[] { "memory-system" }, $"session-retrieve-outsider-{Guid.NewGuid():N}");
+
+        var ex = await Assert.ThrowsAsync<NamespaceForbiddenException>(() =>
+            service.RetrieveTraceAsync(outsider, logged.Data.TraceUuid));
+
+        Assert.Equal("homelab", ex.Namespace);
+        Assert.Contains("homelab", ex.Message, StringComparison.Ordinal);
+        // The rejected read consumed nothing.
+        Assert.Empty(await service.TraceAsync(outsider.SessionId));
+    }
+
+    [Fact]
     public async Task NeverStoreBlocksWriteAndLogsRedactedNote()
     {
         var service = Service();
@@ -704,6 +770,38 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.True(consumed.ExitCode == 0, $"consumed failed: {consumed.Stderr}");
         Assert.Contains(proposed.Data.Uuid.ToString(), consumed.Stdout, StringComparison.Ordinal);
         Assert.Contains(sourceTrace.Data.TraceUuid.ToString(), consumed.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MemCtlConsumedListsTraceReadsAlongsideMemoryReads()
+    {
+        var service = Service();
+        var context = new MemoryContext("agent-a", "memory-system", $"session-consumed-mixed-{Guid.NewGuid():N}");
+        var sourceTrace = await service.LogTraceAsync(context, "assistant_msg", new { text = "mixed consumption source" });
+        var proposed = await service.ProposeMemoryAsync(context, "memory-system", "fact", "A mixed-read fact", "trace", sourceTrace.Data.TraceUuid.ToString());
+        await service.ApproveAsync(proposed.Data.Uuid, "test-operator");
+
+        // The session reads a memory, then follows its provenance to the trace.
+        await service.GetByIdAsync(context, proposed.Data.Uuid);
+        await service.RetrieveTraceAsync(context, sourceTrace.Data.TraceUuid);
+
+        var consumed = await RunMemCtlForResultAsync("consumed", context.SessionId);
+
+        Assert.True(consumed.ExitCode == 0, $"consumed failed: {consumed.Stderr}");
+        var lines = consumed.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+        // Both reads appear, each line shape naming what kind of read it was.
+        var memoryLine = Assert.Single(lines, line => line.Contains(" memory ", StringComparison.Ordinal));
+        Assert.Contains(proposed.Data.Uuid.ToString(), memoryLine, StringComparison.Ordinal);
+        Assert.Contains($"source=trace:{sourceTrace.Data.TraceUuid}", memoryLine, StringComparison.Ordinal);
+
+        var traceLine = Assert.Single(lines, line => line.Contains(" trace ", StringComparison.Ordinal));
+        Assert.Contains(sourceTrace.Data.TraceUuid.ToString(), traceLine, StringComparison.Ordinal);
+        Assert.Contains("event=assistant_msg", traceLine, StringComparison.Ordinal);
+
+        // Chronological: the memory read happened before the trace read.
+        Assert.True(Array.IndexOf(lines, memoryLine) < Array.IndexOf(lines, traceLine),
+            $"memory read must precede trace read in:{Environment.NewLine}{consumed.Stdout}");
     }
 
     private MemoryService Service() =>

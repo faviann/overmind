@@ -164,6 +164,54 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             $"This memory derives from source_id={record.SourceId ?? "<none>"}; retrieve_trace on it for full context.");
     }
 
+    public async Task<ToolEnvelope<RetrievedTraceRecord>> RetrieveTraceAsync(
+        MemoryContext context,
+        Guid traceUuid,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<TraceRecord>(
+            """
+            SELECT trace_uuid AS TraceUuid, session_id AS SessionId, agent_id AS AgentId, namespace,
+                   event_type AS EventType, content::text AS Content, refs, ts
+            FROM traces
+            WHERE trace_uuid = @TraceUuid
+            """,
+            new { TraceUuid = traceUuid });
+
+        if (row is null)
+        {
+            throw new InvalidOperationException($"Trace '{traceUuid}' was not found.");
+        }
+
+        // Open-door reads (decision 2026-07-13): a trace is readable iff the
+        // caller's key allows its namespace — the same single trust boundary
+        // as get_by_id, checked before the read is consumed.
+        AuthorizeNamespace(context, row.Namespace);
+
+        // Mirror of memory_consumed: the grounding read is provenance too, in
+        // the trace's own namespace, with the read uuid in refs.
+        await InsertTraceRawAsync(context.AgentId, row.Namespace, context.SessionId, "trace_consumed", new
+        {
+            uuid = traceUuid
+        }, [traceUuid], cancellationToken);
+
+        var record = new RetrievedTraceRecord(
+            row.TraceUuid,
+            row.SessionId,
+            row.AgentId,
+            row.Namespace,
+            row.EventType,
+            JsonSerializer.Deserialize<JsonElement>(row.Content),
+            row.Refs,
+            row.Ts);
+
+        var refsHint = record.Refs is { Length: > 0 } ? string.Join(", ", record.Refs) : "<none>";
+        return new ToolEnvelope<RetrievedTraceRecord>(
+            record,
+            $"This trace references refs=[{refsHint}]; call get_by_id (memories) or retrieve_trace (traces) on them for surrounding context.");
+    }
+
     public async Task<ToolEnvelope<MemoryWriteResult>> ProposeMemoryAsync(
         MemoryContext context,
         string @namespace,
@@ -761,16 +809,22 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         await using var connection = await OpenAsync();
         var rows = await connection.QueryAsync<ConsumedRow>(
             """
-            SELECT t.ts AS Ts, m.uuid AS MemoryUuid, m.type AS Type,
+            SELECT t.ts AS Ts, 'memory' AS Kind, m.uuid AS Uuid, m.type AS Type,
                    m.source_type AS SourceType, m.source_id AS SourceId
             FROM traces t
             JOIN memories m ON m.uuid = ANY(t.refs)
             WHERE t.session_id = @SessionId AND t.event_type = 'memory_consumed'
-            ORDER BY t.ts, m.uuid
+            UNION ALL
+            SELECT t.ts AS Ts, 'trace' AS Kind, r.trace_uuid AS Uuid, r.event_type AS Type,
+                   NULL AS SourceType, NULL AS SourceId
+            FROM traces t
+            JOIN traces r ON r.trace_uuid = ANY(t.refs)
+            WHERE t.session_id = @SessionId AND t.event_type = 'trace_consumed'
+            ORDER BY Ts, Uuid
             """,
             new { SessionId = sessionId });
         return rows
-            .Select(row => new ConsumedEntry(row.Ts, row.MemoryUuid, row.Type, row.SourceType, row.SourceId))
+            .Select(row => new ConsumedEntry(row.Ts, row.Kind, row.Uuid, row.Type, row.SourceType, row.SourceId))
             .ToArray();
     }
 
@@ -1201,9 +1255,10 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
     private sealed class ConsumedRow
     {
         public DateTimeOffset Ts { get; set; }
-        public Guid MemoryUuid { get; set; }
+        public string Kind { get; set; } = "";
+        public Guid Uuid { get; set; }
         public string Type { get; set; } = "";
-        public string SourceType { get; set; } = "";
+        public string? SourceType { get; set; }
         public string? SourceId { get; set; }
     }
 

@@ -111,6 +111,11 @@ Committed — do not re-litigate without the maintainer:
   version 18** (minor floats). The schema and tool contracts are the product;
   the language is the vehicle (spec §2; decisions 2026-07-07 "Production
   substrate and deployment contract").
+- **Data access is Npgsql + Dapper with hand-written SQL** — no EF Core or
+  any other ORM on the canonical persistence path; explicit SQL keeps
+  PostgreSQL-specific schema, retrieval, grants, triggers, and governance
+  behavior visible. A pragmatic Phase 1 constraint with a named evidence
+  door, not a permanent ban (decisions 2026-07-13 data access (#44)).
 - **One datastore, period.** No ClickHouse, Redis, vector DB, or queue as a
   second store: trace↔memory joins are load-bearing (acceptance tests 1 and
   4 *are* joins), and scale-out, if ever needed, is partitioning in place
@@ -163,11 +168,6 @@ Committed — do not re-litigate without the maintainer:
 
 ## Open boundaries (surface to the human; do not settle silently)
 
-- **The data-access library is not pinned by any current authority.** The
-  spec commits to .NET + PostgreSQL; the repo uses Npgsql + Dapper with
-  hand-written SQL (see `Directory.Packages.props`). Historical guidance
-  declared "no EF Core" binding, but no current authority restates it. Treat
-  introducing an ORM as a maintainer decision, in either direction.
 - **`retrieve_trace` is referenced but never specified.** The `get_by_id`
   `next` hint in spec §8 points agents at `retrieve_trace`, and the handoff
   lists it in the tool surface, but the spec's tool list does not define it

@@ -1,5 +1,23 @@
 # Decisions
 
+## 2026-07-13 — Phase 1 data access is Npgsql + Dapper, no ORM (#44)
+
+- Phase 1 canonical persistence uses **Npgsql + Dapper with hand-written
+  SQL**; EF Core — or any other ORM — is excluded from that path. Rationale:
+  explicit SQL preserves visibility and control over PostgreSQL-specific
+  schema, retrieval, grants, triggers, generated columns, and governance
+  behavior.
+- DbUp plain-SQL migrations remain authoritative for schema definitions,
+  grants, triggers, generated columns, and other PostgreSQL-specific behavior.
+- This is a **pragmatic Phase 1 constraint, not an anti-ORM principle** or
+  permanent ban. Evidence door: reconsider an ORM when a concrete feature or
+  maintenance problem demonstrates material cost from hand-written SQL —
+  and evaluate that before adding a competing persistence or migration path.
+- Context: the pre-routing AGENTS.md (removed in commit 21e70af) declared
+  "Npgsql + Dapper, hand-written SQL (NO EF Core)" as a hard rule; this entry
+  restores that constraint into current authority. The spec (§2) commits only
+  to .NET + PostgreSQL and is silent on the data-access library.
+
 ## 2026-07-13 — retrieve_trace: build it, open-door reads, audited (#43)
 
 - The dangling `retrieve_trace` reference resolves by building the tool, not

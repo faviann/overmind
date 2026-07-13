@@ -37,8 +37,15 @@ public static class TestDatabase
 
     public static string CreatedAtComment() => $"overmind-test-created-at={DateTimeOffset.UtcNow:O}";
 
-    internal static void SetDatabaseName(string databaseName) => _databaseName = databaseName;
-    internal static void SetRuntimeRole(string runtimeRole) => _runtimeRole = runtimeRole;
+    internal static void BeginSession(string databaseName, string runtimeRole)
+    {
+        lock (ClassDatabaseResetLock)
+        {
+            _databaseName = databaseName;
+            _runtimeRole = runtimeRole;
+            ClassDatabaseResets.Clear();
+        }
+    }
 
     public static string BuildAdminConnection(string databaseName) =>
         BuildConnection(databaseName, AdminUser, AdminPassword);
@@ -62,7 +69,7 @@ public static class TestDatabase
         NpgsqlConnection.ClearAllPools();
     }
 
-    public static Task ResetSessionDatabaseOnceAsync(Type testClass, string migrationsPath)
+    public static Task PrepareClassDatabaseAsync(Type testClass, string migrationsPath)
     {
         lock (ClassDatabaseResetLock)
         {
@@ -150,20 +157,15 @@ public static class TestDatabase
 
 public sealed class TestDatabaseFixture : IAsyncLifetime
 {
-    private readonly string _root = FindRepoRoot();
     private readonly string _databaseName = TestDatabase.ResolveDatabaseName(
         Environment.GetEnvironmentVariable(TestDatabase.EnvironmentVariable));
     private readonly string _runtimeRole = $"memory_test_role_{Guid.NewGuid():N}";
 
     public async Task InitializeAsync()
     {
-        TestDatabase.SetDatabaseName(_databaseName);
-        TestDatabase.SetRuntimeRole(_runtimeRole);
+        TestDatabase.BeginSession(_databaseName, _runtimeRole);
         await ExecuteMaintenanceAsync(
             $"CREATE ROLE {QuoteIdentifier(_runtimeRole)} LOGIN PASSWORD 'memsrv_dev' IN ROLE memsrv");
-        await TestDatabase.EnsureCurrentTemplateAndCloneAsync(
-            _databaseName,
-            Path.Combine(_root, "migrations"));
     }
 
     public async Task DisposeAsync()
@@ -181,13 +183,4 @@ public sealed class TestDatabaseFixture : IAsyncLifetime
     }
 
     private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
-    private static string FindRepoRoot()
-    {
-        var directory = new DirectoryInfo(Directory.GetCurrentDirectory());
-        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "migrations")))
-        {
-            directory = directory.Parent;
-        }
-        return directory?.FullName ?? throw new InvalidOperationException("Could not find repo root.");
-    }
 }

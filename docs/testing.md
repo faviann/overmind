@@ -25,11 +25,13 @@ assert that mechanism directly:
   the migration set that requested it
 
 ## Database lifecycle
-- The xUnit host owns one database per suite run. With no caller configuration,
-  it generates `memory_test_<runid>`; `MEMSRV_TEST_DATABASE` pins the name for
-  an IDE or harness that needs a predictable database. The host clones the
-  database from `memory_test_template` and drops it on clean disposal. Never use
-  a test database as an interactive playground; that's `memory_dev`.
+- The xUnit host owns one lazily created database per suite run. With no caller
+  configuration, it generates `memory_test_<runid>`; `MEMSRV_TEST_DATABASE`
+  pins the name for an IDE or harness that needs a predictable database. The
+  first database-backed class clones it from `memory_test_template`, later
+  classes replace it with a fresh clone, and the host drops it on clean
+  disposal. Never use a test database as an interactive playground; that's
+  `memory_dev`.
 - Each host also provisions a unique LOGIN role that inherits `memsrv` grants.
   This keeps cluster-level role verification isolated between concurrent suites;
   production still has only the canonical `memsrv` runtime role.
@@ -50,13 +52,14 @@ assert that mechanism directly:
 - Tests are order-independent: each test creates unique namespace/session,
   workstream, source, and search identifiers; never share mutable fixtures
   across tests. The session database is lifecycle infrastructure, not mutable
-  test state. The suite fixture provisions the session database and each
-  database-backed class starts from a fresh clone of the current migrated
-  template. Tests within a class reuse that schema and isolate their rows
-  through unique public identifiers. Expensive immutable scenario data may be
-  initialized once per class behind a synchronized fixture. A test which
-  deliberately mutates schema or grants must use its own disposable clone and
-  restore cluster-wide role state.
+  test state. The suite fixture reserves the session database identity and
+  provisions its LOGIN role; each database-backed class materializes or replaces
+  that database with a fresh clone of the current migrated template. Tests
+  within a class reuse that schema and isolate their rows through unique public
+  identifiers. Expensive immutable scenario data may be initialized once per
+  class behind a synchronized fixture. A test which deliberately mutates schema
+  or grants must use its own disposable clone and restore cluster-wide role
+  state.
 
 ## Child processes (memctl, MemSrv.Server)
 - All subprocess launches go through `tests/MemSrv.Tests/TestProcessRunner.cs`,

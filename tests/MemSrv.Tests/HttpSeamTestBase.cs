@@ -35,7 +35,7 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        await TestDatabase.ResetSessionDatabaseOnceAsync(GetType(), Path.Combine(_root, "migrations"));
+        await TestDatabase.PrepareClassDatabaseAsync(GetType(), Path.Combine(_root, "migrations"));
 
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");
         await File.WriteAllTextAsync(_keysPath, KeyFileYaml());

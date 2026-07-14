@@ -436,8 +436,8 @@ public sealed class WorkstreamToolsTests : HttpSeamTestBase
             uuid = checkout.GetProperty("data").GetProperty("workstream").GetProperty("uuid").GetGuid();
         }
 
-        // The operator escape hatch: memctl release flips it back to open.
-        var released = await RunMemCtlAsync("release", uuid.ToString());
+        // The operator escape hatch: memctl workstream release flips it back to open.
+        var released = await RunMemCtlAsync("workstream", "release", uuid.ToString());
         Assert.Contains(uuid.ToString(), released);
 
         // Another agent can now check it out; ownership moved cleanly.

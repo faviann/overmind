@@ -8,6 +8,7 @@ readonly results_dir="$benchmark_dir/results"
 readonly keys_path="$benchmark_dir/keys.yaml"
 readonly server_stdout="$benchmark_dir/server.stdout"
 readonly server_stderr="$benchmark_dir/server.stderr"
+readonly compose=(docker compose --file "$root/compose.dev.yaml")
 server_pid=
 
 cd "$root"
@@ -109,7 +110,7 @@ PY
 
 cleanup() {
   stop_server
-  docker compose exec -T postgres psql -X -U overmind -d postgres -v ON_ERROR_STOP=1 \
+  "${compose[@]}" exec -T postgres psql -X -U overmind -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS \"$scratch_database\" WITH (FORCE)" >/dev/null 2>&1 || true
   rm -rf "$benchmark_dir"
 }

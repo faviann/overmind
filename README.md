@@ -115,9 +115,11 @@ cp agent-keys.example.yaml agent-keys.yaml
 chmod 600 .env agent-keys.yaml
 ```
 
-Replace every placeholder in both files. `OVERMIND_VERSION` must be an explicit
-immutable release version; the admin and runtime passwords have no defaults.
-Then converge the complete deployment with one command:
+These two ignored, mode-`0600` files are the reference deployment's intentional
+local secret inputs. Replace every placeholder in both files.
+`OVERMIND_VERSION` must be an explicit immutable release version; the admin and
+runtime passwords have no defaults. Then converge the complete deployment with
+one command:
 
 ```sh
 docker compose up -d --wait

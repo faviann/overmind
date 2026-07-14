@@ -46,7 +46,12 @@ Reference Compose inputs:
 | `MEMSRV_AGENT_KEYS_PATH` | Optional; `/run/secrets/agent-keys.yaml` | Read-only bearer-key path inside the server container. |
 
 The committed `.env.example` and `agent-keys.example.yaml` contain placeholders
-and safe non-secret defaults only. `.env` and `agent-keys.yaml` are ignored.
+and safe non-secret defaults only. For this reference mode, the operator copies
+them to local `.env` and `agent-keys.yaml` files, replaces the placeholders, and
+restricts both files to mode `0600`. Those operator secret files are ignored.
+Compose passes each database password separately through `PGPASSWORD`, rather
+than interpolating it into Npgsql's semicolon-delimited connection string, so
+ordinary PostgreSQL password characters do not alter connection parameters.
 PostgreSQL 18 stores data in a Compose-managed named volume and has no published
 host port; only the HTTP server is host-published. Re-running the command uses
 the same volume and safely reruns provisioning and migrations.
@@ -63,10 +68,13 @@ provisioning. Repository Make targets and developer scripts select it
 explicitly; the default Compose deployment is never used for `memory_dev` or
 the test database lifecycle.
 
-## Migration contract — FINAL
+## Direct migration contract — FINAL
 
-One-shot container, non-interactive, admin credentials via environment only
-(never written to disk):
+The direct `docker run` adapter below is a one-shot, non-interactive invocation.
+For this adapter, the admin credential is supplied through the process
+environment only and is never written to disk. This rule is distinct from the
+reference Compose mode above, whose explicit operator contract uses an ignored,
+mode-`0600` `.env` file.
 
 ```sh
 docker run --rm \

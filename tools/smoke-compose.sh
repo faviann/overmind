@@ -68,7 +68,7 @@ write_environment() {
   local runtime_password=$1
   printf '%s\n' \
     "OVERMIND_VERSION=$version" \
-    'POSTGRES_ADMIN_PASSWORD=synthetic-compose-admin' \
+    'POSTGRES_ADMIN_PASSWORD=synthetic-admin;alpha="bravo"' \
     "MEMSRV_PASSWORD=$runtime_password" \
     'OVERMIND_HTTP_BIND=127.0.0.1' \
     'OVERMIND_HTTP_PORT=0' \
@@ -76,7 +76,7 @@ write_environment() {
     >"$environment"
 }
 
-write_environment synthetic-compose-runtime
+write_environment 'synthetic-runtime;charlie="delta"'
 
 printf '%s\n' \
   'keys:' \
@@ -103,7 +103,7 @@ readonly unauthenticated_status=$(curl --silent --show-error \
   "$endpoint")
 [[ $unauthenticated_status == 401 ]]
 
-write_environment synthetic-compose-runtime-rotated
+write_environment 'synthetic-runtime;echo="foxtrot"'
 "${compose[@]}" up -d --wait
 
 readonly rotated_published_address=$("${compose[@]}" port server 8080 | head -n 1)

@@ -45,7 +45,8 @@ services:
     entrypoint: ["memctl"]
     command: ["migrate"]
     environment:
-      MEMSRV_ADMIN_CONNECTION_STRING: Host=postgres;Port=5432;Database=memory;Username=postgres;Password=${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}
+      MEMSRV_ADMIN_CONNECTION_STRING: Host=postgres;Port=5432;Database=memory;Username=postgres
+      PGPASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}
     depends_on:
       bootstrap:
         condition: service_completed_successfully
@@ -54,7 +55,8 @@ services:
   server:
     image: ghcr.io/faviann/overmind:${OVERMIND_VERSION:?Set OVERMIND_VERSION in .env; no latest default is provided}
     environment:
-      MEMSRV_CONNECTION_STRING: Host=postgres;Port=5432;Database=memory;Username=memsrv;Password=${MEMSRV_PASSWORD:?Set MEMSRV_PASSWORD in .env}
+      MEMSRV_CONNECTION_STRING: Host=postgres;Port=5432;Database=memory;Username=memsrv
+      PGPASSWORD: ${MEMSRV_PASSWORD:?Set MEMSRV_PASSWORD in .env}
       MEMSRV_AGENT_KEYS_PATH: ${MEMSRV_AGENT_KEYS_PATH:-/run/secrets/agent-keys.yaml}
       MEMSRV_HTTP_URL: http://0.0.0.0:8080
     ports:

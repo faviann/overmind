@@ -11,7 +11,13 @@ identity, never trusted from tool arguments. Path-style names give hierarchy
 
 **Agent identity (`agent_id`)** — who is acting. Derived by the server from the
 connection (bearer key over HTTP, process config over stdio), never
-self-asserted in tool arguments.
+self-asserted in tool arguments. It identifies the provisioned actor, not the
+model or provider used for a particular event.
+
+**Capture provenance** — origin information observed for an imported trace
+event: source harness and version, provider and model when exposed, source
+session and event identifiers, and capture-adapter version. It supplements
+agent identity; unavailable values remain unknown rather than being inferred.
 
 **Bearer key** — a static credential identifying one agent identity over HTTP.
 Each key maps to: one `agent_id`, one default namespace, and a list of allowed

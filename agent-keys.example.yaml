@@ -1,0 +1,5 @@
+keys:
+  - key: <REPLACE_WITH_BEARER_KEY>
+    agent_id: <REPLACE_WITH_AGENT_ID>
+    default_namespace: memory-system
+    allowed_namespaces: [memory-system]

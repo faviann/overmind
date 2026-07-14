@@ -2,6 +2,8 @@
 **/obj/
 .git/
 .gitignore
+.env
+agent-keys.yaml
 docs/
 reference/
 tests/

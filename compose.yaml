@@ -3,42 +3,78 @@ name: overmind
 services:
   postgres:
     image: postgres:18
-    entrypoint:
-      - /bin/bash
-      - -ec
-      - |
-        cat > /docker-entrypoint-initdb.d/01-roles-and-databases.sql <<'SQL'
-        CREATE ROLE memsrv LOGIN PASSWORD 'memsrv_dev';
-        CREATE DATABASE memory_dev;
-        CREATE DATABASE memory_test;
-        SQL
-        exec /usr/local/bin/docker-entrypoint.sh postgres
     environment:
-      POSTGRES_USER: overmind
-      POSTGRES_PASSWORD: overmind_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}
       POSTGRES_DB: postgres
-    ports:
-      - "127.0.0.1:55432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql
+      - overmind-postgres:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U overmind -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 2s
       timeout: 3s
       retries: 30
 
-  # One-shot migration runner against memory_dev; mirrors how production
-  # invokes migrations (one-shot container, admin URL via env, never on disk).
-  migrate:
-    build: .
-    profiles: ["tools"]
-    entrypoint: ["memctl"]
-    command: ["migrate"]
+  bootstrap:
+    image: postgres:18
     environment:
-      MEMSRV_ADMIN_CONNECTION_STRING: postgres://overmind:overmind_dev@postgres:5432/memory_dev
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}
+      MEMSRV_PASSWORD: ${MEMSRV_PASSWORD:?Set MEMSRV_PASSWORD in .env}
+    entrypoint: ["/bin/bash", "-euc"]
+    command:
+      - |
+        export PGPASSWORD="$${POSTGRES_ADMIN_PASSWORD}"
+        psql --host postgres --username postgres --dbname postgres \
+          --set=ON_ERROR_STOP=1 \
+          --set=memsrv_password="$${MEMSRV_PASSWORD}" <<'SQL'
+        SELECT format('CREATE ROLE memsrv LOGIN PASSWORD %L', :'memsrv_password')
+        WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'memsrv')
+        \gexec
+        ALTER ROLE memsrv WITH LOGIN PASSWORD :'memsrv_password';
+        SELECT 'CREATE DATABASE memory'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'memory')
+        \gexec
+        SQL
     depends_on:
       postgres:
         condition: service_healthy
+    restart: "no"
+
+  migrate:
+    image: ghcr.io/faviann/overmind:${OVERMIND_VERSION:?Set OVERMIND_VERSION in .env; no latest default is provided}
+    entrypoint: ["memctl"]
+    command: ["migrate"]
+    environment:
+      MEMSRV_ADMIN_CONNECTION_STRING: Host=postgres;Port=5432;Database=memory;Username=postgres;Password=${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  server:
+    image: ghcr.io/faviann/overmind:${OVERMIND_VERSION:?Set OVERMIND_VERSION in .env; no latest default is provided}
+    environment:
+      MEMSRV_CONNECTION_STRING: Host=postgres;Port=5432;Database=memory;Username=memsrv;Password=${MEMSRV_PASSWORD:?Set MEMSRV_PASSWORD in .env}
+      MEMSRV_AGENT_KEYS_PATH: ${MEMSRV_AGENT_KEYS_PATH:-/run/secrets/agent-keys.yaml}
+      MEMSRV_HTTP_URL: http://0.0.0.0:8080
+    ports:
+      - "${OVERMIND_HTTP_BIND:-0.0.0.0}:${OVERMIND_HTTP_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ${OVERMIND_AGENT_KEYS_FILE:-./agent-keys.yaml}
+        target: ${MEMSRV_AGENT_KEYS_PATH:-/run/secrets/agent-keys.yaml}
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
-  pgdata:
+  overmind-postgres:

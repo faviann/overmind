@@ -4,9 +4,11 @@ set -euo pipefail
 readonly template=memory_test_template
 readonly lock_file=/tmp/overmind-test-template.lock
 readonly command=${1:-}
+readonly root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+readonly compose=(docker compose --file "$root/compose.dev.yaml")
 
 maintenance_psql() {
-  docker compose exec -T postgres psql -U overmind -d postgres "$@"
+  "${compose[@]}" exec -T postgres psql -U overmind -d postgres "$@"
 }
 
 quote_identifier() {

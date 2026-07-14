@@ -1,6 +1,8 @@
 bin/
 obj/
 appsettings.Development.json
+.env
+agent-keys.yaml
 
 # Version-matched SDK reference tree provisioned by `make sdk-reference`.
 reference/csharp-sdk/

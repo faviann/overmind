@@ -100,6 +100,45 @@ inspect the saved consumer configuration.
 
 ## Operator path
 
+### Reference Compose deployment
+
+The default [`compose.yaml`](compose.yaml) is the canonical, production-oriented
+reference deployment. It owns PostgreSQL provisioning for this deployment mode:
+PostgreSQL becomes healthy, the `memsrv` login and `memory` database converge,
+migrations complete, and only then does the HTTP server start.
+
+Create ignored operator inputs from the placeholder-only examples:
+
+```sh
+cp .env.example .env
+cp agent-keys.example.yaml agent-keys.yaml
+chmod 600 .env agent-keys.yaml
+```
+
+These two ignored, mode-`0600` files are the reference deployment's intentional
+local secret inputs. Replace every placeholder in both files.
+`OVERMIND_VERSION` must be an explicit immutable release version; the admin and
+runtime passwords have no defaults. Then converge the complete deployment with
+one command:
+
+```sh
+docker compose up -d --wait
+```
+
+The server is published on `0.0.0.0:8080` by default. Override
+`OVERMIND_HTTP_BIND` or `OVERMIND_HTTP_PORT` in `.env` when needed. PostgreSQL
+has no host-published port, its data lives in a Compose-managed named volume,
+and the bearer-key YAML is mounted read-only. Re-running the same command is
+safe: role provisioning converges the runtime password and migrations are
+idempotent.
+
+Development remains isolated from this reference stack. `make db-up`,
+`make migrate-dev`, and the test targets explicitly select
+[`compose.dev.yaml`](compose.dev.yaml) and continue to use `memory_dev` and
+disposable test databases.
+
+### Existing deployed service
+
 Operator actions stay on the server host. SSH in, identify the service
 container, and run the in-image CLI with its existing runtime environment:
 

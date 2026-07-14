@@ -16,10 +16,65 @@ address, key file) is defined below rather than deferred.
   HTTP by default and stdio on request) and the operator/migration CLI
   (`memctl`, on `PATH`), with migrations baked in at `/app/migrations`.
 
-## Migration contract — FINAL
+## Reference Compose deployment — FINAL
 
-One-shot container, non-interactive, admin credentials via environment only
-(never written to disk):
+The repository's default `compose.yaml` is the canonical, portable reference
+for the complete application topology. With a configured `.env` and local
+bearer-key YAML, this is the entire convergence procedure:
+
+```sh
+docker compose up -d --wait
+```
+
+The dependency chain is PostgreSQL healthy → provisioning completed → schema
+migration completed → HTTP server. The provisioning container is the role and
+database owner for this deployment mode: it idempotently creates the `memsrv`
+LOGIN role and `memory` database when absent, and always converges the configured
+`memsrv` password. The migration container remains the schema owner and never
+creates or manages roles.
+
+Reference Compose inputs:
+
+| Variable | Requirement | Purpose |
+| --- | --- | --- |
+| `OVERMIND_VERSION` | Required | Immutable `ghcr.io/faviann/overmind` release version; there is no `latest` fallback. |
+| `POSTGRES_ADMIN_PASSWORD` | Required | PostgreSQL administrative credential used by PostgreSQL, provisioning, and the one-shot migration. |
+| `MEMSRV_PASSWORD` | Required | Runtime credential converged onto the `memsrv` LOGIN role. |
+| `OVERMIND_HTTP_BIND` | Optional; `0.0.0.0` | Host address on which the HTTP endpoint is published. |
+| `OVERMIND_HTTP_PORT` | Optional; `8080` | Host port mapped to the server's container port 8080. |
+| `OVERMIND_AGENT_KEYS_FILE` | Optional; `./agent-keys.yaml` | Operator-owned bearer-key YAML on the host. |
+| `MEMSRV_AGENT_KEYS_PATH` | Optional; `/run/secrets/agent-keys.yaml` | Read-only bearer-key path inside the server container. |
+
+The committed `.env.example` and `agent-keys.example.yaml` contain placeholders
+and safe non-secret defaults only. For this reference mode, the operator copies
+them to local `.env` and `agent-keys.yaml` files, replaces the placeholders, and
+restricts both files to mode `0600`. Those operator secret files are ignored.
+Compose passes each database password separately through `PGPASSWORD`, rather
+than interpolating it into Npgsql's semicolon-delimited connection string, so
+ordinary PostgreSQL password characters do not alter connection parameters.
+PostgreSQL 18 stores data in a Compose-managed named volume and has no published
+host port; only the HTTP server is host-published. Re-running the command uses
+the same volume and safely reruns provisioning and migrations.
+
+Downstream infrastructure may replace the named volume, local secret inputs,
+and Compose provisioning container with host-specific storage, backup,
+templating, and provisioning equivalents. It must preserve the application
+contract and dependency order; it does not need to consume the reference file
+verbatim. In particular, Ansible remains the provisioning owner for the
+homelab deployment.
+
+The separately selected `compose.dev.yaml` owns disposable local development
+provisioning. Repository Make targets and developer scripts select it
+explicitly; the default Compose deployment is never used for `memory_dev` or
+the test database lifecycle.
+
+## Direct migration contract — FINAL
+
+The direct `docker run` adapter below is a one-shot, non-interactive invocation.
+For this adapter, the admin credential is supplied through the process
+environment only and is never written to disk. This rule is distinct from the
+reference Compose mode above, whose explicit operator contract uses an ignored,
+mode-`0600` `.env` file.
 
 ```sh
 docker run --rm \
@@ -34,7 +89,8 @@ docker run --rm \
 - Journal: DbUp `schemaversions` table in the target database. Production never
   applies migration files via raw `psql`.
 - **The `memsrv` role must exist before migrations run.** Roles are owned by
-  provisioning (Ansible in production, the invariant Compose bootstrap in dev/CI).
+  provisioning (the reference Compose bootstrap in reference deployments,
+  the development bootstrap locally, and Ansible in the homelab deployment).
   Migrations grant to `memsrv` but never create roles or manage passwords.
 
 ## Schema verification — FINAL
@@ -90,7 +146,7 @@ HTTP transport (default mode):
 
 | Variable | Purpose |
 | --- | --- |
-| `MEMSRV_AGENT_KEYS_PATH` | Path to the Ansible-provisioned bearer-key YAML, mounted into the container. Required in HTTP mode; the server fails fast at startup if it is missing. |
+| `MEMSRV_AGENT_KEYS_PATH` | Path to the provisioning-owned bearer-key YAML, mounted into the container. Required in HTTP mode; the server fails fast at startup if it is missing. |
 
 Optional:
 
@@ -108,8 +164,9 @@ image.
 
 - Major version pinned to **18** (dev, CI, and production; minor floats).
 - Production database `memory`, application role `memsrv` (LOGIN, password
-  managed by Ansible). Consumers never receive a connection string; the server
-  is the only door.
+  managed by the active provisioning owner: reference Compose or downstream
+  infrastructure such as Ansible). Consumers never receive a connection
+  string; the server is the only door.
 
 ## Service runtime (port, health, bind address) — FINAL
 
@@ -127,7 +184,8 @@ modes run from the same image.
   when the database answers `SELECT 1` within ~2s; otherwise `503`. Suitable for
   a compose healthcheck — a non-200 reflects a real database outage, not just
   process liveness.
-- **Bearer keys:** an Ansible-provisioned YAML file mounted into the container,
+- **Bearer keys:** a provisioning-owned YAML file mounted read-only into the
+  container,
   path via `MEMSRV_AGENT_KEYS_PATH`. Plaintext entries under a top-level `keys:`
   list, each `{key, agent_id, default_namespace, allowed_namespaces[]}`.
   Rotation is a redeploy; there is no key CRUD in the app.
@@ -136,6 +194,21 @@ modes run from the same image.
   app or contract change.
 
 ## Release verification
+
+Exercise the complete reference Compose lifecycle against a locally available
+candidate image tag:
+
+```sh
+make smoke-compose IMAGE=ghcr.io/faviann/overmind:<version>
+```
+
+The smoke supplies temporary synthetic operator inputs, requires missing
+version/admin/runtime values to fail during Compose interpolation, runs
+`docker compose up -d --wait`, checks database-backed `/healthz` and
+unauthenticated `/mcp`, runs Compose a second time against the same named
+volume while rotating the runtime password, and tears the deployment down
+cleanly. It asserts application behavior only through the public HTTP surface;
+it does not inspect database internals.
 
 From an overmind source checkout, exercise an exact image reference against a
 disposable PostgreSQL 18 container:

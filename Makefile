@@ -1,10 +1,12 @@
-.PHONY: db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference smoke-image
+.PHONY: db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference smoke-image smoke-compose
+
+DEV_COMPOSE = docker compose --file compose.dev.yaml
 
 sdk-reference:
 	@tools/provision-sdk-reference.sh
 
 db-up:
-	docker compose up -d --wait postgres
+	$(DEV_COMPOSE) up -d --wait postgres
 	@tools/test-db.sh sweep
 
 test: db-up
@@ -28,7 +30,7 @@ test-db-sweep: db-up
 	@tools/test-db.sh sweep
 
 migrate-dev:
-	docker compose run --rm migrate
+	$(DEV_COMPOSE) run --rm migrate
 
 accept: db-up
 	dotnet build memsrv.sln
@@ -41,3 +43,7 @@ smoke-image:
 	else \
 		tools/smoke-release-image.sh "$(IMAGE)"; \
 	fi
+
+smoke-compose:
+	@test -n "$(IMAGE)" || { printf 'usage: make smoke-compose IMAGE=ghcr.io/faviann/overmind:<version>\n' >&2; exit 2; }
+	@tools/smoke-compose.sh "$(IMAGE)"

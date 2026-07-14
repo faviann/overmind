@@ -36,9 +36,18 @@ jobs:
       - run: dotnet build memsrv.sln
       - run: dotnet test tests/MemSrv.Tests --no-build
 
+  reference-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build reference deployment candidate
+        run: docker build -t ghcr.io/faviann/overmind:compose-ci .
+      - name: Verify reference Compose lifecycle
+        run: make smoke-compose IMAGE=ghcr.io/faviann/overmind:compose-ci
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, reference-compose]
     runs-on: ubuntu-latest
     permissions:
       contents: read

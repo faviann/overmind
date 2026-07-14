@@ -9,10 +9,19 @@ exactly one namespace. Isolation is enforced server-side from the caller's
 identity, never trusted from tool arguments. Path-style names give hierarchy
 (`homelab`, `repo/<owner>/<name>`) without schema support.
 
+**Unscoped capture namespace (`capture/unscoped`)** — the fallback namespace
+for a captured conversation whose repository or configured semantic route
+cannot be determined. It records an unknown destination; it does not imply
+that the conversation is personal context.
+
+**Capture route** — the operator-owned assignment of a captured source session
+to one namespace. It is fixed on first import and reused by all later catch-up.
+
 **Agent identity (`agent_id`)** — who is acting. Derived by the server from the
 connection (bearer key over HTTP, process config over stdio), never
 self-asserted in tool arguments. It identifies the provisioned actor, not the
-model or provider used for a particular event.
+model or provider used for a particular event. Codex and Claude Code are
+provisioned as separate actors even when the same person operates both.
 
 **Capture provenance** — origin information observed for an imported trace
 event: source harness and version, provider and model when exposed, source
@@ -33,7 +42,9 @@ identity and namespace): the MCP protocol session over HTTP, process
 configuration or a generated per-process id over stdio. Every event from one
 run — agent-logged and server-logged alike — shares one session. Preserving an
 external or historical session identity (imports) is an operator-path concern,
-not an agent-tool capability.
+not an agent-tool capability. A captured session is derived from its trusted
+capture source, external session identifier, and optional subagent identifier;
+the original source identifiers remain capture provenance.
 
 **Review session** — a synthetic session (`review:<proposal_uuid>`) carrying an
 approval/rejection event. Its actor is the reviewer (`human:<name>`), never the

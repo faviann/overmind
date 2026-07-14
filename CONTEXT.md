@@ -28,6 +28,104 @@ event: source harness and version, provider and model when exposed, source
 session and event identifiers, and capture-adapter version. It supplements
 agent identity; unavailable values remain unknown rather than being inferred.
 
+**Source observation** — one immutable hook invocation or persisted harness
+record accepted by capture. One observation may yield multiple captured events,
+but each captured event has exactly one primary source observation; correlated
+observations are linked rather than merged.
+
+**Capture source stream** — the append-only sequence of source observations
+for one trusted harness session or subagent. Native source identifiers locate
+observations when available; otherwise a verified transcript position does,
+and any changed prefix stops capture rather than creating a new stream history.
+
+**Captured event** — a trace event imported from one source observation into
+the canonical ledger. Each event has a deterministic part key within its source
+observation. Conversation and tool records drive replay, duplicate UI or
+lifecycle views are annotations, and unsupported records remain opaque,
+redacted-safe events.
+
+**Captured event envelope** — the self-contained retrieval view assembled from
+one captured event and its source observation. Storage remains normalized so
+capture provenance has one authoritative home; the wire response joins only
+immutable ledger provenance to the event's semantic payload and source-stated
+relationships. Resolved context, relationship targets, and display order are
+future read models, not part of the canonical envelope.
+
+**Event kind** — what a captured event represents, such as a message, tool
+call, tool result, compaction, lifecycle event, annotation, or opaque record.
+It is independent of the event's actor role.
+
+**Actor role** — the source-stated producer or authority of an event, such as
+user, assistant, system, developer, tool, harness, or operator. An unavailable
+role remains unknown; capture does not infer one from the event kind.
+
+**Source timestamp** — an optional raw and parsed timestamp stated for a source
+observation. It is not silently promoted to the occurrence time of every event
+derived from that observation.
+
+**Occurrence time** — an optional timestamp explicitly stated for one semantic
+event. When the source supplies no event-specific time, it remains unknown.
+
+**Capture time** — the required server timestamp at which Overmind accepted a
+source observation. It records ingestion, not when the represented activity
+occurred.
+
+**Source order** — the exact order established within one verified capture
+source stream, plus source-stated order among the semantic parts of one
+observation. Cross-stream order exists only where explicit relationship or
+timestamp evidence establishes it.
+
+**Display order** — a derived merge of captured events for replay or
+presentation. It may combine source order, relationships, and timestamps, but
+it is not stored as canonical historical fact.
+
+**Source relationship** — a typed relationship stated by a source observation.
+It retains a sanitized source-native target identity and may resolve to an
+Overmind trace or session at retrieval time; capture order does not determine
+whether the relationship can be stored.
+
+**Dangling relationship** — a source relationship whose stated target is not
+present in the captured ledger. It differs from a legitimate root, for which
+the source stated no parent. A dangling relationship is retained as evidence
+of incomplete capture rather than dropped or repaired by inference.
+
+**Canonical event header** — the small relational portion of a captured event
+containing stable, frequently queried invariants such as observation identity,
+part key, kind, actor, session, source order, and occurrence time. Speculative
+analytics dimensions do not become ledger columns merely because a future
+projection may use them.
+
+**Tagged event payload** — the versioned JSONB content whose contract is
+selected by event kind. It holds kind-specific semantics while the safe source
+payload preserves fields that have not earned canonical promotion; wide
+analytics shapes remain rebuildable projections over the ledger.
+
+**Context observation** — an immutable source-stated fact scoped to a session,
+turn, event, or other source boundary, such as active model, provider, cwd, or
+repository. Its scope and source evidence are stored rather than copied onto
+events that did not state it.
+
+**Resolved context** — a rebuildable retrieval projection that joins applicable
+context observations to a captured event. It always reports scope and evidence,
+never crosses a stream without an explicit relationship, and leaves ambiguous
+values unknown; enriching it does not mutate the ledger event.
+
+**Tool outcome** — the source-stated terminal state carried by a `tool_result`,
+such as succeeded, failed, denied, interrupted, or unknown. Explicit failures
+remain tool results rather than a separate event family; a call with no captured
+result remains incomplete and is never converted into a failure by inference.
+
+**Compaction operation** — a first-class harness operation that may have
+request and completion events carrying source-stated trigger, instructions,
+outcome, summary, and metrics. It reuses request/outcome vocabulary but is not
+a tool call: its completion establishes a conversational context boundary and
+never replaces or mutates the earlier trace history.
+
+**Exposed reasoning** — reasoning or thinking content that a harness actually
+persists and exposes. Capture preserves it as optional replay fidelity when it
+passes the safety boundary, but never infers or decrypts hidden reasoning and
+never makes durable decision provenance depend on its presence.
+
 **Bearer key** — a static credential identifying one agent identity over HTTP.
 Each key maps to: one `agent_id`, one default namespace, and a list of allowed
 namespaces. Keys are provisioning-owned (Ansible), not managed by the app.

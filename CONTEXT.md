@@ -38,6 +38,32 @@ for one trusted harness session or subagent. Native source identifiers locate
 observations when available; otherwise a verified transcript position does,
 and any changed prefix stops capture rather than creating a new stream history.
 
+**Content fidelity limit** — a deterministic property of source content that
+prevents complete safe persistence, such as an accepted size ceiling or an
+unsupported binary representation. Capture replaces the affected logical
+field with an explicit omission rather than retaining a misleading fragment,
+and may advance because retrying the same content under the same policy cannot
+improve the result.
+
+**Capture safety failure** — an operational failure of the pre-append safety
+boundary, such as missing or invalid scanner rules or an internal scanner
+error. No canonical observation is accepted and source progress does not
+advance until the failure is repaired.
+
+**Safe source payload** — source content after the universal deterministic
+pre-append gate. Recognized textual secrets are replaced even when supplied by
+the user; the payload never retains the matched value or a reversible
+fingerprint of it.
+
+**Incomplete source record** — a source record that may still be extended by
+its harness, such as an unterminated final JSONL line in an active transcript.
+It is deferred without advancing source progress.
+
+**Malformed source record** — a terminal source record that capture cannot
+interpret under its observed source variant. Capture preserves it as an opaque
+event when it can be scanned safely, otherwise records an explicit omission,
+then advances with a visible warning.
+
 **Captured event** — a trace event imported from one source observation into
 the canonical ledger. Each event has a deterministic part key within its source
 observation. Conversation and tool records drive replay, duplicate UI or
@@ -50,6 +76,11 @@ capture provenance has one authoritative home; the wire response joins only
 immutable ledger provenance to the event's semantic payload and source-stated
 relationships. Resolved context, relationship targets, and display order are
 future read models, not part of the canonical envelope.
+
+**Conversation reconstruction** — replay of the captured conversation, its
+source observations, and the provenance of any attachment. It does not promise
+byte-perfect retention of opaque binary attachments or reconstruction of
+provider-internal media preprocessing.
 
 **Event kind** — what a captured event represents, such as a message, tool
 call, tool result, compaction, lifecycle event, annotation, or opaque record.

@@ -17,6 +17,38 @@ that the conversation is personal context.
 **Capture route** — the operator-owned assignment of a captured source session
 to one namespace. It is fixed on first import and reused by all later catch-up.
 
+**Capture route policy** — the operator-owned rules that derive a capture route
+from repository and directory evidence, constrain the namespaces a capture
+source binding may reach, and fall back to `capture/unscoped`. A route override
+maps matching evidence to a semantic namespace; it is not a namespace alias.
+Automatic repository routing uses the normalized `origin` remote only; other
+remotes remain provenance unless an operator explicitly overrides the route.
+
+**Retrieval scope** — a versioned, operator-owned, read-only grouping of
+namespaces. It expands a grouped retrieval while authorization still applies to
+every member; it is never a capture route or write destination.
+
+**Capture import capability** — the operator-provisioned authority to append
+canonical capture observations and their derived events. It is distinct from
+an agent tool capability: imported payloads provide source evidence but cannot
+expand the identity, session, or routing authority granted to the importer.
+Live capture, catch-up, historical backfill, and recovery all use this same
+capability rather than a privileged database or safety-gate bypass.
+
+**Capture source binding** — the operator-provisioned association of one
+harness installation with its capture credential, harness kind, agent identity,
+and routing authority. Different harnesses and installations have distinct
+bindings so their provenance, revocation, and session identities cannot collide.
+Its stable identity survives credential rotation, upgrades, and explicit
+single-installation recovery; a human-readable device/harness name is metadata.
+
+**Capture credential** — a credential granting one capture source binding
+access only to the capture import capability. It grants neither ordinary agent
+tools nor human operator actions, and those other credential classes cannot use
+it to import captured history. It may receive its own import receipts and, only
+if required, its own operational stream status; it never grants captured-content
+reads.
+
 **Agent identity (`agent_id`)** — who is acting. Derived by the server from the
 connection (bearer key over HTTP, process config over stdio), never
 self-asserted in tool arguments. It identifies the provisioned actor, not the
@@ -24,19 +56,39 @@ model or provider used for a particular event. Codex and Claude Code are
 provisioned as separate actors even when the same person operates both.
 
 **Capture provenance** — origin information observed for an imported trace
-event: source harness and version, provider and model when exposed, source
-session and event identifiers, and capture-adapter version. It supplements
-agent identity; unavailable values remain unknown rather than being inferred.
+event: the authenticated capture source binding, source harness and version,
+provider and model when exposed, source session and event identifiers, and
+capture-adapter version. It supplements agent identity; unavailable values
+remain unknown rather than being inferred.
 
 **Source observation** — one immutable hook invocation or persisted harness
 record accepted by capture. One observation may yield multiple captured events,
 but each captured event has exactly one primary source observation; correlated
 observations are linked rather than merged.
 
+**Source record** — one harness-emitted unit before Overmind accepts it, such
+as a persisted JSONL entry or one hook invocation. It is source material for an
+observation, not itself part of the canonical ledger.
+
+**Source locator** — the source-native identifier or verified position that
+identifies one source record within a capture source stream. Its harness-specific
+mechanics may vary, but network request and batch identities never substitute
+for it.
+
 **Capture source stream** — the append-only sequence of source observations
 for one trusted harness session or subagent. Native source identifiers locate
 observations when available; otherwise a verified transcript position does,
 and any changed prefix stops capture rather than creating a new stream history.
+
+**Capture checkpoint** — the server-owned position through the contiguous
+accepted prefix of one capture source stream. It advances atomically with an
+observation and its derived ledger rows, and never advances across a failure or
+unaccepted gap.
+
+**Import receipt** — the server's per-source-record outcome within a delivery
+batch, distinguishing newly accepted, already accepted, failed, and blocked by
+an earlier stream gap. It reports the effective namespace and route basis;
+delivery-batch boundaries do not affect ledger identity.
 
 **Content fidelity limit** — a deterministic property of source content that
 prevents complete safe persistence, such as an accepted size ceiling or an

@@ -43,7 +43,7 @@ preflight_external() {
     exit 2
   }
 
-  local facts version superuser
+  local facts version superuser role_facts
   if ! facts=$(maintenance_psql -XAtv ON_ERROR_STOP=1 -F '|' -c \
     "SELECT current_setting('server_version_num'), rolsuper FROM pg_roles WHERE rolname = current_user"); then
     printf 'cannot connect to the external PostgreSQL test instance; check MEMSRV_TEST_ADMIN_CONNECTION_STRING.\n' >&2
@@ -60,20 +60,38 @@ preflight_external() {
     exit 1
   fi
 
-  maintenance_psql -Xqv ON_ERROR_STOP=1 >/dev/null <<'SQL'
-BEGIN;
-SELECT pg_advisory_xact_lock(757002524895691804);
-DO $overmind$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'memsrv') THEN
-    CREATE ROLE memsrv LOGIN PASSWORD 'memsrv_dev';
-  ELSE
-    ALTER ROLE memsrv LOGIN PASSWORD 'memsrv_dev';
-  END IF;
-END
-$overmind$;
-COMMIT;
+  if ! role_facts=$(maintenance_psql -XAtqv ON_ERROR_STOP=1 <<'SQL' | sed -n 's/^role=//p'
+SELECT pg_advisory_lock(757002524895691804);
+SELECT 'role=' || concat_ws('|',
+  r.rolcanlogin,
+  r.rolsuper,
+  r.rolcreatedb,
+  r.rolcreaterole,
+  r.rolreplication,
+  r.rolbypassrls,
+  r.rolinherit,
+  r.rolconnlimit = -1,
+  r.rolvaliduntil IS NULL,
+  r.rolconfig IS NULL,
+  r.rolpassword IS NOT NULL,
+  NOT EXISTS (SELECT FROM pg_auth_members m WHERE m.member = r.oid))
+FROM pg_roles r
+WHERE r.rolname = 'memsrv';
+SELECT pg_advisory_unlock(757002524895691804);
 SQL
+  ); then
+    printf 'could not inspect the external PostgreSQL memsrv role.\n' >&2
+    exit 1
+  fi
+  if [[ -z $role_facts ]]; then
+    printf 'external test database is missing the required memsrv role; provision it as a restricted LOGIN role before running tests.\n' >&2
+    exit 1
+  fi
+  if [[ $role_facts != 't|f|f|f|f|f|t|t|t|t|t|t' ]]; then
+    printf '%s\n' \
+      'external memsrv role has incompatible attributes; require LOGIN, INHERIT, a password, no elevated role flags or memberships, and default connection/configuration limits.' >&2
+    exit 1
+  fi
 }
 
 provision_environment() {

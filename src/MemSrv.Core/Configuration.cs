@@ -51,7 +51,7 @@ public static class Configuration
 
     // Npgsql only parses keyword connection strings; infra tooling speaks
     // postgres:// URLs. Accept both.
-    private static string NormalizeConnectionString(string value)
+    internal static string NormalizeConnectionString(string value)
     {
         if (!value.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) &&
             !value.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))

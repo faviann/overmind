@@ -52,6 +52,28 @@ jobs:
           grep -F 'must be a PostgreSQL superuser' preflight.err
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
             -c "DROP ROLE preflight_limited"
+      - name: Verify a missing externally provisioned role fails during preflight
+        run: |
+          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=postgres://overmind:overmind_dev@127.0.0.1:55432/postgres \
+              tools/test-db.sh preflight 2>preflight.err; then
+            exit 1
+          fi
+          grep -F 'is missing the required memsrv role' preflight.err
+      - name: Provision external database role
+        run: |
+          PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
+            -c "CREATE ROLE memsrv LOGIN PASSWORD 'memsrv_dev'"
+      - name: Verify an incompatible externally provisioned role fails during preflight
+        run: |
+          PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
+            -c "ALTER ROLE memsrv CREATEDB"
+          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=postgres://overmind:overmind_dev@127.0.0.1:55432/postgres \
+              tools/test-db.sh preflight 2>preflight.err; then
+            exit 1
+          fi
+          grep -F 'memsrv role has incompatible attributes' preflight.err
+          PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
+            -c "ALTER ROLE memsrv NOCREATEDB"
       - name: Run canonical suite against externally provisioned PostgreSQL
         env:
           DOCKER_HOST: unix:///does-not-exist

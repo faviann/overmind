@@ -61,10 +61,13 @@ searches and reads, not direct table assertions.
   database (normally `postgres`). The URL is supplied per invocation and must
   authenticate as a PostgreSQL superuser; the suite creates/drops databases and
   roles and temporarily changes `memsrv` while verifying the role contract.
-  The `psql` client must be on `PATH`. Preflight checks URL shape, connectivity,
-  PostgreSQL major 18, authority, and the canonical `memsrv` LOGIN role before
-  build or test discovery begins. Use a dedicated disposable test cluster,
-  never production:
+  The surrounding environment must provision the canonical `memsrv` role;
+  preflight never creates or alters it. The `psql` client must be on `PATH`.
+  Preflight checks URL shape, connectivity, PostgreSQL major 18, authority, and
+  that `memsrv` is a restricted LOGIN/INHERIT role with a password, no elevated
+  flags or inherited memberships, and default connection/configuration limits.
+  A missing or incompatible role fails before build or test discovery. Use a
+  dedicated disposable test cluster, never production:
 
   ```sh
   MEMSRV_TEST_ADMIN_CONNECTION_STRING='postgres://test_admin:<password>@db:5432/postgres' \

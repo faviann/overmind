@@ -46,7 +46,7 @@ public static class TestDatabase
     }
 
     public static string ResolveMaintenanceConnection(string? externalConnection) =>
-        NormalizeConnectionString(string.IsNullOrWhiteSpace(externalConnection)
+        Configuration.NormalizeConnectionString(string.IsNullOrWhiteSpace(externalConnection)
             ? ComposeMaintenanceConnection
             : externalConnection);
 
@@ -55,7 +55,7 @@ public static class TestDatabase
 
     public static string BuildAdminConnection(string databaseName, string maintenanceConnection)
     {
-        var builder = new NpgsqlConnectionStringBuilder(NormalizeConnectionString(maintenanceConnection))
+        var builder = new NpgsqlConnectionStringBuilder(Configuration.NormalizeConnectionString(maintenanceConnection))
         {
             Database = databaseName
         };
@@ -164,45 +164,6 @@ public static class TestDatabase
             Username = username,
             Password = RuntimePassword
         };
-        return builder.ConnectionString;
-    }
-
-    private static string NormalizeConnectionString(string value)
-    {
-        if (!value.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) &&
-            !value.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
-        {
-            return value;
-        }
-
-        var uri = new Uri(value);
-        var builder = new NpgsqlConnectionStringBuilder
-        {
-            Host = uri.Host,
-            Port = uri.Port > 0 ? uri.Port : 5432
-        };
-        var database = uri.AbsolutePath.TrimStart('/');
-        if (database.Length > 0)
-        {
-            builder.Database = Uri.UnescapeDataString(database);
-        }
-
-        var userInfo = uri.UserInfo.Split(':', 2);
-        if (userInfo[0].Length > 0)
-        {
-            builder.Username = Uri.UnescapeDataString(userInfo[0]);
-        }
-        if (userInfo.Length > 1)
-        {
-            builder.Password = Uri.UnescapeDataString(userInfo[1]);
-        }
-
-        foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var keyValue = pair.Split('=', 2);
-            builder[Uri.UnescapeDataString(keyValue[0])] =
-                Uri.UnescapeDataString(keyValue.Length > 1 ? keyValue[1] : "");
-        }
         return builder.ConnectionString;
     }
 

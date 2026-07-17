@@ -23,6 +23,19 @@ jobs:
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
+      postgres17:
+        image: postgres:17
+        env:
+          POSTGRES_USER: overmind
+          POSTGRES_PASSWORD: overmind_dev
+          POSTGRES_DB: postgres
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U overmind -d postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v5
@@ -46,12 +59,9 @@ jobs:
             postgres://overmind:overmind_dev@127.0.0.1:1/postgres \
             'cannot connect to the external PostgreSQL test instance'
 
-          psql() {
-            printf '170000|t\n'
-          }
-          export -f psql
-          expect_preflight_failure "$admin_url" 'external test database must be PostgreSQL 18'
-          unset -f psql
+          expect_preflight_failure \
+            postgres://overmind:overmind_dev@127.0.0.1:55433/postgres \
+            'external test database must be PostgreSQL 18'
 
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
             -c "CREATE ROLE preflight_limited LOGIN PASSWORD 'preflight_dev'"

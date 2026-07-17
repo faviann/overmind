@@ -602,7 +602,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         await using var admin = new NpgsqlConnection(TestDatabase.MaintenanceConnection);
         await admin.OpenAsync();
         await admin.ExecuteAsync(
-            $"CREATE ROLE {QuoteIdentifier(username)} LOGIN SUPERUSER PASSWORD 'p;ass@word:with=reserved'");
+            $"CREATE ROLE {QuoteIdentifier(username)} LOGIN SUPERUSER PASSWORD {QuoteLiteral(password)}");
 
         try
         {
@@ -985,6 +985,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
+    private static string QuoteLiteral(string value) => $"'{value.Replace("'", "''")}'";
 
     private static bool IsJsonRpcLine(string? line)
     {

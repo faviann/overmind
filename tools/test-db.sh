@@ -8,6 +8,7 @@ readonly root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 readonly compose=(docker compose --file "$root/compose.dev.yaml")
 readonly memctl_apphost=${MEMCTL_APPHOST:-src/MemCtl/bin/Debug/net10.0/MemCtl}
 readonly external_admin_connection=${MEMSRV_TEST_ADMIN_CONNECTION_STRING:-}
+readonly memsrv_role_lock_id=757002524895691804
 
 maintenance_psql() {
   if [[ -n $external_admin_connection ]]; then
@@ -60,8 +61,9 @@ preflight_external() {
     exit 1
   fi
 
-  if ! role_facts=$(maintenance_psql -XAtqv ON_ERROR_STOP=1 <<'SQL' | sed -n 's/^role=//p'
-SELECT pg_advisory_lock(757002524895691804);
+  if ! role_facts=$(maintenance_psql -XAtqv ON_ERROR_STOP=1 \
+    -v memsrv_role_lock_id="$memsrv_role_lock_id" <<'SQL' | sed -n 's/^role=//p'
+SELECT pg_advisory_lock(:memsrv_role_lock_id);
 SELECT 'role=' || concat_ws('|',
   r.rolcanlogin,
   r.rolsuper,
@@ -77,7 +79,7 @@ SELECT 'role=' || concat_ws('|',
   NOT EXISTS (SELECT FROM pg_auth_members m WHERE m.member = r.oid))
 FROM pg_roles r
 WHERE r.rolname = 'memsrv';
-SELECT pg_advisory_unlock(757002524895691804);
+SELECT pg_advisory_unlock(:memsrv_role_lock_id);
 SQL
   ); then
     printf 'could not inspect the external PostgreSQL memsrv role.\n' >&2

@@ -28,50 +28,38 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-      - name: Verify invalid external configuration fails during preflight
+      - name: Verify external preflight failures and provision role
         run: |
-          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=invalid tools/test-db.sh preflight 2>preflight.err; then
-            exit 1
-          fi
-          grep -F 'must be a PostgreSQL connection URL' preflight.err
-      - name: Verify unreachable external configuration fails during preflight
-        run: |
-          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=postgres://overmind:overmind_dev@127.0.0.1:1/postgres \
-              tools/test-db.sh preflight 2>preflight.err; then
-            exit 1
-          fi
-          grep -F 'cannot connect to the external PostgreSQL test instance' preflight.err
-      - name: Verify insufficient external authority fails during preflight
-        run: |
+          expect_preflight_failure() {
+            local connection=$1 expected=$2
+            if MEMSRV_TEST_ADMIN_CONNECTION_STRING="$connection" \
+                tools/test-db.sh preflight 2>preflight.err; then
+              printf 'expected external database preflight to fail: %s\n' "$expected" >&2
+              exit 1
+            fi
+            grep -F "$expected" preflight.err
+          }
+
+          readonly admin_url=postgres://overmind:overmind_dev@127.0.0.1:55432/postgres
+          expect_preflight_failure invalid 'must be a PostgreSQL connection URL'
+          expect_preflight_failure \
+            postgres://overmind:overmind_dev@127.0.0.1:1/postgres \
+            'cannot connect to the external PostgreSQL test instance'
+
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
             -c "CREATE ROLE preflight_limited LOGIN PASSWORD 'preflight_dev'"
-          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=postgres://preflight_limited:preflight_dev@127.0.0.1:55432/postgres \
-              tools/test-db.sh preflight 2>preflight.err; then
-            exit 1
-          fi
-          grep -F 'must be a PostgreSQL superuser' preflight.err
+          expect_preflight_failure \
+            postgres://preflight_limited:preflight_dev@127.0.0.1:55432/postgres \
+            'must be a PostgreSQL superuser'
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
             -c "DROP ROLE preflight_limited"
-      - name: Verify a missing externally provisioned role fails during preflight
-        run: |
-          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=postgres://overmind:overmind_dev@127.0.0.1:55432/postgres \
-              tools/test-db.sh preflight 2>preflight.err; then
-            exit 1
-          fi
-          grep -F 'is missing the required memsrv role' preflight.err
-      - name: Provision external database role
-        run: |
+
+          expect_preflight_failure "$admin_url" 'is missing the required memsrv role'
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
             -c "CREATE ROLE memsrv LOGIN PASSWORD 'memsrv_dev'"
-      - name: Verify an incompatible externally provisioned role fails during preflight
-        run: |
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
             -c "ALTER ROLE memsrv CREATEDB"
-          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=postgres://overmind:overmind_dev@127.0.0.1:55432/postgres \
-              tools/test-db.sh preflight 2>preflight.err; then
-            exit 1
-          fi
-          grep -F 'memsrv role has incompatible attributes' preflight.err
+          expect_preflight_failure "$admin_url" 'memsrv role has incompatible attributes'
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
             -c "ALTER ROLE memsrv NOCREATEDB"
       - name: Run canonical suite against externally provisioned PostgreSQL

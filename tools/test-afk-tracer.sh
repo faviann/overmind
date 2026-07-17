@@ -53,6 +53,7 @@ cat >"$adapters/codex" <<'EOF'
 set -euo pipefail
 if [[ "${1:-} ${2:-}" == "login status" ]]; then
   printf 'codex-auth\n' >>"$AFK_TEST_EVENTS"
+  [[ "${AFK_TEST_FAIL_CODEX_AUTH:-0}" != 1 ]]
   exit 0
 fi
 
@@ -95,8 +96,8 @@ if [[ "${1:-} ${2:-}" == "pr create" ]]; then
   exit 0
 fi
 case "$*" in
-  "auth status") ;;
-  "label list --limit 100 --json name --jq .[].name")
+  "auth status") [[ "${AFK_TEST_FAIL_GH_AUTH:-0}" != 1 ]] ;;
+  "label list --limit 1000 --json name --jq .[].name")
     printf '%s\n' ready-for-agent Sandcastle
     if [[ "${AFK_TEST_INCLUDE_REVIEW_LABEL:-0}" == 1 ]]; then
       printf '%s\n' afk-review
@@ -127,11 +128,43 @@ run_command() {
       AFK_TEST_PR_BODY="$pr_body" \
       AFK_TEST_REAL_GIT="$real_git" \
       AFK_TEST_FAIL_FETCH="${2:-0}" \
+      AFK_TEST_FAIL_GH_AUTH="${3:-0}" \
+      AFK_TEST_FAIL_CODEX_AUTH="${4:-0}" \
       AFK_TEST_INCLUDE_REVIEW_LABEL="${1:-0}" \
       "$command_under_test"
   )
 }
 
+preflight_cases=(
+  'github-auth|GitHub authentication is unavailable|1|0|'
+  'codex-auth|Codex authentication is unavailable|0|1|'
+  "missing-skill|required shared skill is unavailable: $skills/tdd/SKILL.md|0|0|tdd"
+)
+for preflight_case in "${preflight_cases[@]}"; do
+  IFS='|' read -r case_name diagnostic fail_gh fail_codex missing_skill \
+    <<<"$preflight_case"
+  : >"$events"
+  : >"$state"
+  if [[ -n "$missing_skill" ]]; then
+    rm "$skills/$missing_skill/SKILL.md"
+  fi
+  if run_command 1 0 "$fail_gh" "$fail_codex" \
+    >"$fixture/$case_name.out" 2>&1; then
+    echo "expected $case_name preflight to fail" >&2
+    exit 1
+  fi
+  grep -Fq "$diagnostic" "$fixture/$case_name.out"
+  if grep -Eq '^(selector |gh issue edit|gh label (create|edit)|codex-agent )' "$events"; then
+    echo "policy repair or issue work began after $case_name failure" >&2
+    exit 1
+  fi
+  if [[ -n "$missing_skill" ]]; then
+    touch "$skills/$missing_skill/SKILL.md"
+  fi
+done
+
+: >"$events"
+: >"$state"
 if run_command 0 >"$fixture/missing-label.out" 2>&1; then
   echo "expected missing afk-review preflight to fail" >&2
   exit 1

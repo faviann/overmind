@@ -29,7 +29,7 @@ done
 selector="$skills_root/work-on/scripts/select-issue-codex.sh"
 [[ -x "$selector" ]] || fail "shared AFK selector is unavailable or not executable: $selector"
 
-labels="$(gh label list --limit 100 --json name --jq '.[].name')" || \
+labels="$(gh label list --limit 1000 --json name --jq '.[].name')" || \
   fail "could not read GitHub labels"
 for label in ready-for-agent Sandcastle afk-review; do
   grep -Fxq "$label" <<<"$labels" || fail "missing required GitHub label: $label"

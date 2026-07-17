@@ -46,6 +46,13 @@ jobs:
             postgres://overmind:overmind_dev@127.0.0.1:1/postgres \
             'cannot connect to the external PostgreSQL test instance'
 
+          psql() {
+            printf '170000|t\n'
+          }
+          export -f psql
+          expect_preflight_failure "$admin_url" 'external test database must be PostgreSQL 18'
+          unset -f psql
+
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
             -c "CREATE ROLE preflight_limited LOGIN PASSWORD 'preflight_dev'"
           expect_preflight_failure \

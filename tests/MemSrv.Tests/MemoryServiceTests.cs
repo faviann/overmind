@@ -595,6 +595,42 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MemctlMigrateAcceptsUrlEncodedReservedAdminCredentials()
+    {
+        var username = $"test;admin-{Guid.NewGuid():N}";
+        const string password = "p;ass@word:with=reserved";
+        await using var admin = new NpgsqlConnection(TestDatabase.MaintenanceConnection);
+        await admin.OpenAsync();
+        await admin.ExecuteAsync(
+            $"CREATE ROLE {QuoteIdentifier(username)} LOGIN SUPERUSER PASSWORD 'p;ass@word:with=reserved'");
+
+        try
+        {
+            var baseUri = new Uri(TestDatabase.AdminUrl);
+            var host = baseUri.Host.Contains(':', StringComparison.Ordinal)
+                ? $"[{baseUri.Host}]"
+                : baseUri.Host;
+            var encodedAdminUrl = $"{baseUri.Scheme}://{Uri.EscapeDataString(username)}:" +
+                $"{Uri.EscapeDataString(password)}@{host}:{baseUri.Port}{baseUri.AbsolutePath}{baseUri.Query}";
+            var env = new Dictionary<string, string>
+            {
+                ["MEMSRV_ADMIN_CONNECTION_STRING"] = encodedAdminUrl
+            };
+
+            var result = await RunMemCtlForResultAsync(env, "migrate");
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"memctl migrate failed with exit {result.ExitCode}. stdout={result.Stdout} stderr={result.Stderr}");
+            Assert.Contains("migrations applied", result.Stdout);
+        }
+        finally
+        {
+            await admin.ExecuteAsync($"DROP ROLE {QuoteIdentifier(username)}");
+        }
+    }
+
+    [Fact]
     public async Task MemCtlRetireApprovedSharedMemoryRecordsProvenanceAndLeavesItAuditable()
     {
         var service = Service();
@@ -947,6 +983,8 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         Assert.True(envelope.TryGetProperty("next", out var next), "Tool response did not include next.");
         Assert.False(string.IsNullOrWhiteSpace(next.GetString()));
     }
+
+    private static string QuoteIdentifier(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
 
     private static bool IsJsonRpcLine(string? line)
     {

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using Npgsql;
 
 namespace MemSrv.Core;
 
@@ -60,35 +61,36 @@ public static class Configuration
         }
 
         var uri = new Uri(value);
-        var parts = new List<string>
+        var builder = new NpgsqlConnectionStringBuilder
         {
-            $"Host={uri.Host}",
-            $"Port={(uri.Port > 0 ? uri.Port : 5432)}"
+            Host = uri.Host,
+            Port = uri.Port > 0 ? uri.Port : 5432
         };
 
         var database = uri.AbsolutePath.TrimStart('/');
         if (database.Length > 0)
         {
-            parts.Add($"Database={Uri.UnescapeDataString(database)}");
+            builder.Database = Uri.UnescapeDataString(database);
         }
 
         var userInfo = uri.UserInfo.Split(':', 2);
         if (userInfo[0].Length > 0)
         {
-            parts.Add($"Username={Uri.UnescapeDataString(userInfo[0])}");
+            builder.Username = Uri.UnescapeDataString(userInfo[0]);
         }
 
         if (userInfo.Length > 1)
         {
-            parts.Add($"Password={Uri.UnescapeDataString(userInfo[1])}");
+            builder.Password = Uri.UnescapeDataString(userInfo[1]);
         }
 
         foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
         {
             var keyValue = pair.Split('=', 2);
-            parts.Add($"{Uri.UnescapeDataString(keyValue[0])}={Uri.UnescapeDataString(keyValue.Length > 1 ? keyValue[1] : "")}");
+            builder[Uri.UnescapeDataString(keyValue[0])] =
+                Uri.UnescapeDataString(keyValue.Length > 1 ? keyValue[1] : "");
         }
 
-        return string.Join(";", parts);
+        return builder.ConnectionString;
     }
 }

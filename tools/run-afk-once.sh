@@ -6,12 +6,13 @@ fail() {
   exit 1
 }
 
-for command in git gh codex npm flock; do
+for command in git gh codex flock; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "run this command from a Git repository"
 cd "$repo_root"
+workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 git_dir="$(git rev-parse --git-common-dir)"
 exec 9>"$git_dir/afk-tracer.lock"
@@ -42,9 +43,12 @@ default_branch="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.na
 [[ -n "$default_branch" ]] || fail "GitHub returned no default branch"
 git ls-remote --exit-code origin "refs/heads/$default_branch" >/dev/null 2>&1 || \
   fail "cannot access origin's default branch: $default_branch"
+git fetch --quiet origin "refs/heads/$default_branch:refs/remotes/origin/$default_branch" || \
+  fail "could not synchronize origin/$default_branch; no issue was claimed"
 
-[[ -x node_modules/.bin/tsx && -f node_modules/@ai-hero/sandcastle/package.json ]] || \
-  fail "checked-in AFK dependencies are not installed; run 'npm ci' before launch"
+[[ -x "$workflow_root/node_modules/.bin/tsx" && \
+  -f "$workflow_root/node_modules/@ai-hero/sandcastle/package.json" ]] || \
+  fail "checked-in AFK dependencies are not installed; run 'npm ci' in $workflow_root before launch"
 
 selection="$($selector afk)" || fail "intelligent AFK selection failed"
 mapfile -t selected_urls < <(sed -nE 's|^Selected issue: (https://github.com/[^/]+/[^/]+/issues/[0-9]+)$|\1|p' <<<"$selection")
@@ -60,10 +64,8 @@ branch="afk/issue-$issue_number"
 gh issue edit "$issue_number" --remove-label Sandcastle >/dev/null || \
   fail "could not claim issue #$issue_number by removing Sandcastle"
 
-git fetch --quiet origin "refs/heads/$default_branch:refs/remotes/origin/$default_branch" || \
-  fail "could not update origin/$default_branch after claiming issue #$issue_number"
-
-npm run --silent afk:sandcastle -- "$issue_number" "$branch" "$default_branch"
+"$workflow_root/node_modules/.bin/tsx" "$workflow_root/.sandcastle/main.mts" \
+  "$issue_number" "$branch" "$default_branch"
 
 mapfile -t pull_requests < <(
   gh pr list --head "$branch" --state open --json number --jq '.[].number'

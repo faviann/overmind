@@ -1,0 +1,17 @@
+{
+  "name": "overmind-developer-workflow",
+  "private": true,
+  "scripts": {
+    "afk": "tools/run-afk-once.sh",
+    "afk:sandcastle": "tsx .sandcastle/main.mts",
+    "test:afk": "tools/test-afk-tracer.sh",
+    "typecheck:afk": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
+    "@standard-schema/spec": "1.1.0",
+    "@types/node": "25.5.0",
+    "tsx": "4.21.0",
+    "typescript": "6.0.3"
+  }
+}

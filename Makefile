@@ -6,8 +6,7 @@ sdk-reference:
 	@tools/provision-sdk-reference.sh
 
 db-up:
-	$(DEV_COMPOSE) up -d --wait postgres
-	@tools/test-db.sh sweep
+	@tools/test-db.sh provision
 
 test: db-up
 	dotnet build memsrv.sln

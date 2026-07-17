@@ -50,6 +50,31 @@ behaviors, but their seam is keyed MCP agents. Verify them through public
 searches and reads, not direct table assertions.
 
 ## Database lifecycle
+- `make test` supports two provisioning environments. With
+  `MEMSRV_TEST_ADMIN_CONNECTION_STRING` unset, `make db-up` provisions the
+  existing PostgreSQL 18 service through `compose.dev.yaml`; this remains the
+  default local workflow. When that variable is set, `make db-up` treats it as
+  an explicit external-mode selection, invokes no Docker/Compose command, and
+  uses the already-running PostgreSQL instance instead. There is no fallback
+  between modes.
+- External mode accepts a PostgreSQL connection URL to an existing maintenance
+  database (normally `postgres`). The URL is supplied per invocation and must
+  authenticate as a PostgreSQL superuser; the suite creates/drops databases and
+  roles and temporarily changes `memsrv` while verifying the role contract.
+  The `psql` client must be on `PATH`. Preflight checks URL shape, connectivity,
+  PostgreSQL major 18, authority, and the canonical `memsrv` LOGIN role before
+  build or test discovery begins. Use a dedicated disposable test cluster,
+  never production:
+
+  ```sh
+  MEMSRV_TEST_ADMIN_CONNECTION_STRING='postgres://test_admin:<password>@db:5432/postgres' \
+    make test
+  ```
+
+  Do not put this value in a tracked file. PostgreSQL URL-encode reserved
+  characters in the username/password. The same variable works with
+  `make test-one T=...`, `make test-db-template`, `make test-db-reset`, and
+  `make test-db-sweep`.
 - The xUnit host owns one lazily created database per suite run. With no caller
   configuration, it generates `memory_test_<runid>`; `MEMSRV_TEST_DATABASE`
   pins the name for an IDE or harness that needs a predictable database. The
@@ -70,6 +95,12 @@ searches and reads, not direct table assertions.
   `tools/test-db.sh` owns Make/operator lifecycle. This keeps both entry points
   independently usable. Any change to that contract must update both
   implementations and validate their compatibility.
+- Bare `dotnet test` retains its existing contract: without external
+  configuration it expects the Compose development PostgreSQL instance to
+  already be running (normally via `make db-up`). Supplying
+  `MEMSRV_TEST_ADMIN_CONNECTION_STRING` makes its C# lifecycle use that external
+  cluster, but does not run the Make preflight; canonical external execution is
+  `make test`.
 - `make test-db-reset` recreates `${MEMSRV_TEST_DATABASE:-memory_test}` from the
   current template. `make test-db-sweep` removes databases leaked for more than
   six hours by crashed runs, but never the template or a database with an active

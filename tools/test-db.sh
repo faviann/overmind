@@ -7,9 +7,82 @@ readonly command=${1:-}
 readonly root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 readonly compose=(docker compose --file "$root/compose.dev.yaml")
 readonly memctl_apphost=${MEMCTL_APPHOST:-src/MemCtl/bin/Debug/net10.0/MemCtl}
+readonly external_admin_connection=${MEMSRV_TEST_ADMIN_CONNECTION_STRING:-}
 
 maintenance_psql() {
-  "${compose[@]}" exec -T postgres psql -U overmind -d postgres "$@"
+  if [[ -n $external_admin_connection ]]; then
+    psql --dbname="$external_admin_connection" "$@"
+  else
+    "${compose[@]}" exec -T postgres psql -U overmind -d postgres "$@"
+  fi
+}
+
+database_connection() {
+  local database=$1 base query=''
+  if [[ -z $external_admin_connection ]]; then
+    printf 'postgres://overmind:overmind_dev@127.0.0.1:55432/%s' "$database"
+    return
+  fi
+
+  base=$external_admin_connection
+  if [[ $base == *\?* ]]; then
+    query="?${base#*\?}"
+    base=${base%%\?*}
+  fi
+  printf '%s/%s%s' "${base%/*}" "$database" "$query"
+}
+
+preflight_external() {
+  [[ $external_admin_connection =~ ^postgres(ql)?://[^/]+/.+ ]] || {
+    printf '%s must be a PostgreSQL connection URL naming an existing maintenance database (normally postgres).\n' \
+      'MEMSRV_TEST_ADMIN_CONNECTION_STRING' >&2
+    exit 2
+  }
+  command -v psql >/dev/null || {
+    printf 'external test database mode requires the PostgreSQL psql client on PATH.\n' >&2
+    exit 2
+  }
+
+  local facts version superuser
+  if ! facts=$(maintenance_psql -XAtv ON_ERROR_STOP=1 -F '|' -c \
+    "SELECT current_setting('server_version_num'), rolsuper FROM pg_roles WHERE rolname = current_user"); then
+    printf 'cannot connect to the external PostgreSQL test instance; check MEMSRV_TEST_ADMIN_CONNECTION_STRING.\n' >&2
+    exit 1
+  fi
+  IFS='|' read -r version superuser <<<"$facts"
+  if [[ ! $version =~ ^18[0-9]{4}$ ]]; then
+    printf 'external test database must be PostgreSQL 18; server reported version_num=%s.\n' \
+      "${version:-unknown}" >&2
+    exit 1
+  fi
+  if [[ $superuser != t ]]; then
+    printf 'external test database authority must be a PostgreSQL superuser (database/role lifecycle and grant checks require it).\n' >&2
+    exit 1
+  fi
+
+  maintenance_psql -Xqv ON_ERROR_STOP=1 >/dev/null <<'SQL'
+BEGIN;
+SELECT pg_advisory_xact_lock(757002524895691804);
+DO $overmind$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'memsrv') THEN
+    CREATE ROLE memsrv LOGIN PASSWORD 'memsrv_dev';
+  ELSE
+    ALTER ROLE memsrv LOGIN PASSWORD 'memsrv_dev';
+  END IF;
+END
+$overmind$;
+COMMIT;
+SQL
+}
+
+provision_environment() {
+  if [[ -n $external_admin_connection ]]; then
+    preflight_external
+  else
+    "${compose[@]}" up -d --wait postgres
+  fi
+  sweep_databases
 }
 
 quote_identifier() {
@@ -48,7 +121,7 @@ ensure_template() {
     printf 'MemCtl apphost not found at %s; run dotnet build memsrv.sln first.\n' "$memctl_apphost" >&2
     exit 1
   }
-  MEMSRV_ADMIN_CONNECTION_STRING="postgres://overmind:overmind_dev@127.0.0.1:55432/$template" \
+  MEMSRV_ADMIN_CONNECTION_STRING="$(database_connection "$template")" \
     "$memctl_apphost" migrate
   maintenance_psql -Xv ON_ERROR_STOP=1 \
     -c "COMMENT ON DATABASE $template IS '$fingerprint'"
@@ -90,8 +163,10 @@ sweep_databases() {
 }
 
 case "$command" in
+  provision) provision_environment ;;
+  preflight) [[ -n $external_admin_connection ]] || exit 0; preflight_external ;;
   template) with_template_lock ;;
   reset) reset_database "${2:-${MEMSRV_TEST_DATABASE:-memory_test}}" ;;
   sweep) sweep_databases ;;
-  *) printf 'usage: %s {template|reset [database]|sweep}\n' "$0" >&2; exit 2 ;;
+  *) printf 'usage: %s {provision|preflight|template|reset [database]|sweep}\n' "$0" >&2; exit 2 ;;
 esac

@@ -64,9 +64,14 @@ verbatim. In particular, Ansible remains the provisioning owner for the
 homelab deployment.
 
 The separately selected `compose.dev.yaml` owns disposable local development
-provisioning. Repository Make targets and developer scripts select it
-explicitly; the default Compose deployment is never used for `memory_dev` or
-the test database lifecycle.
+provisioning and remains the default selected by repository Make targets and
+developer scripts. Test targets may instead be explicitly configured with
+`MEMSRV_TEST_ADMIN_CONNECTION_STRING` to use an already-running PostgreSQL 18
+test instance; in that mode the surrounding environment owns PostgreSQL
+provisioning and the repository invokes no Docker/Compose command. The default
+production-oriented Compose deployment is never used for `memory_dev` or the
+test database lifecycle. See `docs/testing.md` for the external test-instance
+authority and lifecycle contract.
 
 ## Direct migration contract — FINAL
 

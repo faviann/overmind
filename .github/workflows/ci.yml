@@ -28,13 +28,45 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-      - name: Provision role and database (mirrors docker/postgres-init)
+      - name: Verify invalid external configuration fails during preflight
+        run: |
+          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=invalid tools/test-db.sh preflight 2>preflight.err; then
+            exit 1
+          fi
+          grep -F 'must be a PostgreSQL connection URL' preflight.err
+      - name: Verify unreachable external configuration fails during preflight
+        run: |
+          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=postgres://overmind:overmind_dev@127.0.0.1:1/postgres \
+              tools/test-db.sh preflight 2>preflight.err; then
+            exit 1
+          fi
+          grep -F 'cannot connect to the external PostgreSQL test instance' preflight.err
+      - name: Verify insufficient external authority fails during preflight
         run: |
           PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
-            -c "CREATE ROLE memsrv LOGIN PASSWORD 'memsrv_dev';" \
-            -c "CREATE DATABASE memory_test;"
-      - run: dotnet build memsrv.sln
-      - run: dotnet test tests/MemSrv.Tests --no-build
+            -c "CREATE ROLE preflight_limited LOGIN PASSWORD 'preflight_dev'"
+          if MEMSRV_TEST_ADMIN_CONNECTION_STRING=postgres://preflight_limited:preflight_dev@127.0.0.1:55432/postgres \
+              tools/test-db.sh preflight 2>preflight.err; then
+            exit 1
+          fi
+          grep -F 'must be a PostgreSQL superuser' preflight.err
+          PGPASSWORD=overmind_dev psql -h 127.0.0.1 -p 55432 -U overmind -d postgres \
+            -c "DROP ROLE preflight_limited"
+      - name: Run canonical suite against externally provisioned PostgreSQL
+        env:
+          DOCKER_HOST: unix:///does-not-exist
+          MEMSRV_TEST_ADMIN_CONNECTION_STRING: postgres://overmind:overmind_dev@127.0.0.1:55432/postgres
+        run: make test
+
+  test-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Run canonical suite with default Compose provisioning
+        run: make test
 
   reference-compose:
     runs-on: ubuntu-latest
@@ -47,7 +79,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, reference-compose]
+    needs: [test, test-compose, reference-compose]
     runs-on: ubuntu-latest
     permissions:
       contents: read

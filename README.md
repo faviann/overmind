@@ -132,10 +132,22 @@ and the bearer-key YAML is mounted read-only. Re-running the same command is
 safe: role provisioning converges the runtime password and migrations are
 idempotent.
 
-Development remains isolated from this reference stack. `make db-up`,
-`make migrate-dev`, and the test targets explicitly select
-[`compose.dev.yaml`](compose.dev.yaml) and continue to use `memory_dev` and
-disposable test databases.
+Development remains isolated from this reference stack. `make db-up` and the
+test targets use [`compose.dev.yaml`](compose.dev.yaml) by default and continue
+to use `memory_dev` and disposable test databases. An isolated execution
+environment may instead point the complete test lifecycle at an already-running
+PostgreSQL 18 test instance, without Docker access:
+
+```sh
+MEMSRV_TEST_ADMIN_CONNECTION_STRING='postgres://test_admin:<password>@db:5432/postgres' \
+  make test
+```
+
+This explicit mode requires `psql` and PostgreSQL superuser authority for the
+role, template, clone, and cleanup checks; it never falls back to Compose. Pass
+the credential only in the invocation environment, not in a tracked file. See
+[testing conventions](docs/testing.md#database-lifecycle) for the complete
+contract. `make migrate-dev` remains Compose-only and targets `memory_dev`.
 
 ### Existing deployed service
 

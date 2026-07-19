@@ -50,7 +50,7 @@ case "$AFK_TEST_SCENARIO" in
     grep -qx claim-42 "$AFK_TEST_STATE" || { printf 'Selected issue: https://github.com/acme/widget/issues/42\n'; exit; }
     grep -qx claim-43 "$AFK_TEST_STATE" || printf 'Selected issue: https://github.com/acme/widget/issues/43\n'
     ;;
-  live-add) printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
+  live-add|drain-before-claim) printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   drain|force)
     if grep -qx claim-42 "$AFK_TEST_STATE"; then
       printf 'Selected issue: https://github.com/acme/widget/issues/43\n'
@@ -118,7 +118,7 @@ case "$AFK_TEST_SCENARIO" in
     if [[ "$count" == 1 ]]; then printf 'blocker-closed\n' >>"$AFK_TEST_STATE"; else kill -TERM "$PPID"; fi ;;
   token-wait)
     if [[ "$count" -ge 3 ]]; then kill -TERM "$PPID"; fi ;;
-  claim-race|eligibility-race|default-race)
+  claim-race|eligibility-race|default-race|drain-before-claim)
     kill -TERM "$PPID" ;;
   chain) kill -TERM "$PPID" ;;
   idle-stop) /usr/bin/sleep 30 ;;
@@ -169,7 +169,16 @@ case "$*" in
     printf 'claim-%s\n' "$issue" >>"$AFK_TEST_STATE"
     printf 'claim %s\n' "$issue" >>"$AFK_TEST_EVENTS" ;;
   issue\ view\ *\ --json\ state,labels)
-    printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"}]}\n' ;;
+    if [[ "$AFK_TEST_SCENARIO" == drain-before-claim && ! -e "$AFK_TEST_PRECLAIM_SIGNALLED" ]]; then
+      touch "$AFK_TEST_PRECLAIM_SIGNALLED"
+      kill -TERM "$PPID"
+    fi
+    issue="${3}"
+    if grep -qx "claim-$issue" "$AFK_TEST_STATE"; then
+      printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"}]}\n'
+    else
+      printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"},{"name":"Sandcastle"}]}\n'
+    fi ;;
   pr\ list\ --head\ afk/issue-*\ --state\ open\ --json\ number\ --jq\ .[].number)
     branch="${4}"; issue="${branch##*-}"; printf '%s\n' "$((issue + 100))" ;;
   pr\ edit\ *\ --add-label\ afk-review) ;;
@@ -213,6 +222,7 @@ setup_scenario() {
   : >"$events"
   : >"$state"
   rm -f "$fixture/active" "$fixture/release" "$fixture/merge-oid"
+  rm -f "$fixture/preclaim-signalled"
 }
 
 run_watcher() {
@@ -222,6 +232,7 @@ run_watcher() {
       AFK_TEST_REAL_GIT="$real_git" AFK_TEST_SCENARIO="$scenario" \
       AFK_TEST_EVENTS="$events" AFK_TEST_STATE="$state" \
       AFK_TEST_ACTIVE="$fixture/active" AFK_TEST_RELEASE="$fixture/release" \
+      AFK_TEST_PRECLAIM_SIGNALLED="$fixture/preclaim-signalled" \
       AFK_TEST_REPO="$repo" AFK_TEST_MERGE_OID="$fixture/merge-oid" \
       "$root/tools/run-afk-once.sh"
 }
@@ -300,6 +311,12 @@ run_foreground eligibility-race
 [[ "$(grep -c '^selector$' "$events")" == 2 ]]
 ! grep -q '^claim ' "$events"
 ! grep -q '^agent ' "$events"
+
+run_foreground drain-before-claim
+[[ -e "$fixture/preclaim-signalled" ]]
+! grep -q '^claim ' "$events"
+! grep -q '^agent ' "$events"
+grep -q 'no issue was claimed' "$fixture/drain-before-claim.out"
 
 run_foreground default-race
 [[ "$(grep -c '^selector$' "$events")" == 3 ]]

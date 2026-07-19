@@ -140,6 +140,11 @@ observe_frontier() {
   frontier="$default_oid"$'\n'"$authorized_queue"$'\n'"$issue_frontier"
 }
 
+selected_issue_urls() {
+  sed -nE \
+    's|^Selected issue: (https://github.com/[^/]+/[^/]+/issues/[0-9]+)$|\1|p'
+}
+
 last_idle_frontier=""
 printf 'AFK watcher started for %s; polling every %s seconds\n' "$repo_name" "$poll_seconds"
 
@@ -173,10 +178,7 @@ while :; do
   fi
 
   selection="$($selector afk)" || fail "intelligent AFK selection failed"
-  mapfile -t selected_urls < <(
-    sed -nE 's|^Selected issue: (https://github.com/[^/]+/[^/]+/issues/[0-9]+)$|\1|p' \
-      <<<"$selection"
-  )
+  mapfile -t selected_urls < <(selected_issue_urls <<<"$selection")
   if [[ "${#selected_urls[@]}" -eq 0 ]]; then
     last_idle_frontier="$frontier"
     sleep_until_poll
@@ -212,10 +214,7 @@ while :; do
   # final staleness/blocker/umbrella/conflict decision for the claim, rather
   # than relying on the earlier potentially long-running recommendation.
   confirmation="$($selector afk)" || fail "intelligent AFK claim validation failed"
-  mapfile -t confirmed_urls < <(
-    sed -nE 's|^Selected issue: (https://github.com/[^/]+/[^/]+/issues/[0-9]+)$|\1|p' \
-      <<<"$confirmation"
-  )
+  mapfile -t confirmed_urls < <(selected_issue_urls <<<"$confirmation")
   if [[ "${#confirmed_urls[@]}" -ne 1 || "${confirmed_urls[0]}" != "$selected_url" ]]; then
     last_idle_frontier="$frontier"
     sleep_until_poll
@@ -242,6 +241,30 @@ while :; do
 
   branch="afk/issue-$issue_number"
   issue_active=1
+  preclaim_state="$(gh issue view "$issue_number" --json state,labels)" || \
+    fail "could not perform final claim check for issue #$issue_number"
+
+  # A first stop may arrive after selection validation but before the claim.
+  # Honor it before consuming authorization, even when it interrupted the
+  # final GitHub read while the issue was considered active.
+  if [[ "$draining" != 0 ]]; then
+    issue_active=0
+    printf 'AFK watcher drained before claim; no issue was claimed\n' >&2
+    exit 0
+  fi
+
+  if [[ "$(jq -r '.state' <<<"$preclaim_state")" != OPEN ]] || \
+     ! jq -e '(.labels | map(.name) | index("ready-for-agent")) != null' \
+       <<<"$preclaim_state" >/dev/null || \
+     ! jq -e '(.labels | map(.name) | index("Sandcastle")) != null' \
+       <<<"$preclaim_state" >/dev/null; then
+    printf 'AFK issue #%s changed before claim; no authorization was consumed\n' \
+      "$issue_number" >&2
+    issue_active=0
+    last_idle_frontier=""
+    continue
+  fi
+
   # Removing Sandcastle is the single claim mutation. The exclusive watcher
   # lock plus the immediately preceding live validation prevents stale local
   # selections and duplicate attempts.

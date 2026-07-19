@@ -123,7 +123,11 @@ case "$*" in
     printf '[{"number":42,"state":"OPEN","updatedAt":"2026-01-01T00:00:00Z"}]\n' ;;
   "api --method DELETE repos/acme/widget/issues/42/labels/Sandcastle") printf 'claimed\n' >>"$AFK_TEST_STATE" ;;
   "issue view 42 --json state,labels")
-    printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"}]}\n' ;;
+    if grep -qx claimed "$AFK_TEST_STATE"; then
+      printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"}]}\n'
+    else
+      printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"},{"name":"Sandcastle"}]}\n'
+    fi ;;
   "api repos/acme/widget/branches/main/protection")
     # The fixture default branch is unprotected, so the guarded merge stage
     # must refuse and leave the pull request awaiting review.

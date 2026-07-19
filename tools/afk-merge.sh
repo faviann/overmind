@@ -18,16 +18,22 @@ default_branch="${3:?usage: afk-merge.sh <issue-number> <branch> <default-branch
 pr_number="${4:?usage: afk-merge.sh <issue-number> <branch> <default-branch> <pr-number>}"
 
 read -ra required_checks <<<"${AFK_REQUIRED_CHECKS:-test}"
+readonly ci_timeout_seconds=3600
+readonly ci_poll_seconds=30
 
 ensure_afk_review() {
-  gh pr edit "$pr_number" --add-label afk-review >/dev/null 2>&1 || true
+  gh pr edit "$pr_number" --add-label afk-review >/dev/null 2>&1
 }
 
 # Non-merge outcome that mirrors the tracer's "awaits review" end state: keep
 # the pull request open, guarantee afk-review, explain the reason, never claim a
 # merge. The tracer run as a whole still succeeded, so exit 0.
 refuse() {
-  ensure_afk_review
+  if ! ensure_afk_review; then
+    printf 'AFK pause failed: could not ensure afk-review on pull request #%s; artifacts preserved\n' \
+      "$pr_number" >&2
+    exit 1
+  fi
   printf 'merge refused: %s\n' "$1" >&2
   printf 'AFK issue #%s completed: pull request #%s awaits review\n' \
     "$issue_number" "$pr_number"
@@ -37,7 +43,9 @@ refuse() {
 # A merge was attempted but landing or closure could not be verified. Preserve
 # every artifact, keep afk-review, and fail loudly without claiming success.
 abort_unverified() {
-  ensure_afk_review
+  ensure_afk_review || \
+    printf 'AFK merge verification warning: could not ensure afk-review on pull request #%s\n' \
+      "$pr_number" >&2
   printf 'AFK merge verification failed: %s; artifacts preserved for review\n' \
     "$1" >&2
   exit 1
@@ -80,6 +88,22 @@ done
 pr_body="$(gh pr view "$pr_number" --json body --jq .body)" \
   || refuse "could not read pull request #$pr_number body"
 
+set +e
+discovery_result="$("$(dirname "${BASH_SOURCE[0]}")/afk-followups.sh" \
+  "$issue_number" <<<"$pr_body")"
+discovery_status=$?
+set -e
+case "$discovery_status" in
+  0) ;;
+  2) refuse "$discovery_result" ;;
+  *)
+    ensure_afk_review || true
+    printf 'AFK discovery processing failed for issue #%s; artifacts preserved\n' \
+      "$issue_number" >&2
+    exit 1
+    ;;
+esac
+
 grep -Eq "^Closes #${issue_number}([^0-9].*)?$" <<<"$pr_body" \
   || refuse "missing evidence: pull request does not Close #$issue_number"
 if grep -Eq "^Progresses #${issue_number}([^0-9].*)?$" <<<"$pr_body"; then
@@ -98,7 +122,70 @@ outcome="$(
 [[ "$outcome" == "Closes" ]] \
   || refuse "workflow telemetry outcome is not Closes: $outcome"
 
+# --- Required CI: bounded wait and one mechanical retry --------------------
+ci_started="$(date +%s)"
+ci_retried=0
+while :; do
+  set +e
+  checks="$(gh pr checks "$pr_number" --required --json name,state,bucket,link)"
+  checks_status=$?
+  set -e
+  case "$checks_status" in
+    0|1|8) ;;
+    *) refuse "could not read required CI checks for pull request #$pr_number" ;;
+  esac
+  jq -e 'type == "array"' <<<"$checks" >/dev/null \
+    || refuse "GitHub returned invalid required CI data"
+
+  for required_check in "${required_checks[@]}"; do
+    jq -e --arg name "$required_check" 'any(.name == $name)' <<<"$checks" >/dev/null \
+      || refuse "designated required CI check is missing from pull request: $required_check"
+  done
+
+  if jq -e 'all(.bucket == "pass")' <<<"$checks" >/dev/null; then
+    break
+  fi
+  ci_now="$(date +%s)"
+  if (( ci_now - ci_started >= ci_timeout_seconds )); then
+    refuse "required CI did not complete within $ci_timeout_seconds seconds"
+  fi
+  ci_remaining=$((ci_timeout_seconds - (ci_now - ci_started)))
+  ci_sleep_seconds="$ci_poll_seconds"
+  if (( ci_remaining < ci_sleep_seconds )); then
+    ci_sleep_seconds="$ci_remaining"
+  fi
+
+  failed="$(jq '[.[] | select(.bucket == "fail")]' <<<"$checks")"
+  if [[ "$(jq 'length' <<<"$failed")" -gt 0 ]]; then
+    if [[ "$ci_retried" == 1 ]]; then
+      refuse "required CI failed again after one mechanical retry"
+    fi
+    mapfile -t failed_runs < <(
+      jq -r '.[].link' <<<"$failed" \
+        | sed -nE 's|^https://github.com/[^/]+/[^/]+/actions/runs/([0-9]+)(/.*)?$|\1|p' \
+        | sort -u
+    )
+    [[ "${#failed_runs[@]}" -gt 0 ]] \
+      || refuse "failed required CI could not be mapped to a workflow run for retry"
+    for run_id in "${failed_runs[@]}"; do
+      gh run rerun "$run_id" --failed >/dev/null \
+        || refuse "could not mechanically retry failed required CI run $run_id"
+    done
+    ci_retried=1
+    sleep "$ci_sleep_seconds"
+    continue
+  fi
+
+  if jq -e 'any(.bucket == "cancel" or .bucket == "skipping")' \
+    <<<"$checks" >/dev/null; then
+    refuse "required CI ended without passing"
+  fi
+  sleep "$ci_sleep_seconds"
+done
+
 # --- Merge eligibility: GitHub mergeability (AC2/AC3) -----------------------
+# Read this only after required CI settles: GitHub reports an otherwise clean
+# pull request as BLOCKED/UNSTABLE while those checks are pending or failing.
 mergeability="$(gh pr view "$pr_number" --json state,mergeable,mergeStateStatus)" \
   || refuse "could not read pull request #$pr_number mergeability"
 pr_state="$(jq -r '.state' <<<"$mergeability")"

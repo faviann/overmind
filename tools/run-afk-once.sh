@@ -6,7 +6,7 @@ fail() {
   exit 1
 }
 
-for command in git gh codex flock; do
+for command in git gh codex flock jq; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
 
@@ -75,5 +75,9 @@ mapfile -t pull_requests < <(
 gh pr edit "${pull_requests[0]}" --add-label afk-review >/dev/null || \
   fail "could not add afk-review to pull request #${pull_requests[0]}"
 
-printf 'AFK issue #%s completed: pull request #%s awaits review\n' \
-  "$issue_number" "${pull_requests[0]}"
+# Hand off to the guarded merge stage. It either merges a fully evidenced
+# Closes pull request into the protected default branch and cleans up, or
+# refuses and leaves the pull request awaiting review. Either way it owns the
+# tracer's final report and exit status.
+exec "$workflow_root/tools/afk-merge.sh" \
+  "$issue_number" "$branch" "$default_branch" "${pull_requests[0]}"

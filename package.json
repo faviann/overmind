@@ -5,6 +5,7 @@
     "afk": "tools/run-afk-once.sh",
     "afk:sandcastle": "tsx .sandcastle/main.mts",
     "test:afk": "tools/test-afk-tracer.sh",
+    "test:afk-merge": "tools/test-afk-merge.sh",
     "typecheck:afk": "tsc --noEmit"
   },
   "devDependencies": {

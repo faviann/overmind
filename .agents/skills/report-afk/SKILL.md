@@ -11,8 +11,8 @@ issues as the record of truth; do not read or require local Sandcastle logs.
 ## Report
 
 1. Run `scripts/report-afk.py report` from the current repository.
-2. Preserve the exact output and its artifact keys in the current context. A
-   temporary file plus `tee` is appropriate when acknowledgement may follow.
+2. Preserve the exact output and its artifact keys in the current context. Use
+   a temporary file plus `tee` when acknowledgement may follow.
 3. Present the report verbatim. Do not remove any label while generating or
    displaying it.
 
@@ -29,8 +29,9 @@ scripts/report-afk.py ack pr:123 issue:456
 ```
 
 Pass only the selected keys. Never acknowledge a queue entry unless it also
-appears as an `afk-review` artifact. Acknowledgement removes only `afk-review`;
-never add or remove readiness, dependency, triage, or `Sandcastle` labels.
+appears as an `afk-review` artifact. Remove only `afk-review` during
+acknowledgement; never add or remove readiness, dependency, triage, or
+`Sandcastle` labels.
 
 ## Approve all
 

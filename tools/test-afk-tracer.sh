@@ -13,9 +13,11 @@ skills="$fixture/skills"
 events="$fixture/events"
 state="$fixture/state"
 pr_body="$fixture/pr-body.md"
+timer_events="$fixture/timer-events"
+timer_recorder="$fixture/timer-recorder.cjs"
 mkdir -p "$repo" "$adapters" "$skills/work-on/scripts" \
   "$skills/implement" "$skills/tdd" "$skills/code-review" "$skills/select-issue"
-touch "$events" "$state"
+touch "$events" "$state" "$timer_events"
 for skill in work-on implement tdd code-review select-issue; do
   touch "$skills/$skill/SKILL.md"
 done
@@ -27,6 +29,19 @@ git -C "$repo" config user.name "AFK test"
 git -C "$repo" commit --quiet --allow-empty -m base
 git -C "$repo" remote add origin "$remote"
 git -C "$repo" push --quiet -u origin main
+
+cat >"$timer_recorder" <<'EOF'
+const fs = require("node:fs");
+
+const originalSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = function recordScheduledDelay(callback, delay, ...args) {
+  const milliseconds = Number(delay);
+  if (Number.isFinite(milliseconds)) {
+    fs.appendFileSync(process.env.AFK_TEST_TIMER_EVENTS, `${milliseconds}\n`);
+  }
+  return originalSetTimeout(callback, delay, ...args);
+};
+EOF
 
 cat >"$adapters/git" <<'EOF'
 #!/usr/bin/env bash
@@ -155,6 +170,8 @@ run_command() {
       AFK_TEST_STATE="$state" \
       AFK_TEST_PR_BODY="$pr_body" \
       AFK_TEST_REAL_GIT="$real_git" \
+      AFK_TEST_TIMER_EVENTS="$timer_events" \
+      NODE_OPTIONS="${NODE_OPTIONS:-} --require=$timer_recorder" \
       AFK_TEST_FAIL_FETCH="${2:-0}" \
       AFK_TEST_FAIL_GH_AUTH="${3:-0}" \
       AFK_TEST_FAIL_CODEX_AUTH="${4:-0}" \
@@ -234,6 +251,7 @@ if grep -q '^selector ' "$events"; then
 fi
 
 : >"$events"
+: >"$timer_events"
 run_command 1
 
 # A watcher must observe the authorized queue before asking the intelligent
@@ -249,6 +267,11 @@ git -C "$repo" show-ref --verify --quiet refs/heads/afk/issue-42
 git -C "$repo" show afk/issue-42:afk-result.txt | grep -q '^completed by scripted work-on boundary$'
 grep -qx pr-created "$state"
 grep -q '^gh pr edit 7 --add-label afk-review$' "$events"
+grep -Fxq '1200000' "$timer_events" || {
+  echo "real Sandcastle did not schedule the configured 1,200,000 ms idle timer" >&2
+  cat "$timer_events" >&2
+  exit 1
+}
 
 launches_before="$(grep -c '^codex-agent ' "$events")"
 run_command 1 >"$fixture/duplicate.out" 2>&1

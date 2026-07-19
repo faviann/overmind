@@ -52,11 +52,12 @@ authenticate `gh` and `codex`, install the checked-in Node dependencies with
 adding `Sandcastle`.
 
 Run `make afk`. Preflight only checks policy and prerequisites; it never creates
-labels, installs skills, or repairs configuration. The command watches the live
-two-label queue, consumes an issue's `Sandcastle` label before launch, runs the
-full `work-on` lifecycle on a named isolated branch/worktree, and labels the
-resulting pull request `afk-review`. It processes one issue at a time and starts
-each selection from the latest verified default branch. An empty or unchanged
+labels, installs skills, or repairs configuration. The repository must already
+provide `ready-for-agent`, `Sandcastle`, `afk-review`, and `needs-triage`. The
+command watches the live two-label queue, consumes an issue's `Sandcastle`
+label before launch, runs the full `work-on` lifecycle on a named isolated
+branch/worktree, and labels the resulting pull request `afk-review`. It
+processes one issue at a time and starts each selection from the latest verified default branch. An empty or unchanged
 ineligible queue is polled without invoking an agent or selector model. A first
 termination signal drains an active issue (or exits immediately while idle); a
 second signal forces termination. A consumed authorization cannot retry unless
@@ -87,6 +88,13 @@ pull request open for review:
   temporary worktree and the local and remote `afk/issue-<n>` branches.
 - Any refusal, failed merge, or failed verification preserves all artifacts,
   keeps `afk-review`, prints the reason, and never claims a merge happened.
+- Required CI is polled for up to sixty minutes. Explicit failures trigger one
+  mechanical `gh run rerun --failed` attempt; another failure or the timeout
+  leaves the pull request open with `afk-review` and preserves its artifacts.
+- Out-of-scope issues recorded by `work-on` under `Follow-ups` receive only
+  `needs-triage` and `afk-review`. A native blocking relationship pauses that
+  lane; an unreadable relationship is treated as blocking. Neither discovery
+  nor an idle agent can restore the consumed `Sandcastle` authorization.
 
 ## Connect an agent
 

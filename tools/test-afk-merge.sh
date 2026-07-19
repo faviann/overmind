@@ -19,6 +19,7 @@ events="$fixture/events"
 state="$fixture/state"
 bodies="$fixture/bodies"
 out="$fixture/out"
+clock="$fixture/clock"
 mkdir -p "$adapters" "$bodies"
 
 # --- Fixture pull-request bodies --------------------------------------------
@@ -67,6 +68,22 @@ cat >"$bodies/missing" <<'EOF'
 Closes #42
 EOF
 
+cat >"$bodies/followup" <<'EOF'
+## Issues
+
+Closes #42
+
+## Follow-ups
+
+- #77 - investigate an out-of-scope edge case
+
+## Workflow telemetry
+
+| Field | Observed value |
+|---|---|
+| Final workflow outcome | Closes |
+EOF
+
 readonly merge_clean='{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}'
 readonly merge_conflict='{"state":"OPEN","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}'
 readonly merge_blocked='{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED"}'
@@ -100,6 +117,25 @@ case "$*" in
     esac ;;
   "pr view 7 --json body --jq .body")
     cat "$AFK_TEST_BODY" ;;
+  "api repos/acme/widget/issues/42/dependencies/blocked_by --paginate --jq .[].number")
+    [[ "${AFK_TEST_DEPENDENCY_QUERY_FAIL:-0}" != 1 ]] || exit 1
+    [[ -z "${AFK_TEST_BLOCKERS:-}" ]] || printf '%s\n' "$AFK_TEST_BLOCKERS" ;;
+  "issue edit 77 --add-label needs-triage --add-label afk-review") ;;
+  "pr checks 7 --required --json name,state,bucket,link")
+    checks_call="$(grep -c '^gh pr checks 7 ' "$AFK_TEST_EVENTS")"
+    case "${AFK_TEST_CHECKS:-pass}" in
+      pass) printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]' ;;
+      retry-pass)
+        if [[ "$checks_call" == 1 ]]; then
+          printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]'
+        else
+          printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/2"}]'
+        fi ;;
+      repeat-fail) printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]' ;;
+      pending) printf '%s\n' '[{"name":"test","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]' ;;
+      *) exit 91 ;;
+    esac ;;
+  "run rerun 100 --failed") ;;
   "pr view 7 --json state,mergeable,mergeStateStatus")
     printf '%s\n' "$AFK_TEST_MERGEABILITY" ;;
   "pr merge 7 --merge")
@@ -114,7 +150,26 @@ case "$*" in
 esac
 EOF
 
-chmod +x "$adapters/git" "$adapters/gh"
+cat >"$adapters/date" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == +%s ]]
+cat "$AFK_TEST_CLOCK"
+EOF
+
+cat >"$adapters/sleep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sleep %s\n' "$*" >>"$AFK_TEST_EVENTS"
+if [[ "$AFK_TEST_CHECKS" == pending ]]; then
+  printf '3600\n' >"$AFK_TEST_CLOCK"
+else
+  current="$(cat "$AFK_TEST_CLOCK")"
+  printf '%s\n' "$((current + 30))" >"$AFK_TEST_CLOCK"
+fi
+EOF
+
+chmod +x "$adapters/git" "$adapters/gh" "$adapters/date" "$adapters/sleep"
 
 # --- Fixture repository helpers ---------------------------------------------
 setup_repo() {
@@ -146,11 +201,19 @@ run_merge() {
       AFK_TEST_EVENTS="$events" \
       AFK_TEST_STATE="$state" \
       AFK_TEST_REAL_GIT="$real_git" \
+      AFK_TEST_CLOCK="$clock" \
       "$command_under_test" 42 afk/issue-42 main 7
   )
 }
 
-reset_events() { : >"$events"; : >"$state"; }
+reset_events() {
+  : >"$events"
+  : >"$state"
+  printf '0\n' >"$clock"
+  export AFK_TEST_CHECKS=pass
+  export AFK_TEST_BLOCKERS=''
+  unset AFK_TEST_DEPENDENCY_QUERY_FAIL
+}
 
 assert_no_merge_call() {
   if grep -q '^gh pr merge ' "$events"; then
@@ -197,7 +260,6 @@ prohibited=(
   "unverified-outcome|good|contradiction|$merge_clean"
   "missing-evidence|good|missing|$merge_clean"
   "conflict|good|closes|$merge_conflict"
-  "failed-check|good|closes|$merge_blocked"
 )
 
 for scenario in "${prohibited[@]}"; do
@@ -247,6 +309,106 @@ assert_no_deletion empty-checks
 assert_branch_present empty-checks
 assert_worktree_present empty-checks
 unset AFK_REQUIRED_CHECKS
+
+# --- Required CI: one mechanical retry, then bounded human-review pause -----
+setup_repo
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/closes"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_CHECKS=retry-pass
+export AFK_TEST_POST_MERGE='{"state":"MERGED","mergeCommit":{"oid":"unused"}}'
+export AFK_TEST_ISSUE_STATE=CLOSED
+if run_merge >"$out" 2>&1; then
+  # The fixture does not seed a real merge commit in this scenario, so reaching
+  # post-merge verification proves CI allowed exactly one merge attempt.
+  :
+fi
+[[ "$(grep -c '^gh run rerun 100 --failed$' "$events")" == 1 ]] \
+  || { echo "FAIL[ci-retry]: expected exactly one mechanical rerun" >&2; cat "$events" >&2; exit 1; }
+checks_line="$(grep -n '^gh pr checks 7 ' "$events" | head -n1 | cut -d: -f1)"
+mergeability_line="$(grep -n '^gh pr view 7 --json state,mergeable,mergeStateStatus$' "$events" | head -n1 | cut -d: -f1)"
+[[ "$checks_line" -lt "$mergeability_line" ]] \
+  || { echo "FAIL[ci-retry]: CI must settle before final mergeability evaluation" >&2; cat "$events" >&2; exit 1; }
+grep -q '^gh pr merge 7 --merge$' "$events" \
+  || { echo "FAIL[ci-retry]: merge gate did not continue after passing retry" >&2; exit 1; }
+
+setup_repo
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/closes"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_CHECKS=repeat-fail
+if ! run_merge >"$out" 2>&1; then
+  echo "FAIL[ci-repeat]: repeated CI failure should pause for review" >&2; cat "$out" >&2; exit 1
+fi
+[[ "$(grep -c '^gh run rerun 100 --failed$' "$events")" == 1 ]] \
+  || { echo "FAIL[ci-repeat]: retry was not bounded to one" >&2; cat "$events" >&2; exit 1; }
+grep -q 'required CI failed again after one mechanical retry' "$out"
+assert_pr_open ci-repeat
+assert_afk_review_present ci-repeat
+assert_no_deletion ci-repeat
+assert_branch_present ci-repeat
+assert_worktree_present ci-repeat
+
+setup_repo
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/closes"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_CHECKS=pending
+if ! run_merge >"$out" 2>&1; then
+  echo "FAIL[ci-timeout]: CI timeout should pause for review" >&2; cat "$out" >&2; exit 1
+fi
+grep -q '^sleep 30$' "$events"
+grep -q 'required CI did not complete within 3600 seconds' "$out"
+assert_pr_open ci-timeout
+assert_afk_review_present ci-timeout
+assert_no_deletion ci-timeout
+assert_branch_present ci-timeout
+assert_worktree_present ci-timeout
+
+# --- Discoveries: label for triage, never authorize, block conservatively ---
+setup_repo
+merge_oid="$(seed_merge)"
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/followup"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_POST_MERGE="{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\",\"mergeCommit\":{\"oid\":\"$merge_oid\"}}"
+export AFK_TEST_ISSUE_STATE=CLOSED
+if ! run_merge >"$out" 2>&1; then
+  echo "FAIL[nonblocking-discovery]: non-blocking discovery stopped current issue" >&2; cat "$out" >&2; exit 1
+fi
+grep -q '^gh issue edit 77 --add-label needs-triage --add-label afk-review$' "$events"
+! grep -Eq 'issue edit 77 .*--add-label (ready-for-agent|Sandcastle)' "$events"
+grep -q '^gh pr merge 7 --merge$' "$events"
+
+setup_repo
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/followup"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_BLOCKERS=77
+if ! run_merge >"$out" 2>&1; then
+  echo "FAIL[blocking-discovery]: blocking discovery should pause for review" >&2; cat "$out" >&2; exit 1
+fi
+grep -q 'discovered issue #77 blocks issue #42' "$out"
+assert_pr_open blocking-discovery
+assert_afk_review_present blocking-discovery
+
+setup_repo
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/followup"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_DEPENDENCY_QUERY_FAIL=1
+if ! run_merge >"$out" 2>&1; then
+  echo "FAIL[uncertain-discovery]: uncertain discovery should pause for review" >&2; cat "$out" >&2; exit 1
+fi
+grep -q 'could not classify discovered work' "$out"
+assert_pr_open uncertain-discovery
+assert_afk_review_present uncertain-discovery
 
 # --- Failed verification: merge lands but is not on the default branch -------
 # Post-merge state reports MERGED with a merge commit that origin/main never

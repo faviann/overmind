@@ -18,6 +18,16 @@ default_branch="${3:?usage: afk-merge.sh <issue-number> <branch> <default-branch
 pr_number="${4:?usage: afk-merge.sh <issue-number> <branch> <default-branch> <pr-number>}"
 
 read -ra required_checks <<<"${AFK_REQUIRED_CHECKS:-test}"
+ci_timeout_seconds="${AFK_CI_TIMEOUT_SECONDS:-3600}"
+ci_poll_seconds="${AFK_CI_POLL_SECONDS:-30}"
+[[ "$ci_timeout_seconds" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'AFK CI timeout must be a positive number of seconds\n' >&2
+  exit 1
+}
+[[ "$ci_poll_seconds" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'AFK CI poll interval must be a positive number of seconds\n' >&2
+  exit 1
+}
 
 ensure_afk_review() {
   gh pr edit "$pr_number" --add-label afk-review >/dev/null 2>&1 || true
@@ -80,6 +90,37 @@ done
 pr_body="$(gh pr view "$pr_number" --json body --jq .body)" \
   || refuse "could not read pull request #$pr_number body"
 
+# `work-on` records every discovered issue in the durable Follow-ups section.
+# The watcher does not create or authorize that work; it only places each
+# artifact in the maintainer's triage/review inbox. Native blockers are the
+# authoritative blocking classification. If that classification cannot be
+# read, fail closed rather than merging across uncertain work.
+mapfile -t followups < <(
+  awk '
+    /^## Follow-ups$/ { in_followups = 1; next }
+    /^## / { in_followups = 0 }
+    in_followups && match($0, /^- #[0-9]+/) {
+      value = substr($0, RSTART + 3, RLENGTH - 3)
+      print value
+    }
+  ' <<<"$pr_body"
+)
+if [[ "${#followups[@]}" -gt 0 ]]; then
+  for followup in "${followups[@]}"; do
+    gh issue edit "$followup" --add-label needs-triage --add-label afk-review >/dev/null \
+      || refuse "could not mark discovered issue #$followup for triage and review"
+  done
+
+  blocker_numbers="$(gh api "repos/$repo/issues/$issue_number/dependencies/blocked_by" \
+    --paginate --jq '.[].number')" \
+    || refuse "could not classify discovered work against issue #$issue_number dependencies"
+  for followup in "${followups[@]}"; do
+    if grep -Fxq "$followup" <<<"$blocker_numbers"; then
+      refuse "discovered issue #$followup blocks issue #$issue_number"
+    fi
+  done
+fi
+
 grep -Eq "^Closes #${issue_number}([^0-9].*)?$" <<<"$pr_body" \
   || refuse "missing evidence: pull request does not Close #$issue_number"
 if grep -Eq "^Progresses #${issue_number}([^0-9].*)?$" <<<"$pr_body"; then
@@ -98,7 +139,65 @@ outcome="$(
 [[ "$outcome" == "Closes" ]] \
   || refuse "workflow telemetry outcome is not Closes: $outcome"
 
+# --- Required CI: bounded wait and one mechanical retry --------------------
+ci_started="$(date +%s)"
+ci_retried=0
+while :; do
+  set +e
+  checks="$(gh pr checks "$pr_number" --required --json name,state,bucket,link)"
+  checks_status=$?
+  set -e
+  case "$checks_status" in
+    0|1|8) ;;
+    *) refuse "could not read required CI checks for pull request #$pr_number" ;;
+  esac
+  jq -e 'type == "array"' <<<"$checks" >/dev/null \
+    || refuse "GitHub returned invalid required CI data"
+
+  for required_check in "${required_checks[@]}"; do
+    jq -e --arg name "$required_check" 'any(.name == $name)' <<<"$checks" >/dev/null \
+      || refuse "designated required CI check is missing from pull request: $required_check"
+  done
+
+  if jq -e 'all(.bucket == "pass")' <<<"$checks" >/dev/null; then
+    break
+  fi
+  ci_now="$(date +%s)"
+  if (( ci_now - ci_started >= ci_timeout_seconds )); then
+    refuse "required CI did not complete within $ci_timeout_seconds seconds"
+  fi
+
+  failed="$(jq '[.[] | select(.bucket == "fail")]' <<<"$checks")"
+  if [[ "$(jq 'length' <<<"$failed")" -gt 0 ]]; then
+    if [[ "$ci_retried" == 1 ]]; then
+      refuse "required CI failed again after one mechanical retry"
+    fi
+    mapfile -t failed_runs < <(
+      jq -r '.[].link' <<<"$failed" \
+        | sed -nE 's|^https://github.com/[^/]+/[^/]+/actions/runs/([0-9]+)(/.*)?$|\1|p' \
+        | sort -u
+    )
+    [[ "${#failed_runs[@]}" -gt 0 ]] \
+      || refuse "failed required CI could not be mapped to a workflow run for retry"
+    for run_id in "${failed_runs[@]}"; do
+      gh run rerun "$run_id" --failed >/dev/null \
+        || refuse "could not mechanically retry failed required CI run $run_id"
+    done
+    ci_retried=1
+    sleep "$ci_poll_seconds"
+    continue
+  fi
+
+  if jq -e 'any(.bucket == "cancel" or .bucket == "skipping")' \
+    <<<"$checks" >/dev/null; then
+    refuse "required CI ended without passing"
+  fi
+  sleep "$ci_poll_seconds"
+done
+
 # --- Merge eligibility: GitHub mergeability (AC2/AC3) -----------------------
+# Read this only after required CI settles: GitHub reports an otherwise clean
+# pull request as BLOCKED/UNSTABLE while those checks are pending or failing.
 mergeability="$(gh pr view "$pr_number" --json state,mergeable,mergeStateStatus)" \
   || refuse "could not read pull request #$pr_number mergeability"
 pr_state="$(jq -r '.state' <<<"$mergeability")"

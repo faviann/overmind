@@ -31,7 +31,7 @@ selector="$skills_root/work-on/scripts/select-issue-codex.sh"
 
 labels="$(gh label list --limit 1000 --json name --jq '.[].name')" || \
   fail "could not read GitHub labels"
-for label in ready-for-agent Sandcastle afk-review; do
+for label in ready-for-agent Sandcastle afk-review needs-triage; do
   grep -Fxq "$label" <<<"$labels" || fail "missing required GitHub label: $label"
 done
 
@@ -104,10 +104,11 @@ sleep_until_poll() {
 wait_for_active_issue() {
   local status
   while [[ -n "$active_pid" ]]; do
-    set +e
-    wait "$active_pid"
-    status=$?
-    set -e
+    if wait "$active_pid"; then
+      status=0
+    else
+      status=$?
+    fi
     if kill -0 "$active_pid" 2>/dev/null; then
       continue
     fi
@@ -279,10 +280,11 @@ while :; do
   setsid "$workflow_root/tools/run-afk-issue.sh" \
     "$issue_number" "$branch" "$default_branch" &
   active_pid=$!
-  set +e
-  wait_for_active_issue
-  issue_status=$?
-  set -e
+  if wait_for_active_issue; then
+    issue_status=0
+  else
+    issue_status=$?
+  fi
   if [[ "$issue_status" -ne 0 ]]; then
     printf 'AFK issue #%s reached a failed terminal outcome (status %s); authorization remains consumed\n' \
       "$issue_number" "$issue_status" >&2

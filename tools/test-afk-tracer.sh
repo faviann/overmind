@@ -107,7 +107,7 @@ case "$*" in
   "label list --limit 1000 --json name --jq .[].name")
     printf '%s\n' ready-for-agent Sandcastle
     if [[ "${AFK_TEST_INCLUDE_REVIEW_LABEL:-0}" == 1 ]]; then
-      printf '%s\n' afk-review
+      printf '%s\n' afk-review needs-triage
     fi
     ;;
   "repo view --json nameWithOwner --jq .nameWithOwner") printf 'acme/widget\n' ;;

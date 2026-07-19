@@ -6,7 +6,7 @@ fail() {
   exit 1
 }
 
-for command in git gh codex flock jq; do
+for command in git gh codex flock jq setsid; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
 
@@ -50,34 +50,142 @@ git fetch --quiet origin "refs/heads/$default_branch:refs/remotes/origin/$defaul
   -f "$workflow_root/node_modules/@ai-hero/sandcastle/package.json" ]] || \
   fail "checked-in AFK dependencies are not installed; run 'npm ci' in $workflow_root before launch"
 
-selection="$($selector afk)" || fail "intelligent AFK selection failed"
-mapfile -t selected_urls < <(sed -nE 's|^Selected issue: (https://github.com/[^/]+/[^/]+/issues/[0-9]+)$|\1|p' <<<"$selection")
-[[ "${#selected_urls[@]}" -eq 1 ]] || fail "selector did not return exactly one issue"
+poll_seconds="${AFK_POLL_SECONDS:-60}"
+[[ "$poll_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+  fail "AFK_POLL_SECONDS must be a non-negative number"
 
-selected_url="${selected_urls[0]}"
-selected_repo="$(sed -nE 's|^https://github.com/([^/]+/[^/]+)/issues/[0-9]+$|\1|p' <<<"$selected_url")"
-[[ "$selected_repo" == "$repo_name" ]] || \
-  fail "selector returned an issue from $selected_repo instead of $repo_name"
-issue_number="${selected_url##*/}"
-branch="afk/issue-$issue_number"
+draining=0
+stop_count=0
+active_pid=""
+sleep_pid=""
+issue_active=0
 
-gh issue edit "$issue_number" --remove-label Sandcastle >/dev/null || \
-  fail "could not claim issue #$issue_number by removing Sandcastle"
+stop_watcher() {
+  stop_count=$((stop_count + 1))
+  if [[ "$stop_count" -ge 2 ]]; then
+    printf 'AFK watcher forcing termination\n' >&2
+    if [[ -n "$active_pid" ]]; then
+      kill -TERM -- "-$active_pid" 2>/dev/null || true
+    fi
+    exit 130
+  fi
 
-"$workflow_root/node_modules/.bin/tsx" "$workflow_root/.sandcastle/main.mts" \
-  "$issue_number" "$branch" "$default_branch"
+  draining=1
+  if [[ "$issue_active" == 0 ]]; then
+    [[ -z "$sleep_pid" ]] || kill -TERM "$sleep_pid" 2>/dev/null || true
+    printf 'AFK watcher stopped while idle\n' >&2
+    exit 0
+  fi
+  printf 'AFK watcher draining current issue; no more work will be claimed\n' >&2
+}
+trap stop_watcher INT TERM
 
-mapfile -t pull_requests < <(
-  gh pr list --head "$branch" --state open --json number --jq '.[].number'
-)
-[[ "${#pull_requests[@]}" -eq 1 ]] || \
-  fail "expected exactly one open pull request for $branch; authorization remains consumed"
-gh pr edit "${pull_requests[0]}" --add-label afk-review >/dev/null || \
-  fail "could not add afk-review to pull request #${pull_requests[0]}"
+sleep_until_poll() {
+  sleep "$poll_seconds" &
+  sleep_pid=$!
+  wait "$sleep_pid"
+  sleep_pid=""
+}
 
-# Hand off to the guarded merge stage. It either merges a fully evidenced
-# Closes pull request into the protected default branch and cleans up, or
-# refuses and leaves the pull request awaiting review. Either way it owns the
-# tracer's final report and exit status.
-exec "$workflow_root/tools/afk-merge.sh" \
-  "$issue_number" "$branch" "$default_branch" "${pull_requests[0]}"
+wait_for_active_issue() {
+  local status
+  while [[ -n "$active_pid" ]]; do
+    set +e
+    wait "$active_pid"
+    status=$?
+    set -e
+    if kill -0 "$active_pid" 2>/dev/null; then
+      continue
+    fi
+    active_pid=""
+    return "$status"
+  done
+}
+
+last_idle_frontier=""
+printf 'AFK watcher started for %s; polling every %s seconds\n' "$repo_name" "$poll_seconds"
+
+while :; do
+  [[ "$draining" == 0 ]] || exit 0
+
+  git fetch --quiet origin "refs/heads/$default_branch:refs/remotes/origin/$default_branch" || {
+    printf 'AFK watcher could not synchronize origin/%s; waiting without claiming work\n' \
+      "$default_branch" >&2
+    sleep_until_poll
+    continue
+  }
+
+  # This cheap live query is the authorization boundary. The selector/model is
+  # never invoked while the two-label queue is empty.
+  authorized_queue="$(
+    gh issue list --state open \
+      --label ready-for-agent --label Sandcastle \
+      --limit 1000 --json number,updatedAt --jq 'sort_by(.number)'
+  )" || fail "could not read the live authorized queue"
+
+  if [[ "$(jq 'length' <<<"$authorized_queue")" -eq 0 ]]; then
+    last_idle_frontier=""
+    sleep_until_poll
+    continue
+  fi
+
+  # Open/closed issue changes can move native dependency frontiers without
+  # changing an authorized issue's labels. Include them in the cheap frontier
+  # observation so a newly closed blocker wakes selection, while an unchanged
+  # blocked queue remains token-free.
+  issue_frontier="$(
+    gh issue list --state all --limit 1000 \
+      --json number,state,updatedAt --jq 'sort_by(.number)'
+  )" || fail "could not read the live dependency frontier"
+  default_oid="$(git rev-parse "origin/$default_branch")"
+  frontier="$default_oid"$'\n'"$authorized_queue"$'\n'"$issue_frontier"
+
+  if [[ "$frontier" == "$last_idle_frontier" ]]; then
+    sleep_until_poll
+    continue
+  fi
+
+  selection="$($selector afk)" || fail "intelligent AFK selection failed"
+  mapfile -t selected_urls < <(
+    sed -nE 's|^Selected issue: (https://github.com/[^/]+/[^/]+/issues/[0-9]+)$|\1|p' \
+      <<<"$selection"
+  )
+  if [[ "${#selected_urls[@]}" -eq 0 ]]; then
+    last_idle_frontier="$frontier"
+    sleep_until_poll
+    continue
+  fi
+  [[ "${#selected_urls[@]}" -eq 1 ]] || fail "selector returned more than one issue"
+
+  selected_url="${selected_urls[0]}"
+  selected_repo="$(sed -nE 's|^https://github.com/([^/]+/[^/]+)/issues/[0-9]+$|\1|p' <<<"$selected_url")"
+  [[ "$selected_repo" == "$repo_name" ]] || \
+    fail "selector returned an issue from $selected_repo instead of $repo_name"
+  issue_number="${selected_url##*/}"
+  jq -e --argjson issue "$issue_number" 'any(.number == $issue)' \
+    <<<"$authorized_queue" >/dev/null || \
+    fail "selector returned issue #$issue_number outside the live authorized queue"
+
+  branch="afk/issue-$issue_number"
+  issue_active=1
+  gh issue edit "$issue_number" --remove-label Sandcastle >/dev/null || \
+    fail "could not claim issue #$issue_number by removing Sandcastle"
+
+  # A separate process group gives the second stop signal a deterministic
+  # force boundary across Sandcastle and its agent descendants.
+  setsid "$workflow_root/tools/run-afk-issue.sh" \
+    "$issue_number" "$branch" "$default_branch" &
+  active_pid=$!
+  set +e
+  wait_for_active_issue
+  issue_status=$?
+  set -e
+  if [[ "$issue_status" -ne 0 ]]; then
+    printf 'AFK issue #%s reached a failed terminal outcome (status %s); authorization remains consumed\n' \
+      "$issue_number" "$issue_status" >&2
+  fi
+  issue_active=0
+
+  last_idle_frontier=""
+  [[ "$draining" == 0 ]] || exit 0
+done

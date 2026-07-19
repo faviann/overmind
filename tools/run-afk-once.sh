@@ -192,10 +192,12 @@ while :; do
     fail "selector returned an issue from $selected_repo instead of $repo_name"
   issue_number="${selected_url##*/}"
 
-  # Selection may take long enough for authorization, dependencies, issue
-  # metadata, or the default branch to change. Re-read every input after the
-  # selector returns. Any change invalidates its reasoning and restarts the
-  # selection cycle without consuming authorization.
+  # Selection can take long enough for authorization, dependencies, issue
+  # metadata, or the default branch to change. Re-read every input once after
+  # the selector returns; any change invalidates its reasoning and restarts the
+  # cycle without consuming authorization. A stable frontier means the selector
+  # decided on inputs that still hold, so its recommendation stands as the
+  # staleness/blocker/umbrella/conflict decision for this claim.
   selected_frontier="$frontier"
   if ! sync_default_branch; then
     printf 'AFK watcher could not refresh origin/%s before claim; selection discarded\n' \
@@ -206,43 +208,6 @@ while :; do
   fi
   observe_frontier || fail "could not revalidate the live queue before claim"
   if [[ "$frontier" != "$selected_frontier" ]]; then
-    last_idle_frontier=""
-    continue
-  fi
-
-  # Re-run the complete intelligent policy at the stable frontier. This is the
-  # final staleness/blocker/umbrella/conflict decision for the claim, rather
-  # than relying on the earlier potentially long-running recommendation.
-  confirmation="$($selector afk)" || fail "intelligent AFK claim validation failed"
-  mapfile -t confirmed_urls < <(selected_issue_urls <<<"$confirmation")
-  if [[ "${#confirmed_urls[@]}" -ne 1 ]]; then
-    # The earlier recommendation proves this frontier was not consistently
-    # ineligible. Retry after a token-free sleep instead of caching a transient
-    # empty/invalid confirmation forever.
-    last_idle_frontier=""
-    sleep_until_poll
-    continue
-  fi
-
-  # The stable-frontier confirmation is authoritative. Two valid policy runs
-  # may rank the same eligible pool differently; requiring identical URLs
-  # would strand both issues without any GitHub state change to wake the loop.
-  selected_url="${confirmed_urls[0]}"
-  selected_repo="$(sed -nE 's|^https://github.com/([^/]+/[^/]+)/issues/[0-9]+$|\1|p' <<<"$selected_url")"
-  [[ "$selected_repo" == "$repo_name" ]] || \
-    fail "claim validation returned an issue from $selected_repo instead of $repo_name"
-  issue_number="${selected_url##*/}"
-
-  confirmed_frontier="$frontier"
-  if ! sync_default_branch; then
-    printf 'AFK watcher could not refresh origin/%s after claim validation; selection discarded\n' \
-      "$default_branch" >&2
-    last_idle_frontier=""
-    sleep_until_poll
-    continue
-  fi
-  observe_frontier || fail "could not perform final live validation before claim"
-  if [[ "$frontier" != "$confirmed_frontier" ]]; then
     last_idle_frontier=""
     continue
   fi

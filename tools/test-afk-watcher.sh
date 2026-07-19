@@ -82,19 +82,6 @@ case "$AFK_TEST_SCENARIO" in
     fi
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     ;;
-  selector-disagreement)
-    if [[ "$count" == 1 ]]; then
-      printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
-    else
-      printf 'Selected issue: https://github.com/acme/widget/issues/43\n'
-    fi
-    ;;
-  selector-confirm-none)
-    case "$count" in
-      1|3|4) printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
-      2) ;;
-    esac
-    ;;
 esac
 EOF
 
@@ -131,11 +118,6 @@ case "$AFK_TEST_SCENARIO" in
     if [[ "$count" == 1 ]]; then printf 'blocker-closed\n' >>"$AFK_TEST_STATE"; else kill -TERM "$PPID"; fi ;;
   token-wait)
     if [[ "$count" -ge 3 ]]; then kill -TERM "$PPID"; fi ;;
-  selector-confirm-none)
-    if grep -qx claim-42 "$AFK_TEST_STATE" || [[ "$count" -ge 3 ]]; then
-      kill -TERM "$PPID"
-    fi ;;
-  selector-disagreement) kill -TERM "$PPID" ;;
   claim-race|eligibility-race|default-race|drain-before-claim)
     kill -TERM "$PPID" ;;
   chain) kill -TERM "$PPID" ;;
@@ -170,9 +152,6 @@ case "$*" in
       drain|force)
         if grep -qx claim-42 "$AFK_TEST_STATE"; then printf '[{"number":43,"updatedAt":"b"}]\n'
         else printf '[{"number":42,"updatedAt":"a"}]\n'; fi ;;
-      selector-disagreement)
-        if grep -qx claim-43 "$AFK_TEST_STATE"; then printf '[]\n'
-        else printf '[{"number":42,"updatedAt":"a"},{"number":43,"updatedAt":"a"}]\n'; fi ;;
       *)
         if grep -qx claim-42 "$AFK_TEST_STATE"; then printf '[]\n'
         else printf '[{"number":42,"updatedAt":"a"}]\n'; fi ;;
@@ -302,7 +281,7 @@ run_foreground chain
   exit 1
 }
 [[ "$(grep -c '^claim ' "$events")" == 2 ]]
-[[ "$(grep -c '^selector$' "$events")" == 4 ]]
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
 [[ "$(grep -c '^git fetch --quiet origin refs/heads/main:refs/remotes/origin/main$' "$events")" -ge 3 ]]
 [[ "$(grep -c '^gh issue list --state open --label ready-for-agent --label Sandcastle ' "$events")" -ge 3 ]]
 mapfile -t chain_bases < <(sed -n 's/^agent-base [0-9][0-9]* //p' "$events")
@@ -312,11 +291,11 @@ mapfile -t chain_bases < <(sed -n 's/^agent-base [0-9][0-9]* //p' "$events")
 
 run_foreground live-add
 [[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
-[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+[[ "$(grep -c '^selector$' "$events")" == 1 ]]
 grep -q "^agent-base 42 $base_oid$" "$events"
 
 run_foreground frontier
-[[ "$(grep -c '^selector$' "$events")" == 3 ]]
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
 [[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
 
 run_foreground token-wait
@@ -340,23 +319,11 @@ run_foreground drain-before-claim
 grep -q 'no issue was claimed' "$fixture/drain-before-claim.out"
 
 run_foreground default-race
-[[ "$(grep -c '^selector$' "$events")" == 3 ]]
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
 [[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
 advanced_oid="$(git -C "$repo" rev-parse origin/main)"
 [[ "$advanced_oid" != "$base_oid" ]]
 grep -q "^agent-base 42 $advanced_oid$" "$events"
-
-run_foreground selector-disagreement
-[[ "$(grep -c '^selector$' "$events")" == 2 ]]
-grep -q '^claim 43$' "$events"
-grep -q '^agent 43$' "$events"
-! grep -q '^agent 42$' "$events"
-! grep -q '^concurrent-agent ' "$events"
-
-run_foreground selector-confirm-none
-[[ "$(grep -c '^selector$' "$events")" == 4 ]]
-grep -q '^claim 42$' "$events"
-grep -q '^agent 42$' "$events"
 
 run_background drain
 wait_event '^agent 42$'

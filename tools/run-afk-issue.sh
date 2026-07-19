@@ -28,6 +28,24 @@ if [[ "$agent_status" -ne 0 ]]; then
         "$issue_number" "$agent_status" "$pr_number" >&2
       exit "$agent_status"
     fi
+    if ! pr_body="$(gh pr view "$pr_number" --json body --jq .body)"; then
+      printf 'AFK issue #%s agent stopped (status %s): could not read pull request #%s discoveries; branch/worktree artifacts preserved\n' \
+        "$issue_number" "$agent_status" "$pr_number" >&2
+      exit "$agent_status"
+    fi
+    set +e
+    discovery_result="$("$workflow_root/tools/afk-followups.sh" \
+      "$issue_number" <<<"$pr_body")"
+    discovery_status=$?
+    set -e
+    if [[ "$discovery_status" -ne 0 && "$discovery_status" -ne 2 ]]; then
+      printf 'AFK issue #%s agent stopped (status %s): discovery processing failed; branch/worktree artifacts preserved\n' \
+        "$issue_number" "$agent_status" >&2
+      exit "$agent_status"
+    fi
+    if [[ "$discovery_status" == 2 ]]; then
+      printf 'AFK issue #%s partial result: %s\n' "$issue_number" "$discovery_result" >&2
+    fi
     printf 'AFK issue #%s agent stopped (status %s): pull request #%s and available worktree artifacts preserved for review\n' \
       "$issue_number" "$agent_status" "$pr_number" >&2
   else

@@ -48,18 +48,18 @@ The repository's AFK watcher is intended to run inside an externally
 managed persistent shell such as tmux or herdr. Setup is deliberately separate:
 authenticate `gh` and `codex`, install the checked-in Node dependencies with
 `npm ci`, ensure the shared `work-on` skills and the `ready-for-agent`,
-`Sandcastle`, and `afk-review` labels exist, then authorize one ready issue by
-adding `Sandcastle`.
+`Sandcastle`, `afk-review`, and `needs-triage` labels exist, then authorize one
+ready issue by adding `Sandcastle`.
 
 Run `make afk`. Preflight only checks policy and prerequisites; it never creates
-labels, installs skills, or repairs configuration. The repository must already
-provide `ready-for-agent`, `Sandcastle`, `afk-review`, and `needs-triage`. The
-command watches the live two-label queue, consumes an issue's `Sandcastle`
-label before launch, runs the full `work-on` lifecycle on a named isolated
+labels, installs skills, or repairs configuration. The command watches the live
+two-label queue, consumes an issue's `Sandcastle` label before launch, runs the
+full `work-on` lifecycle on a named isolated
 branch/worktree, and labels the resulting pull request `afk-review`. It
-processes one issue at a time and starts each selection from the latest verified default branch. An empty or unchanged
-ineligible queue is polled without invoking an agent or selector model. A first
-termination signal drains an active issue (or exits immediately while idle); a
+processes one issue at a time and starts each selection from the latest verified
+default branch. An empty or unchanged ineligible queue is polled without
+invoking an agent or selector model. A first termination signal drains an
+active issue (or exits immediately while idle); a
 second signal forces termination. A consumed authorization cannot retry unless
 a human adds `Sandcastle` again.
 

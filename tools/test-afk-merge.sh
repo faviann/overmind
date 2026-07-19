@@ -376,6 +376,8 @@ export AFK_TEST_PROTECTION=good
 export AFK_TEST_BODY="$bodies/closes"
 export AFK_TEST_MERGEABILITY="$merge_clean"
 export AFK_TEST_CHECKS=pending
+export AFK_CI_TIMEOUT_SECONDS=99999
+export AFK_CI_POLL_SECONDS=999
 if ! run_merge >"$out" 2>&1; then
   echo "FAIL[ci-timeout]: CI timeout should pause for review" >&2; cat "$out" >&2; exit 1
 fi
@@ -386,6 +388,7 @@ assert_afk_review_present ci-timeout
 assert_no_deletion ci-timeout
 assert_branch_present ci-timeout
 assert_worktree_present ci-timeout
+unset AFK_CI_TIMEOUT_SECONDS AFK_CI_POLL_SECONDS
 
 # --- Discoveries: label for triage, never authorize, block conservatively ---
 setup_repo
@@ -422,12 +425,17 @@ export AFK_TEST_PROTECTION=good
 export AFK_TEST_BODY="$bodies/followup"
 export AFK_TEST_MERGEABILITY="$merge_clean"
 export AFK_TEST_DEPENDENCY_QUERY_FAIL=1
-if ! run_merge >"$out" 2>&1; then
-  echo "FAIL[uncertain-discovery]: uncertain discovery should pause for review" >&2; cat "$out" >&2; exit 1
+if run_merge >"$out" 2>&1; then
+  echo "FAIL[uncertain-discovery]: uncertain discovery must fail loudly" >&2; cat "$out" >&2; exit 1
 fi
 grep -q 'could not classify discovered work' "$out"
+grep -q 'AFK discovery processing failed' "$out"
+! grep -q 'awaits review' "$out"
 assert_pr_open uncertain-discovery
 assert_afk_review_present uncertain-discovery
+assert_no_deletion uncertain-discovery
+assert_branch_present uncertain-discovery
+assert_worktree_present uncertain-discovery
 
 # --- Failed verification: merge lands but is not on the default branch -------
 # Post-merge state reports MERGED with a merge commit that origin/main never

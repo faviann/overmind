@@ -18,16 +18,8 @@ default_branch="${3:?usage: afk-merge.sh <issue-number> <branch> <default-branch
 pr_number="${4:?usage: afk-merge.sh <issue-number> <branch> <default-branch> <pr-number>}"
 
 read -ra required_checks <<<"${AFK_REQUIRED_CHECKS:-test}"
-ci_timeout_seconds="${AFK_CI_TIMEOUT_SECONDS:-3600}"
-ci_poll_seconds="${AFK_CI_POLL_SECONDS:-30}"
-[[ "$ci_timeout_seconds" =~ ^[1-9][0-9]*$ ]] || {
-  printf 'AFK CI timeout must be a positive number of seconds\n' >&2
-  exit 1
-}
-[[ "$ci_poll_seconds" =~ ^[1-9][0-9]*$ ]] || {
-  printf 'AFK CI poll interval must be a positive number of seconds\n' >&2
-  exit 1
-}
+readonly ci_timeout_seconds=3600
+readonly ci_poll_seconds=30
 
 ensure_afk_review() {
   gh pr edit "$pr_number" --add-label afk-review >/dev/null 2>&1
@@ -96,36 +88,21 @@ done
 pr_body="$(gh pr view "$pr_number" --json body --jq .body)" \
   || refuse "could not read pull request #$pr_number body"
 
-# `work-on` records every discovered issue in the durable Follow-ups section.
-# The watcher does not create or authorize that work; it only places each
-# artifact in the maintainer's triage/review inbox. Native blockers are the
-# authoritative blocking classification. If that classification cannot be
-# read, fail closed rather than merging across uncertain work.
-mapfile -t followups < <(
-  awk '
-    /^## Follow-ups$/ { in_followups = 1; next }
-    /^## / { in_followups = 0 }
-    in_followups && match($0, /^- #[0-9]+/) {
-      value = substr($0, RSTART + 3, RLENGTH - 3)
-      print value
-    }
-  ' <<<"$pr_body"
-)
-if [[ "${#followups[@]}" -gt 0 ]]; then
-  for followup in "${followups[@]}"; do
-    gh issue edit "$followup" --add-label needs-triage --add-label afk-review >/dev/null \
-      || refuse "could not mark discovered issue #$followup for triage and review"
-  done
-
-  blocker_numbers="$(gh api "repos/$repo/issues/$issue_number/dependencies/blocked_by" \
-    --paginate --jq '.[].number')" \
-    || refuse "could not classify discovered work against issue #$issue_number dependencies"
-  for followup in "${followups[@]}"; do
-    if grep -Fxq "$followup" <<<"$blocker_numbers"; then
-      refuse "discovered issue #$followup blocks issue #$issue_number"
-    fi
-  done
-fi
+set +e
+discovery_result="$("$(dirname "${BASH_SOURCE[0]}")/afk-followups.sh" \
+  "$issue_number" <<<"$pr_body")"
+discovery_status=$?
+set -e
+case "$discovery_status" in
+  0) ;;
+  2) refuse "$discovery_result" ;;
+  *)
+    ensure_afk_review || true
+    printf 'AFK discovery processing failed for issue #%s; artifacts preserved\n' \
+      "$issue_number" >&2
+    exit 1
+    ;;
+esac
 
 grep -Eq "^Closes #${issue_number}([^0-9].*)?$" <<<"$pr_body" \
   || refuse "missing evidence: pull request does not Close #$issue_number"
@@ -172,6 +149,11 @@ while :; do
   if (( ci_now - ci_started >= ci_timeout_seconds )); then
     refuse "required CI did not complete within $ci_timeout_seconds seconds"
   fi
+  ci_remaining=$((ci_timeout_seconds - (ci_now - ci_started)))
+  ci_sleep_seconds="$ci_poll_seconds"
+  if (( ci_remaining < ci_sleep_seconds )); then
+    ci_sleep_seconds="$ci_remaining"
+  fi
 
   failed="$(jq '[.[] | select(.bucket == "fail")]' <<<"$checks")"
   if [[ "$(jq 'length' <<<"$failed")" -gt 0 ]]; then
@@ -190,7 +172,7 @@ while :; do
         || refuse "could not mechanically retry failed required CI run $run_id"
     done
     ci_retried=1
-    sleep "$ci_poll_seconds"
+    sleep "$ci_sleep_seconds"
     continue
   fi
 
@@ -198,7 +180,7 @@ while :; do
     <<<"$checks" >/dev/null; then
     refuse "required CI ended without passing"
   fi
-  sleep "$ci_poll_seconds"
+  sleep "$ci_sleep_seconds"
 done
 
 # --- Merge eligibility: GitHub mergeability (AC2/AC3) -----------------------

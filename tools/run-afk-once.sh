@@ -215,11 +215,23 @@ while :; do
   # than relying on the earlier potentially long-running recommendation.
   confirmation="$($selector afk)" || fail "intelligent AFK claim validation failed"
   mapfile -t confirmed_urls < <(selected_issue_urls <<<"$confirmation")
-  if [[ "${#confirmed_urls[@]}" -ne 1 || "${confirmed_urls[0]}" != "$selected_url" ]]; then
-    last_idle_frontier="$frontier"
+  if [[ "${#confirmed_urls[@]}" -ne 1 ]]; then
+    # The earlier recommendation proves this frontier was not consistently
+    # ineligible. Retry after a token-free sleep instead of caching a transient
+    # empty/invalid confirmation forever.
+    last_idle_frontier=""
     sleep_until_poll
     continue
   fi
+
+  # The stable-frontier confirmation is authoritative. Two valid policy runs
+  # may rank the same eligible pool differently; requiring identical URLs
+  # would strand both issues without any GitHub state change to wake the loop.
+  selected_url="${confirmed_urls[0]}"
+  selected_repo="$(sed -nE 's|^https://github.com/([^/]+/[^/]+)/issues/[0-9]+$|\1|p' <<<"$selected_url")"
+  [[ "$selected_repo" == "$repo_name" ]] || \
+    fail "claim validation returned an issue from $selected_repo instead of $repo_name"
+  issue_number="${selected_url##*/}"
 
   confirmed_frontier="$frontier"
   if ! sync_default_branch; then

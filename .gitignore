@@ -3,6 +3,10 @@ obj/
 appsettings.Development.json
 .env
 agent-keys.yaml
+node_modules/
+.sandcastle/logs/
+.sandcastle/worktrees/
+.sandcastle/patches/
 
 # Version-matched SDK reference tree provisioned by `make sdk-reference`.
 reference/csharp-sdk/

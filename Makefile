@@ -1,6 +1,9 @@
-.PHONY: db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference smoke-image smoke-compose
+.PHONY: afk db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference smoke-image smoke-compose
 
 DEV_COMPOSE = docker compose --file compose.dev.yaml
+
+afk:
+	@tools/run-afk-once.sh
 
 sdk-reference:
 	@tools/provision-sdk-reference.sh

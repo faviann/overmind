@@ -42,6 +42,22 @@ trusted local agents, and includes the `memctl` operator CLI.
 | [`CONTEXT.md`](CONTEXT.md) | Domain vocabulary |
 | [`docs/articles/`](docs/articles/) | The article series on agentic memory the design draws from |
 
+## Run one authorized issue while AFK
+
+The repository's one-shot AFK tracer is intended to run inside an externally
+managed persistent shell such as tmux or herdr. Setup is deliberately separate:
+authenticate `gh` and `codex`, install the checked-in Node dependencies with
+`npm ci`, ensure the shared `work-on` skills and the `ready-for-agent`,
+`Sandcastle`, and `afk-review` labels exist, then authorize one ready issue by
+adding `Sandcastle`.
+
+Run `make afk`. Preflight only checks policy and prerequisites; it never creates
+labels, installs skills, or repairs configuration. The command selects one
+authorized issue, consumes its `Sandcastle` label before launch, runs the full
+`work-on` lifecycle on a named isolated branch/worktree, and labels the resulting
+pull request `afk-review`. Re-running cannot retry that issue unless a human adds
+`Sandcastle` again.
+
 ## Connect an agent
 
 Agents use MCP; they never receive an administrative database credential.

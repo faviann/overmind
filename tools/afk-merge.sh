@@ -56,6 +56,12 @@ protection="$(gh api "repos/$repo/branches/$default_branch/protection" 2>/dev/nu
 [[ "$(jq -r '.required_status_checks.strict == true' <<<"$protection")" == true ]] \
   || refuse "default branch $default_branch does not require up-to-date branches"
 
+# Fail closed: a set-but-empty AFK_REQUIRED_CHECKS (e.g. " ") would otherwise
+# leave the designated-check loop with nothing to enforce, silently defeating
+# AC1's "every designated CI check" requirement.
+[[ "${#required_checks[@]}" -gt 0 ]] \
+  || refuse "no designated CI checks configured; refusing unattended merge"
+
 mapfile -t protected_checks < <(
   jq -r '((.required_status_checks.checks // []) | map(.context))
          + (.required_status_checks.contexts // [])
@@ -116,7 +122,8 @@ gh pr merge "$pr_number" --merge >/dev/null \
   || abort_unverified "gh pr merge did not complete"
 
 # --- Verify the merge landed and the issue closed (AC5) ---------------------
-git fetch --quiet origin "$default_branch" \
+git fetch --quiet origin \
+  "refs/heads/$default_branch:refs/remotes/origin/$default_branch" \
   || abort_unverified "could not synchronize origin/$default_branch"
 
 merged="$(gh pr view "$pr_number" --json state,mergedAt,mergeCommit)" \
@@ -136,6 +143,10 @@ issue_state="$(gh issue view "$issue_number" --json state --jq .state)" \
   || abort_unverified "issue #$issue_number is not CLOSED (state: $issue_state)"
 
 # --- Cleanup only after verified success (AC6) ------------------------------
+# The merge is verified landed; deletions are best-effort. Never abort here
+# (that would preserve nothing and misrepresent a real merge), but the final
+# report must honestly name anything that could not be removed.
+leftover=()
 worktree_path="$(
   git worktree list --porcelain | awk -v ref="refs/heads/$branch" '
     $1 == "worktree" { path = $2 }
@@ -143,13 +154,25 @@ worktree_path="$(
   '
 )"
 if [[ -n "$worktree_path" ]]; then
-  git worktree remove --force "$worktree_path" \
-    || printf 'warning: could not remove worktree %s\n' "$worktree_path" >&2
+  git worktree remove --force "$worktree_path" >/dev/null 2>&1 \
+    || { printf 'warning: could not remove worktree %s\n' "$worktree_path" >&2
+         leftover+=("worktree $worktree_path"); }
 fi
 git branch -D "$branch" >/dev/null 2>&1 \
-  || printf 'warning: could not delete local branch %s\n' "$branch" >&2
+  || { printf 'warning: could not delete local branch %s\n' "$branch" >&2
+       leftover+=("local branch $branch"); }
 git push origin --delete "$branch" >/dev/null 2>&1 \
-  || printf 'warning: could not delete remote branch %s\n' "$branch" >&2
+  || { printf 'warning: could not delete remote branch %s\n' "$branch" >&2
+       leftover+=("remote branch origin/$branch"); }
 
-printf 'AFK issue #%s merged: pull request #%s landed on %s (%s); branch %s deleted\n' \
-  "$issue_number" "$pr_number" "$default_branch" "$merge_commit" "$branch"
+if [[ "${#leftover[@]}" -eq 0 ]]; then
+  printf 'AFK issue #%s merged: pull request #%s landed on %s (%s); branch %s deleted\n' \
+    "$issue_number" "$pr_number" "$default_branch" "$merge_commit" "$branch"
+else
+  leftover_list="${leftover[0]}"
+  for item in "${leftover[@]:1}"; do
+    leftover_list+="; $item"
+  done
+  printf 'AFK issue #%s merged: pull request #%s landed on %s (%s); manual cleanup needed for: %s\n' \
+    "$issue_number" "$pr_number" "$default_branch" "$merge_commit" "$leftover_list"
+fi

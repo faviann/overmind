@@ -76,6 +76,9 @@ cat >"$adapters/git" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'git %s\n' "$*" >>"$AFK_TEST_EVENTS"
+if [[ "$*" == "push origin --delete afk/issue-42" && "${AFK_TEST_FAIL_PUSH_DELETE:-0}" == 1 ]]; then
+  exit 1
+fi
 exec "$AFK_TEST_REAL_GIT" "$@"
 EOF
 
@@ -89,7 +92,7 @@ case "$*" in
   "api repos/acme/widget/branches/main/protection")
     case "${AFK_TEST_PROTECTION:-good}" in
       404) printf 'Branch not protected (HTTP 404)\n' >&2; exit 1 ;;
-      good) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":1},"required_status_checks":{"strict":true,"checks":[{"context":"test"}]}}' ;;
+      good) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"}]}}' ;;
       no-prs) printf '%s\n' '{"required_pull_request_reviews":null,"required_status_checks":{"strict":true,"checks":[{"context":"test"}]}}' ;;
       not-strict) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":1},"required_status_checks":{"strict":false,"checks":[{"context":"test"}]}}' ;;
       missing-check) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":1},"required_status_checks":{"strict":true,"checks":[{"context":"lint"}]}}' ;;
@@ -98,11 +101,11 @@ case "$*" in
   "pr view 7 --json body --jq .body")
     cat "$AFK_TEST_BODY" ;;
   "pr view 7 --json state,mergeable,mergeStateStatus")
-    printf '%s\n' "$AFK_TEST_MERGE_STATE" ;;
+    printf '%s\n' "$AFK_TEST_MERGEABILITY" ;;
   "pr merge 7 --merge")
     printf 'pr-merged\n' >>"$AFK_TEST_STATE" ;;
   "pr view 7 --json state,mergedAt,mergeCommit")
-    printf '%s\n' "$AFK_TEST_MERGED_STATE" ;;
+    printf '%s\n' "$AFK_TEST_POST_MERGE" ;;
   "issue view 42 --json state --jq .state")
     printf '%s\n' "${AFK_TEST_ISSUE_STATE:-CLOSED}" ;;
   "pr edit 7 --add-label afk-review")
@@ -203,8 +206,8 @@ for scenario in "${prohibited[@]}"; do
   reset_events
   export AFK_TEST_PROTECTION="$protection"
   export AFK_TEST_BODY="$bodies/$body_name"
-  export AFK_TEST_MERGE_STATE="$merge_state"
-  export AFK_TEST_MERGED_STATE='{"state":"MERGED","mergeCommit":{"oid":"unused"}}'
+  export AFK_TEST_MERGEABILITY="$merge_state"
+  export AFK_TEST_POST_MERGE='{"state":"MERGED","mergeCommit":{"oid":"unused"}}'
   export AFK_TEST_ISSUE_STATE=CLOSED
   if ! run_merge >"$out" 2>&1; then
     echo "FAIL[$name]: refusal must exit 0 (tracer awaits review)" >&2
@@ -223,14 +226,60 @@ for scenario in "${prohibited[@]}"; do
   assert_worktree_present "$name"
 done
 
+# --- Prohibited: set-but-empty AFK_REQUIRED_CHECKS must fail closed ----------
+setup_repo
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/closes"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_POST_MERGE='{"state":"MERGED","mergeCommit":{"oid":"unused"}}'
+export AFK_TEST_ISSUE_STATE=CLOSED
+export AFK_REQUIRED_CHECKS=" "
+if ! run_merge >"$out" 2>&1; then
+  echo "FAIL[empty-checks]: refusal must exit 0" >&2; cat "$out" >&2; exit 1
+fi
+grep -q '^merge refused: no designated CI checks configured' "$out" \
+  || { echo "FAIL[empty-checks]: did not refuse on empty check list" >&2; cat "$out" >&2; exit 1; }
+assert_no_merge_call empty-checks
+assert_afk_review_present empty-checks
+assert_no_success_message empty-checks
+assert_no_deletion empty-checks
+assert_branch_present empty-checks
+assert_worktree_present empty-checks
+unset AFK_REQUIRED_CHECKS
+
+# --- Failed verification: merge lands but is not on the default branch -------
+# Post-merge state reports MERGED with a merge commit that origin/main never
+# received (fabricated oid), exercising AC5's "landed on default branch" check.
+setup_repo
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/closes"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_POST_MERGE='{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","mergeCommit":{"oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+export AFK_TEST_ISSUE_STATE=CLOSED
+if run_merge >"$out" 2>&1; then
+  echo "FAIL[not-on-default]: unverified landing must exit nonzero" >&2
+  cat "$out" >&2; exit 1
+fi
+grep -q 'verification failed' "$out" \
+  || { echo "FAIL[not-on-default]: no failure message" >&2; cat "$out" >&2; exit 1; }
+assert_afk_review_present not-on-default
+assert_no_success_message not-on-default
+assert_no_deletion not-on-default
+assert_branch_present not-on-default
+assert_worktree_present not-on-default
+grep -q '^gh pr merge 7 --merge$' "$events" \
+  || { echo "FAIL[not-on-default]: merge should have been attempted" >&2; exit 1; }
+
 # --- Failed verification: merge lands but issue did not close ---------------
 setup_repo
 merge_oid="$(seed_merge)"
 reset_events
 export AFK_TEST_PROTECTION=good
 export AFK_TEST_BODY="$bodies/closes"
-export AFK_TEST_MERGE_STATE="$merge_clean"
-export AFK_TEST_MERGED_STATE="{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\",\"mergeCommit\":{\"oid\":\"$merge_oid\"}}"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_POST_MERGE="{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\",\"mergeCommit\":{\"oid\":\"$merge_oid\"}}"
 export AFK_TEST_ISSUE_STATE=OPEN
 if run_merge >"$out" 2>&1; then
   echo "FAIL[failed-verify]: unverified closure must exit nonzero" >&2
@@ -252,8 +301,8 @@ merge_oid="$(seed_merge)"
 reset_events
 export AFK_TEST_PROTECTION=good
 export AFK_TEST_BODY="$bodies/closes"
-export AFK_TEST_MERGE_STATE="$merge_clean"
-export AFK_TEST_MERGED_STATE="{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\",\"mergeCommit\":{\"oid\":\"$merge_oid\"}}"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_POST_MERGE="{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\",\"mergeCommit\":{\"oid\":\"$merge_oid\"}}"
 export AFK_TEST_ISSUE_STATE=CLOSED
 if ! run_merge >"$out" 2>&1; then
   echo "FAIL[success]: eligible merge must exit 0" >&2
@@ -276,5 +325,33 @@ fi
 if git -C "$repo" ls-remote --exit-code origin afk/issue-42 >/dev/null 2>&1; then
   echo "FAIL[success]: remote branch still present" >&2; exit 1
 fi
+
+# --- Success with an incomplete cleanup: report must stay honest ------------
+# The merge is verified, but the remote-branch deletion fails. The stage must
+# still exit 0 (the merge landed) yet must NOT claim the branch was deleted; it
+# must flag the leftover remote branch for manual cleanup.
+setup_repo
+merge_oid="$(seed_merge)"
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/closes"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_POST_MERGE="{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\",\"mergeCommit\":{\"oid\":\"$merge_oid\"}}"
+export AFK_TEST_ISSUE_STATE=CLOSED
+export AFK_TEST_FAIL_PUSH_DELETE=1
+if ! run_merge >"$out" 2>&1; then
+  echo "FAIL[cleanup-incomplete]: verified merge must still exit 0" >&2
+  cat "$out" >&2; exit 1
+fi
+grep -q '^gh pr merge 7 --merge$' "$events" \
+  || { echo "FAIL[cleanup-incomplete]: merge not requested" >&2; exit 1; }
+grep -q 'manual cleanup needed for: remote branch origin/afk/issue-42' "$out" \
+  || { echo "FAIL[cleanup-incomplete]: leftover not flagged" >&2; cat "$out" >&2; exit 1; }
+if grep -q 'branch afk/issue-42 deleted' "$out"; then
+  echo "FAIL[cleanup-incomplete]: falsely claimed branch deleted" >&2; cat "$out" >&2; exit 1
+fi
+git -C "$repo" ls-remote --exit-code origin afk/issue-42 >/dev/null 2>&1 \
+  || { echo "FAIL[cleanup-incomplete]: remote branch should remain" >&2; exit 1; }
+unset AFK_TEST_FAIL_PUSH_DELETE
 
 printf 'AFK merge black-box scenarios passed\n'

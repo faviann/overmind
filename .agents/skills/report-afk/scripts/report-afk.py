@@ -18,18 +18,18 @@ REPORT_MARKER_PATTERN = re.compile(
 )
 
 
-def gh(*args: str, tolerate_failure: bool = False) -> str:
+def gh(*args: str) -> str:
     result = subprocess.run(
         ["gh", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    if result.returncode and (not tolerate_failure or not result.stdout.strip()):
+    if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise RuntimeError(f"gh {' '.join(args)} failed: {detail}")
     return result.stdout
 
 
-def gh_json(*args: str, tolerate_failure: bool = False) -> Any:
-    output = gh(*args, tolerate_failure=tolerate_failure).strip()
+def gh_json(*args: str) -> Any:
+    output = gh(*args).strip()
     return json.loads(output or "[]")
 
 
@@ -60,15 +60,20 @@ def linked_issue(body: str) -> tuple[str, int] | None:
 
 
 def checks_for(number: int) -> list[dict[str, Any]]:
-    return gh_json(
-        "pr",
-        "checks",
-        str(number),
-        "--required",
-        "--json",
-        "name,state,bucket,link",
-        tolerate_failure=True,
+    args = [
+        "gh", "pr", "checks", str(number), "--required", "--json", "name,state,bucket,link"
+    ]
+    result = subprocess.run(
+        args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    output = result.stdout.strip()
+    diagnostic = result.stderr.strip()
+    if result.returncode and not output:
+        if re.fullmatch(r"no required checks reported on the '[^']+' branch", diagnostic):
+            return []
+        detail = diagnostic or "unknown error"
+        raise RuntimeError(f"{' '.join(args)} failed: {detail}")
+    return json.loads(output or "[]")
 
 
 def format_checks(checks: list[dict[str, Any]]) -> str:

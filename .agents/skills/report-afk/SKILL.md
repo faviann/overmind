@@ -16,7 +16,7 @@ issues as the record of truth; do not read or require local Sandcastle logs.
 3. Present the report verbatim. Do not remove any label while generating or
    displaying it.
 
-The report includes open and merged `afk-review` pull requests, their linked
+Include open and merged `afk-review` pull requests, their linked
 `Closes` or `Progresses` issues, discovered `afk-review` issues, and the open
 `Sandcastle` queue.
 

@@ -30,14 +30,18 @@ ci_poll_seconds="${AFK_CI_POLL_SECONDS:-30}"
 }
 
 ensure_afk_review() {
-  gh pr edit "$pr_number" --add-label afk-review >/dev/null 2>&1 || true
+  gh pr edit "$pr_number" --add-label afk-review >/dev/null 2>&1
 }
 
 # Non-merge outcome that mirrors the tracer's "awaits review" end state: keep
 # the pull request open, guarantee afk-review, explain the reason, never claim a
 # merge. The tracer run as a whole still succeeded, so exit 0.
 refuse() {
-  ensure_afk_review
+  if ! ensure_afk_review; then
+    printf 'AFK pause failed: could not ensure afk-review on pull request #%s; artifacts preserved\n' \
+      "$pr_number" >&2
+    exit 1
+  fi
   printf 'merge refused: %s\n' "$1" >&2
   printf 'AFK issue #%s completed: pull request #%s awaits review\n' \
     "$issue_number" "$pr_number"
@@ -47,7 +51,9 @@ refuse() {
 # A merge was attempted but landing or closure could not be verified. Preserve
 # every artifact, keep afk-review, and fail loudly without claiming success.
 abort_unverified() {
-  ensure_afk_review
+  ensure_afk_review || \
+    printf 'AFK merge verification warning: could not ensure afk-review on pull request #%s\n' \
+      "$pr_number" >&2
   printf 'AFK merge verification failed: %s; artifacts preserved for review\n' \
     "$1" >&2
   exit 1

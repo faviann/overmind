@@ -145,6 +145,7 @@ case "$*" in
   "issue view 42 --json state --jq .state")
     printf '%s\n' "${AFK_TEST_ISSUE_STATE:-CLOSED}" ;;
   "pr edit 7 --add-label afk-review")
+    [[ "${AFK_TEST_FAIL_REVIEW_LABEL:-0}" != 1 ]] || exit 1
     printf 'afk-review-added\n' >>"$AFK_TEST_STATE" ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 90 ;;
 esac
@@ -213,6 +214,7 @@ reset_events() {
   export AFK_TEST_CHECKS=pass
   export AFK_TEST_BLOCKERS=''
   unset AFK_TEST_DEPENDENCY_QUERY_FAIL
+  unset AFK_TEST_FAIL_REVIEW_LABEL
 }
 
 assert_no_merge_call() {
@@ -350,6 +352,23 @@ assert_afk_review_present ci-repeat
 assert_no_deletion ci-repeat
 assert_branch_present ci-repeat
 assert_worktree_present ci-repeat
+
+setup_repo
+reset_events
+export AFK_TEST_PROTECTION=good
+export AFK_TEST_BODY="$bodies/closes"
+export AFK_TEST_MERGEABILITY="$merge_clean"
+export AFK_TEST_CHECKS=repeat-fail
+export AFK_TEST_FAIL_REVIEW_LABEL=1
+if run_merge >"$out" 2>&1; then
+  echo "FAIL[ci-repeat-label]: missing afk-review must fail loudly" >&2; cat "$out" >&2; exit 1
+fi
+grep -q 'could not ensure afk-review' "$out"
+! grep -q 'awaits review' "$out"
+assert_no_merge_call ci-repeat-label
+assert_no_deletion ci-repeat-label
+assert_branch_present ci-repeat-label
+assert_worktree_present ci-repeat-label
 
 setup_repo
 reset_events

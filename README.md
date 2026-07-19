@@ -58,6 +58,32 @@ authorized issue, consumes its `Sandcastle` label before launch, runs the full
 pull request `afk-review`. Re-running cannot retry that issue unless a human adds
 `Sandcastle` again.
 
+After tagging `afk-review`, the tracer hands the pull request to a guarded merge
+stage. It merges unattended only when every gate holds, and otherwise leaves the
+pull request open for review:
+
+- Merge preflight requires the default branch to be protected: it must require
+  pull requests, require branches to be up to date before merging (strict
+  status checks), and require every designated CI check. Designated checks come
+  from `AFK_REQUIRED_CHECKS` (space-separated, default `test`). An unprotected
+  or under-protected branch refuses the merge.
+- Merge eligibility requires durable evidence that the work fully closed the
+  issue: the pull request body must `Closes #<issue>` (never `Progresses` it)
+  and its workflow-telemetry `Final workflow outcome` row must be exactly
+  `Closes`. GitHub must also report the pull request `OPEN`, `MERGEABLE`, and
+  `CLEAN`. A `Progresses` pull request, an inferred or unverified outcome,
+  missing telemetry, a conflict, or a failing/pending check refuses the merge.
+  If protection requires one or more approving reviews, the pull request stays
+  `BLOCKED` and the tracer correctly refuses; unattended merge only applies when
+  protection requires pull requests without a pending human approval.
+- Eligible work merges with a merge commit (`gh pr merge --merge`), preserving
+  the issue and remediation commits.
+- Before claiming success the stage verifies the merge commit landed on the
+  default branch and the linked issue closed. Only then does it delete the
+  temporary worktree and the local and remote `afk/issue-<n>` branches.
+- Any refusal, failed merge, or failed verification preserves all artifacts,
+  keeps `afk-review`, prints the reason, and never claims a merge happened.
+
 ## Connect an agent
 
 Agents use MCP; they never receive an administrative database credential.

@@ -106,6 +106,12 @@ case "$*" in
   "repo view --json nameWithOwner --jq .nameWithOwner") printf 'acme/widget\n' ;;
   "repo view --json defaultBranchRef --jq .defaultBranchRef.name") printf 'main\n' ;;
   "issue edit 42 --remove-label Sandcastle") printf 'claimed\n' >>"$AFK_TEST_STATE" ;;
+  "api repos/acme/widget/branches/main/protection")
+    # The fixture default branch is unprotected, so the guarded merge stage
+    # must refuse and leave the pull request awaiting review.
+    printf 'Branch not protected\n' >&2
+    exit 1
+    ;;
   "pr list --head afk/issue-42 --state open --json number --jq .[].number")
     grep -qx pr-created "$AFK_TEST_STATE"
     printf '7\n'

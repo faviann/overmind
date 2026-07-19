@@ -23,7 +23,11 @@ mapfile -t pull_requests < <(
 if [[ "$agent_status" -ne 0 ]]; then
   if [[ "${#pull_requests[@]}" -eq 1 ]]; then
     pr_number="${pull_requests[0]}"
-    gh pr edit "$pr_number" --add-label afk-review >/dev/null || true
+    if ! gh pr edit "$pr_number" --add-label afk-review >/dev/null; then
+      printf 'AFK issue #%s agent stopped (status %s): could not add afk-review to pull request #%s; branch/worktree artifacts preserved\n' \
+        "$issue_number" "$agent_status" "$pr_number" >&2
+      exit "$agent_status"
+    fi
     printf 'AFK issue #%s agent stopped (status %s): pull request #%s and available worktree artifacts preserved for review\n' \
       "$issue_number" "$agent_status" "$pr_number" >&2
   else

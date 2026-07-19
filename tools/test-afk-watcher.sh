@@ -53,7 +53,7 @@ case "$AFK_TEST_SCENARIO" in
   paused-only|ci-timeout-only|uncertain-discovery-only)
     grep -qx claim-42 "$AFK_TEST_STATE" || printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     ;;
-  idle-artifact|ci-retry-pass|nonblocking-discovery) printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
+  idle-artifact|idle-artifact-label-fail|ci-retry-pass|nonblocking-discovery) printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   live-add|drain-before-claim) printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   drain|force)
     if grep -qx claim-42 "$AFK_TEST_STATE"; then
@@ -102,7 +102,7 @@ trap 'rm -f "$AFK_TEST_ACTIVE"' EXIT
 printf 'agent-base %s %s\n' "$issue" "$(git rev-parse origin/main)" >>"$AFK_TEST_EVENTS"
 printf 'agent-pgid %s\n' "$(ps -o pgid= -p $$ | tr -d ' ')" >>"$AFK_TEST_EVENTS"
 printf 'agent %s\n' "$issue" >>"$AFK_TEST_EVENTS"
-if [[ "$AFK_TEST_SCENARIO" == idle-artifact ]]; then
+if [[ "$AFK_TEST_SCENARIO" == idle-artifact || "$AFK_TEST_SCENARIO" == idle-artifact-label-fail ]]; then
   git -C "$AFK_TEST_REPO" worktree add --quiet -b "afk/issue-$issue" \
     "$AFK_TEST_ARTIFACT_WORKTREE" origin/main
   touch "$AFK_TEST_ARTIFACT_WORKTREE/available-artifact"
@@ -140,7 +140,7 @@ case "$AFK_TEST_SCENARIO" in
     if [[ "$count" -ge 3 ]]; then kill -TERM "$PPID"; fi ;;
   claim-race|eligibility-race|default-race|drain-before-claim)
     kill -TERM "$PPID" ;;
-  chain|paused-lane|paused-only|idle-artifact|ci-retry-pass|ci-repeat-lane|ci-timeout-only|nonblocking-discovery|blocking-discovery-lane|uncertain-discovery-only)
+  chain|paused-lane|paused-only|idle-artifact|idle-artifact-label-fail|ci-retry-pass|ci-repeat-lane|ci-timeout-only|nonblocking-discovery|blocking-discovery-lane|uncertain-discovery-only)
     kill -TERM "$PPID" ;;
   idle-stop) /usr/bin/sleep 30 ;;
   *) /usr/bin/sleep 0.02 ;;
@@ -210,7 +210,8 @@ case "$*" in
     fi ;;
   pr\ list\ --head\ afk/issue-*\ --state\ open\ --json\ number\ --jq\ .[].number)
     branch="${4}"; issue="${branch##*-}"; printf '%s\n' "$((issue + 100))" ;;
-  pr\ edit\ *\ --add-label\ afk-review) ;;
+  pr\ edit\ *\ --add-label\ afk-review)
+    [[ "$AFK_TEST_SCENARIO" != idle-artifact-label-fail ]] ;;
   issue\ edit\ 77\ --add-label\ needs-triage\ --add-label\ afk-review) ;;
   api\ repos/acme/widget/branches/main/protection)
     if [[ "$AFK_TEST_SCENARIO" == chain || "$AFK_TEST_SCENARIO" == paused-lane || "$AFK_TEST_SCENARIO" == paused-only ||
@@ -383,6 +384,20 @@ grep -q '^gh pr edit 142 --add-label afk-review$' "$events"
 git -C "$repo" show-ref --verify --quiet refs/heads/afk/issue-42
 [[ -e "$fixture/artifact-worktree/available-artifact" ]]
 ! grep -q '^gh pr merge 142 --merge$' "$events"
+
+run_foreground idle-artifact-label-fail
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^agent-idle-timeout 42$' "$events")" == 1 ]]
+git -C "$repo" show-ref --verify --quiet refs/heads/afk/issue-42
+[[ -e "$fixture/artifact-worktree/available-artifact" ]]
+grep -q 'could not add afk-review to pull request #142' "$fixture/idle-artifact-label-fail.out"
+grep -q 'failed terminal outcome (status 124)' "$fixture/idle-artifact-label-fail.out"
+! grep -q 'preserved for review' "$fixture/idle-artifact-label-fail.out"
+! grep -q 'awaits review' "$fixture/idle-artifact-label-fail.out"
+! grep -q '^gh pr merge 142 --merge$' "$events"
+! grep -q '^gh run rerun ' "$events"
+! grep -q -- '--add-label Sandcastle' "$events"
 
 run_foreground ci-retry-pass
 [[ "$(grep -c '^agent 42$' "$events")" == 1 ]]

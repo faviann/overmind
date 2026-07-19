@@ -42,9 +42,9 @@ trusted local agents, and includes the `memctl` operator CLI.
 | [`CONTEXT.md`](CONTEXT.md) | Domain vocabulary |
 | [`docs/articles/`](docs/articles/) | The article series on agentic memory the design draws from |
 
-## Run one authorized issue while AFK
+## Watch the authorized issue queue while AFK
 
-The repository's one-shot AFK tracer is intended to run inside an externally
+The repository's AFK watcher is intended to run inside an externally
 managed persistent shell such as tmux or herdr. Setup is deliberately separate:
 authenticate `gh` and `codex`, install the checked-in Node dependencies with
 `npm ci`, ensure the shared `work-on` skills and the `ready-for-agent`,
@@ -52,13 +52,17 @@ authenticate `gh` and `codex`, install the checked-in Node dependencies with
 adding `Sandcastle`.
 
 Run `make afk`. Preflight only checks policy and prerequisites; it never creates
-labels, installs skills, or repairs configuration. The command selects one
-authorized issue, consumes its `Sandcastle` label before launch, runs the full
-`work-on` lifecycle on a named isolated branch/worktree, and labels the resulting
-pull request `afk-review`. Re-running cannot retry that issue unless a human adds
-`Sandcastle` again.
+labels, installs skills, or repairs configuration. The command watches the live
+two-label queue, consumes an issue's `Sandcastle` label before launch, runs the
+full `work-on` lifecycle on a named isolated branch/worktree, and labels the
+resulting pull request `afk-review`. It processes one issue at a time and starts
+each selection from the latest verified default branch. An empty or unchanged
+ineligible queue is polled without invoking an agent or selector model. A first
+termination signal drains an active issue (or exits immediately while idle); a
+second signal forces termination. A consumed authorization cannot retry unless
+a human adds `Sandcastle` again.
 
-After tagging `afk-review`, the tracer hands the pull request to a guarded merge
+After tagging `afk-review`, the watcher hands the pull request to a guarded merge
 stage. It merges unattended only when every gate holds, and otherwise leaves the
 pull request open for review:
 

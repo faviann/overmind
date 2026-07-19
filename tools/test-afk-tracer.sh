@@ -83,6 +83,13 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"<
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
 EOF
 
+cat >"$adapters/sleep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sleep %s\n' "$*" >>"$AFK_TEST_EVENTS"
+kill -TERM "$PPID"
+EOF
+
 cat >"$adapters/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -105,7 +112,22 @@ case "$*" in
     ;;
   "repo view --json nameWithOwner --jq .nameWithOwner") printf 'acme/widget\n' ;;
   "repo view --json defaultBranchRef --jq .defaultBranchRef.name") printf 'main\n' ;;
-  "issue edit 42 --remove-label Sandcastle") printf 'claimed\n' >>"$AFK_TEST_STATE" ;;
+  "issue list --state open --label ready-for-agent --label Sandcastle --limit 1000 --json number,updatedAt --jq sort_by(.number)")
+    if grep -qx claimed "$AFK_TEST_STATE"; then
+      printf '[]\n'
+    else
+      printf '[{"number":42,"updatedAt":"2026-01-01T00:00:00Z"}]\n'
+    fi
+    ;;
+  "issue list --state all --limit 1000 --json number,state,updatedAt --jq sort_by(.number)")
+    printf '[{"number":42,"state":"OPEN","updatedAt":"2026-01-01T00:00:00Z"}]\n' ;;
+  "api --method DELETE repos/acme/widget/issues/42/labels/Sandcastle") printf 'claimed\n' >>"$AFK_TEST_STATE" ;;
+  "issue view 42 --json state,labels")
+    if grep -qx claimed "$AFK_TEST_STATE"; then
+      printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"}]}\n'
+    else
+      printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"},{"name":"Sandcastle"}]}\n'
+    fi ;;
   "api repos/acme/widget/branches/main/protection")
     # The fixture default branch is unprotected, so the guarded merge stage
     # must refuse and leave the pull request awaiting review.
@@ -121,7 +143,7 @@ case "$*" in
 esac
 EOF
 
-chmod +x "$adapters/gh" "$adapters/codex" "$adapters/git" \
+chmod +x "$adapters/gh" "$adapters/codex" "$adapters/git" "$adapters/sleep" \
   "$skills/work-on/scripts/select-issue-codex.sh"
 
 run_command() {
@@ -160,7 +182,7 @@ for preflight_case in "${preflight_cases[@]}"; do
     exit 1
   fi
   grep -Fq "$diagnostic" "$fixture/$case_name.out"
-  if grep -Eq '^(selector |gh issue edit|gh label (create|edit)|codex-agent )' "$events"; then
+  if grep -Eq '^(selector |gh api --method DELETE|gh label (create|edit)|codex-agent )' "$events"; then
     echo "policy repair or issue work began after $case_name failure" >&2
     exit 1
   fi
@@ -191,7 +213,7 @@ if run_command 1 1 >"$fixture/fetch.out" 2>&1; then
 fi
 grep -q 'could not synchronize origin/main; no issue was claimed' "$fixture/fetch.out"
 grep -q '^git-fetch-failed ' "$events"
-if grep -Eq '^(selector |gh issue edit|codex-agent )' "$events"; then
+if grep -Eq '^(selector |gh api --method DELETE|codex-agent )' "$events"; then
   echo "issue work began after failed default-branch synchronization" >&2
   exit 1
 fi
@@ -214,7 +236,12 @@ fi
 : >"$events"
 run_command 1
 
-claim_line="$(grep -n '^gh issue edit 42 --remove-label Sandcastle$' "$events" | cut -d: -f1)"
+# A watcher must observe the authorized queue before asking the intelligent
+# selector to spend model tokens, and it must return to that live query after
+# an issue reaches its terminal outcome.
+[[ "$(grep -c '^gh issue list --state open --label ready-for-agent --label Sandcastle ' "$events")" -ge 2 ]]
+
+claim_line="$(grep -n '^gh api --method DELETE repos/acme/widget/issues/42/labels/Sandcastle$' "$events" | cut -d: -f1)"
 launch_line="$(grep -n '^codex-agent ' "$events" | cut -d: -f1)"
 [[ -n "$claim_line" && -n "$launch_line" && "$claim_line" -lt "$launch_line" ]]
 grep -Eq '^codex-agent cwd=.*/\.sandcastle/worktrees/.* branch=afk/issue-42 args=exec --json --dangerously-bypass-approvals-and-sandbox -m gpt-5\.6-sol -c model_reasoning_effort="medium" prompt=\$work-on #42$' "$events"
@@ -224,12 +251,11 @@ grep -qx pr-created "$state"
 grep -q '^gh pr edit 7 --add-label afk-review$' "$events"
 
 launches_before="$(grep -c '^codex-agent ' "$events")"
-if run_command 1 >"$fixture/duplicate.out" 2>&1; then
-  echo "expected the consumed authorization to prevent a second run" >&2
-  exit 1
-fi
+run_command 1 >"$fixture/duplicate.out" 2>&1
 launches_after="$(grep -c '^codex-agent ' "$events")"
 [[ "$launches_before" == 1 && "$launches_after" == 1 ]]
-grep -q 'selector did not return exactly one issue' "$fixture/duplicate.out"
+grep -q 'AFK watcher stopped while idle' "$fixture/duplicate.out"
 
 printf 'AFK tracer black-box scenario passed\n'
+
+"$(dirname "$command_under_test")/test-afk-watcher.sh"

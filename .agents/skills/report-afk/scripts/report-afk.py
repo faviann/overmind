@@ -50,13 +50,16 @@ def section(body: str, names: list[str]) -> str:
     return "Not recorded"
 
 
-def linked_issue(body: str) -> tuple[str, int] | None:
+def linked_issue(body: str) -> tuple[str, str] | None:
     match = re.search(
         r"(?im)^\s*(Closes|Progresses)\s+"
-        r"(?:(?:https://github\.com/[^/\s]+/[^/\s]+/issues/)|#)(\d+)\b",
+        r"(https://github\.com/[^/\s]+/[^/\s]+/issues/\d+|#\d+)\b",
         body,
     )
-    return (match.group(1).title(), int(match.group(2))) if match else None
+    if not match:
+        return None
+    target = match.group(2)
+    return (match.group(1).title(), target[1:] if target.startswith("#") else target)
 
 
 def checks_for(number: int) -> list[dict[str, Any]]:

@@ -60,13 +60,27 @@ active_pid=""
 sleep_pid=""
 issue_active=0
 
+force_active_issue() {
+  local attempt
+  [[ -n "$active_pid" ]] || return 0
+
+  kill -TERM -- "-$active_pid" 2>/dev/null || true
+  for attempt in {1..20}; do
+    kill -0 -- "-$active_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 -- "-$active_pid" 2>/dev/null; then
+    kill -KILL -- "-$active_pid" 2>/dev/null || true
+  fi
+  wait "$active_pid" 2>/dev/null || true
+  active_pid=""
+}
+
 stop_watcher() {
   stop_count=$((stop_count + 1))
   if [[ "$stop_count" -ge 2 ]]; then
     printf 'AFK watcher forcing termination\n' >&2
-    if [[ -n "$active_pid" ]]; then
-      kill -TERM -- "-$active_pid" 2>/dev/null || true
-    fi
+    force_active_issue
     exit 130
   fi
 
@@ -102,13 +116,37 @@ wait_for_active_issue() {
   done
 }
 
+sync_default_branch() {
+  git fetch --quiet origin \
+    "refs/heads/$default_branch:refs/remotes/origin/$default_branch"
+}
+
+observe_frontier() {
+  authorized_queue="$(
+    gh issue list --state open \
+      --label ready-for-agent --label Sandcastle \
+      --limit 1000 --json number,updatedAt --jq 'sort_by(.number)'
+  )" || return 1
+
+  if [[ "$(jq 'length' <<<"$authorized_queue")" -eq 0 ]]; then
+    issue_frontier=""
+  else
+    issue_frontier="$(
+      gh issue list --state all --limit 1000 \
+        --json number,state,updatedAt --jq 'sort_by(.number)'
+    )" || return 1
+  fi
+  default_oid="$(git rev-parse "origin/$default_branch")" || return 1
+  frontier="$default_oid"$'\n'"$authorized_queue"$'\n'"$issue_frontier"
+}
+
 last_idle_frontier=""
 printf 'AFK watcher started for %s; polling every %s seconds\n' "$repo_name" "$poll_seconds"
 
 while :; do
   [[ "$draining" == 0 ]] || exit 0
 
-  git fetch --quiet origin "refs/heads/$default_branch:refs/remotes/origin/$default_branch" || {
+  sync_default_branch || {
     printf 'AFK watcher could not synchronize origin/%s; waiting without claiming work\n' \
       "$default_branch" >&2
     sleep_until_poll
@@ -117,11 +155,7 @@ while :; do
 
   # This cheap live query is the authorization boundary. The selector/model is
   # never invoked while the two-label queue is empty.
-  authorized_queue="$(
-    gh issue list --state open \
-      --label ready-for-agent --label Sandcastle \
-      --limit 1000 --json number,updatedAt --jq 'sort_by(.number)'
-  )" || fail "could not read the live authorized queue"
+  observe_frontier || fail "could not read the live authorized queue and dependency frontier"
 
   if [[ "$(jq 'length' <<<"$authorized_queue")" -eq 0 ]]; then
     last_idle_frontier=""
@@ -133,13 +167,6 @@ while :; do
   # changing an authorized issue's labels. Include them in the cheap frontier
   # observation so a newly closed blocker wakes selection, while an unchanged
   # blocked queue remains token-free.
-  issue_frontier="$(
-    gh issue list --state all --limit 1000 \
-      --json number,state,updatedAt --jq 'sort_by(.number)'
-  )" || fail "could not read the live dependency frontier"
-  default_oid="$(git rev-parse "origin/$default_branch")"
-  frontier="$default_oid"$'\n'"$authorized_queue"$'\n'"$issue_frontier"
-
   if [[ "$frontier" == "$last_idle_frontier" ]]; then
     sleep_until_poll
     continue
@@ -162,14 +189,90 @@ while :; do
   [[ "$selected_repo" == "$repo_name" ]] || \
     fail "selector returned an issue from $selected_repo instead of $repo_name"
   issue_number="${selected_url##*/}"
+
+  # Selection may take long enough for authorization, dependencies, issue
+  # metadata, or the default branch to change. Re-read every input after the
+  # selector returns. Any change invalidates its reasoning and restarts the
+  # selection cycle without consuming authorization.
+  selected_frontier="$frontier"
+  if ! sync_default_branch; then
+    printf 'AFK watcher could not refresh origin/%s before claim; selection discarded\n' \
+      "$default_branch" >&2
+    last_idle_frontier=""
+    sleep_until_poll
+    continue
+  fi
+  observe_frontier || fail "could not revalidate the live queue before claim"
+  if [[ "$frontier" != "$selected_frontier" ]]; then
+    last_idle_frontier=""
+    continue
+  fi
+
+  # Re-run the complete intelligent policy at the stable frontier. This is the
+  # final staleness/blocker/umbrella/conflict decision for the claim, rather
+  # than relying on the earlier potentially long-running recommendation.
+  confirmation="$($selector afk)" || fail "intelligent AFK claim validation failed"
+  mapfile -t confirmed_urls < <(
+    sed -nE 's|^Selected issue: (https://github.com/[^/]+/[^/]+/issues/[0-9]+)$|\1|p' \
+      <<<"$confirmation"
+  )
+  if [[ "${#confirmed_urls[@]}" -ne 1 || "${confirmed_urls[0]}" != "$selected_url" ]]; then
+    last_idle_frontier="$frontier"
+    sleep_until_poll
+    continue
+  fi
+
+  confirmed_frontier="$frontier"
+  if ! sync_default_branch; then
+    printf 'AFK watcher could not refresh origin/%s after claim validation; selection discarded\n' \
+      "$default_branch" >&2
+    last_idle_frontier=""
+    sleep_until_poll
+    continue
+  fi
+  observe_frontier || fail "could not perform final live validation before claim"
+  if [[ "$frontier" != "$confirmed_frontier" ]]; then
+    last_idle_frontier=""
+    continue
+  fi
+
   jq -e --argjson issue "$issue_number" 'any(.number == $issue)' \
     <<<"$authorized_queue" >/dev/null || \
     fail "selector returned issue #$issue_number outside the live authorized queue"
 
   branch="afk/issue-$issue_number"
   issue_active=1
-  gh issue edit "$issue_number" --remove-label Sandcastle >/dev/null || \
+  # Removing Sandcastle is the single claim mutation. The exclusive watcher
+  # lock plus the immediately preceding live validation prevents stale local
+  # selections and duplicate attempts.
+  gh api --method DELETE \
+    "repos/$repo_name/issues/$issue_number/labels/Sandcastle" >/dev/null || \
     fail "could not claim issue #$issue_number by removing Sandcastle"
+
+  claim_state="$(gh issue view "$issue_number" --json state,labels)" || \
+    fail "could not verify claimed issue #$issue_number"
+  if [[ "$(jq -r '.state' <<<"$claim_state")" != OPEN ]] || \
+     ! jq -e '(.labels | map(.name) | index("ready-for-agent")) != null' \
+       <<<"$claim_state" >/dev/null || \
+     jq -e '(.labels | map(.name) | index("Sandcastle")) != null' \
+       <<<"$claim_state" >/dev/null; then
+    printf 'AFK issue #%s changed during claim; authorization remains consumed and work will not launch\n' \
+      "$issue_number" >&2
+    issue_active=0
+    last_idle_frontier=""
+    continue
+  fi
+
+  # The default may advance independently even after a valid claim. Refresh
+  # once more so Sandcastle always creates the worktree from the latest
+  # verified origin/default state.
+  if ! sync_default_branch; then
+    printf 'AFK issue #%s could not refresh origin/%s after claim; authorization remains consumed\n' \
+      "$issue_number" "$default_branch" >&2
+    issue_active=0
+    last_idle_frontier=""
+    continue
+  fi
 
   # A separate process group gives the second stop signal a deterministic
   # force boundary across Sandcastle and its agent descendants.

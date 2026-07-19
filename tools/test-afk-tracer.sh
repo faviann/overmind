@@ -121,7 +121,9 @@ case "$*" in
     ;;
   "issue list --state all --limit 1000 --json number,state,updatedAt --jq sort_by(.number)")
     printf '[{"number":42,"state":"OPEN","updatedAt":"2026-01-01T00:00:00Z"}]\n' ;;
-  "issue edit 42 --remove-label Sandcastle") printf 'claimed\n' >>"$AFK_TEST_STATE" ;;
+  "api --method DELETE repos/acme/widget/issues/42/labels/Sandcastle") printf 'claimed\n' >>"$AFK_TEST_STATE" ;;
+  "issue view 42 --json state,labels")
+    printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"}]}\n' ;;
   "api repos/acme/widget/branches/main/protection")
     # The fixture default branch is unprotected, so the guarded merge stage
     # must refuse and leave the pull request awaiting review.
@@ -176,7 +178,7 @@ for preflight_case in "${preflight_cases[@]}"; do
     exit 1
   fi
   grep -Fq "$diagnostic" "$fixture/$case_name.out"
-  if grep -Eq '^(selector |gh issue edit|gh label (create|edit)|codex-agent )' "$events"; then
+  if grep -Eq '^(selector |gh api --method DELETE|gh label (create|edit)|codex-agent )' "$events"; then
     echo "policy repair or issue work began after $case_name failure" >&2
     exit 1
   fi
@@ -207,7 +209,7 @@ if run_command 1 1 >"$fixture/fetch.out" 2>&1; then
 fi
 grep -q 'could not synchronize origin/main; no issue was claimed' "$fixture/fetch.out"
 grep -q '^git-fetch-failed ' "$events"
-if grep -Eq '^(selector |gh issue edit|codex-agent )' "$events"; then
+if grep -Eq '^(selector |gh api --method DELETE|codex-agent )' "$events"; then
   echo "issue work began after failed default-branch synchronization" >&2
   exit 1
 fi
@@ -235,7 +237,7 @@ run_command 1
 # an issue reaches its terminal outcome.
 [[ "$(grep -c '^gh issue list --state open --label ready-for-agent --label Sandcastle ' "$events")" -ge 2 ]]
 
-claim_line="$(grep -n '^gh issue edit 42 --remove-label Sandcastle$' "$events" | cut -d: -f1)"
+claim_line="$(grep -n '^gh api --method DELETE repos/acme/widget/issues/42/labels/Sandcastle$' "$events" | cut -d: -f1)"
 launch_line="$(grep -n '^codex-agent ' "$events" | cut -d: -f1)"
 [[ -n "$claim_line" && -n "$launch_line" && "$claim_line" -lt "$launch_line" ]]
 grep -Eq '^codex-agent cwd=.*/\.sandcastle/worktrees/.* branch=afk/issue-42 args=exec --json --dangerously-bypass-approvals-and-sandbox -m gpt-5\.6-sol -c model_reasoning_effort="medium" prompt=\$work-on #42$' "$events"

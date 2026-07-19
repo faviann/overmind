@@ -28,14 +28,6 @@ for skill in work-on implement tdd code-review select-issue; do
   touch "$skills/$skill/SKILL.md"
 done
 
-git init --bare --quiet "$remote"
-git -C "$repo" init --quiet --initial-branch=main
-git -C "$repo" config user.email watcher-test@example.invalid
-git -C "$repo" config user.name "Watcher test"
-git -C "$repo" commit --quiet --allow-empty -m base
-git -C "$repo" remote add origin "$remote"
-git -C "$repo" push --quiet -u origin main
-
 cat >"$adapters/git" <<'EOF'
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >>"$AFK_TEST_EVENTS"
@@ -72,6 +64,24 @@ case "$AFK_TEST_SCENARIO" in
     fi
     ;;
   token-wait) ;;
+  claim-race)
+    printf 'authorization-removed\n' >>"$AFK_TEST_STATE"
+    printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
+    ;;
+  eligibility-race)
+    if ! grep -qx blocker-added "$AFK_TEST_STATE"; then
+      printf 'blocker-added\n' >>"$AFK_TEST_STATE"
+      printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
+    fi
+    ;;
+  default-race)
+    if ! grep -qx default-advanced "$AFK_TEST_STATE"; then
+      "$AFK_TEST_REAL_GIT" -C "$AFK_TEST_REPO" commit --quiet --allow-empty -m 'Advance default during selection'
+      "$AFK_TEST_REAL_GIT" -C "$AFK_TEST_REPO" push --quiet origin main
+      printf 'default-advanced\n' >>"$AFK_TEST_STATE"
+    fi
+    printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
+    ;;
 esac
 EOF
 
@@ -85,9 +95,11 @@ if [[ -e "$AFK_TEST_ACTIVE" ]]; then
 fi
 touch "$AFK_TEST_ACTIVE"
 trap 'rm -f "$AFK_TEST_ACTIVE"' EXIT
-printf 'agent %s\n' "$issue" >>"$AFK_TEST_EVENTS"
 printf 'agent-base %s %s\n' "$issue" "$(git rev-parse origin/main)" >>"$AFK_TEST_EVENTS"
+printf 'agent-pgid %s\n' "$(ps -o pgid= -p $$ | tr -d ' ')" >>"$AFK_TEST_EVENTS"
+printf 'agent %s\n' "$issue" >>"$AFK_TEST_EVENTS"
 if [[ "$AFK_TEST_SCENARIO" == drain || "$AFK_TEST_SCENARIO" == force ]]; then
+  [[ "$AFK_TEST_SCENARIO" != force ]] || trap '' TERM
   while [[ ! -e "$AFK_TEST_RELEASE" ]]; do /usr/bin/sleep 0.02; done
 else
   /usr/bin/sleep 0.02
@@ -106,6 +118,8 @@ case "$AFK_TEST_SCENARIO" in
     if [[ "$count" == 1 ]]; then printf 'blocker-closed\n' >>"$AFK_TEST_STATE"; else kill -TERM "$PPID"; fi ;;
   token-wait)
     if [[ "$count" -ge 3 ]]; then kill -TERM "$PPID"; fi ;;
+  claim-race|eligibility-race|default-race)
+    kill -TERM "$PPID" ;;
   chain) kill -TERM "$PPID" ;;
   idle-stop) /usr/bin/sleep 30 ;;
   *) /usr/bin/sleep 0.02 ;;
@@ -132,6 +146,9 @@ case "$*" in
         elif grep -qx authorized "$AFK_TEST_STATE"; then printf '[{"number":42,"updatedAt":"a"}]\n'
         else printf '[]\n'; fi ;;
       idle-stop) printf '[]\n' ;;
+      claim-race)
+        if grep -qx authorization-removed "$AFK_TEST_STATE"; then printf '[]\n'
+        else printf '[{"number":42,"updatedAt":"a"}]\n'; fi ;;
       drain|force)
         if grep -qx claim-42 "$AFK_TEST_STATE"; then printf '[{"number":43,"updatedAt":"b"}]\n'
         else printf '[{"number":42,"updatedAt":"a"}]\n'; fi ;;
@@ -140,15 +157,19 @@ case "$*" in
         else printf '[{"number":42,"updatedAt":"a"}]\n'; fi ;;
     esac ;;
   "issue list --state all --limit 1000 --json number,state,updatedAt --jq sort_by(.number)")
-    if grep -qx blocker-closed "$AFK_TEST_STATE"; then
+    if grep -qx blocker-added "$AFK_TEST_STATE"; then
+      printf '[{"number":1,"state":"OPEN","updatedAt":"b"},{"number":42,"state":"OPEN","updatedAt":"b"}]\n'
+    elif grep -qx blocker-closed "$AFK_TEST_STATE"; then
       printf '[{"number":1,"state":"CLOSED","updatedAt":"b"},{"number":42,"state":"OPEN","updatedAt":"a"}]\n'
     else
       printf '[{"number":1,"state":"OPEN","updatedAt":"a"},{"number":42,"state":"OPEN","updatedAt":"a"}]\n'
     fi ;;
-  issue\ edit\ *\ --remove-label\ Sandcastle)
-    issue="${3}"
+  api\ --method\ DELETE\ repos/acme/widget/issues/*/labels/Sandcastle)
+    issue_path="${4}"; issue="${issue_path#repos/acme/widget/issues/}"; issue="${issue%%/*}"
     printf 'claim-%s\n' "$issue" >>"$AFK_TEST_STATE"
     printf 'claim %s\n' "$issue" >>"$AFK_TEST_EVENTS" ;;
+  issue\ view\ *\ --json\ state,labels)
+    printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"}]}\n' ;;
   pr\ list\ --head\ afk/issue-*\ --state\ open\ --json\ number\ --jq\ .[].number)
     branch="${4}"; issue="${branch##*-}"; printf '%s\n' "$((issue + 100))" ;;
   pr\ edit\ *\ --add-label\ afk-review) ;;
@@ -178,18 +199,37 @@ EOF
 chmod +x "$root/tools/"*.sh "$root/node_modules/.bin/tsx" "$adapters/"* \
   "$skills/work-on/scripts/select-issue-codex.sh"
 
-run_foreground() {
+setup_scenario() {
+  rm -rf "$repo" "$remote"
+  mkdir -p "$repo"
+  git init --bare --quiet "$remote"
+  git -C "$repo" init --quiet --initial-branch=main
+  git -C "$repo" config user.email watcher-test@example.invalid
+  git -C "$repo" config user.name "Watcher test"
+  git -C "$repo" commit --quiet --allow-empty -m base
+  git -C "$repo" remote add origin "$remote"
+  git -C "$repo" push --quiet -u origin main
+  base_oid="$(git -C "$repo" rev-parse HEAD)"
+  : >"$events"
+  : >"$state"
+  rm -f "$fixture/active" "$fixture/release" "$fixture/merge-oid"
+}
+
+run_watcher() {
   local scenario="$1"
-  : >"$events"; : >"$state"; rm -f "$fixture/active" "$fixture/release"
-  if ! (
-    cd "$repo"
-    PATH="$adapters:$PATH" AFK_SKILLS_ROOT="$skills" AFK_POLL_SECONDS=0 \
+  cd "$repo"
+  exec env PATH="$adapters:$PATH" AFK_SKILLS_ROOT="$skills" AFK_POLL_SECONDS=0 \
       AFK_TEST_REAL_GIT="$real_git" AFK_TEST_SCENARIO="$scenario" \
       AFK_TEST_EVENTS="$events" AFK_TEST_STATE="$state" \
       AFK_TEST_ACTIVE="$fixture/active" AFK_TEST_RELEASE="$fixture/release" \
       AFK_TEST_REPO="$repo" AFK_TEST_MERGE_OID="$fixture/merge-oid" \
       "$root/tools/run-afk-once.sh"
-  ) >"$fixture/$scenario.out" 2>&1; then
+}
+
+run_foreground() {
+  local scenario="$1"
+  setup_scenario
+  if ! (run_watcher "$scenario") >"$fixture/$scenario.out" 2>&1; then
     printf 'FAIL[%s]\n' "$scenario" >&2
     cat "$fixture/$scenario.out" >&2
     exit 1
@@ -198,16 +238,8 @@ run_foreground() {
 
 run_background() {
   local scenario="$1"
-  : >"$events"; : >"$state"; rm -f "$fixture/active" "$fixture/release"
-  (
-    cd "$repo"
-    PATH="$adapters:$PATH" AFK_SKILLS_ROOT="$skills" AFK_POLL_SECONDS=0 \
-      AFK_TEST_REAL_GIT="$real_git" AFK_TEST_SCENARIO="$scenario" \
-      AFK_TEST_EVENTS="$events" AFK_TEST_STATE="$state" \
-      AFK_TEST_ACTIVE="$fixture/active" AFK_TEST_RELEASE="$fixture/release" \
-      AFK_TEST_REPO="$repo" AFK_TEST_MERGE_OID="$fixture/merge-oid" \
-      exec "$root/tools/run-afk-once.sh"
-  ) >"$fixture/$scenario.out" 2>&1 &
+  setup_scenario
+  (run_watcher "$scenario") >"$fixture/$scenario.out" 2>&1 &
   watcher_pid=$!
 }
 
@@ -232,9 +264,13 @@ wait_output() {
 }
 
 run_foreground chain
-[[ "$(grep -c '^agent ' "$events")" == 2 ]]
+[[ "$(grep -c '^agent ' "$events")" == 2 ]] || {
+  cat "$fixture/chain.out" >&2
+  cat "$events" >&2
+  exit 1
+}
 [[ "$(grep -c '^claim ' "$events")" == 2 ]]
-[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+[[ "$(grep -c '^selector$' "$events")" == 4 ]]
 [[ "$(grep -c '^git fetch --quiet origin refs/heads/main:refs/remotes/origin/main$' "$events")" -ge 3 ]]
 [[ "$(grep -c '^gh issue list --state open --label ready-for-agent --label Sandcastle ' "$events")" -ge 3 ]]
 mapfile -t chain_bases < <(sed -n 's/^agent-base [0-9][0-9]* //p' "$events")
@@ -244,16 +280,33 @@ mapfile -t chain_bases < <(sed -n 's/^agent-base [0-9][0-9]* //p' "$events")
 
 run_foreground live-add
 [[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
-[[ "$(grep -c '^selector$' "$events")" == 1 ]]
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+grep -q "^agent-base 42 $base_oid$" "$events"
 
 run_foreground frontier
-[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+[[ "$(grep -c '^selector$' "$events")" == 3 ]]
 [[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
 
 run_foreground token-wait
 [[ "$(grep -c '^selector$' "$events")" == 1 ]]
 ! grep -q '^agent ' "$events"
 [[ "$(grep -c '^sleep$' "$events")" == 3 ]]
+
+run_foreground claim-race
+! grep -q '^claim ' "$events"
+! grep -q '^agent ' "$events"
+
+run_foreground eligibility-race
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+! grep -q '^claim ' "$events"
+! grep -q '^agent ' "$events"
+
+run_foreground default-race
+[[ "$(grep -c '^selector$' "$events")" == 3 ]]
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+advanced_oid="$(git -C "$repo" rev-parse origin/main)"
+[[ "$advanced_oid" != "$base_oid" ]]
+grep -q "^agent-base 42 $advanced_oid$" "$events"
 
 run_background drain
 wait_event '^agent 42$'
@@ -274,6 +327,9 @@ force_status=$?
 set -e
 [[ "$force_status" -ne 0 ]]
 grep -q 'forcing termination' "$fixture/force.out"
+forced_pgid="$(sed -n 's/^agent-pgid //p' "$events" | tail -n1)"
+[[ -n "$forced_pgid" ]]
+! ps -eo pgid= | tr -d ' ' | grep -qx "$forced_pgid"
 
 run_background idle-stop
 wait_event '^sleep$'

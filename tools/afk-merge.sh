@@ -122,6 +122,31 @@ outcome="$(
 [[ "$outcome" == "Closes" ]] \
   || refuse "workflow telemetry outcome is not Closes: $outcome"
 
+# --- Closure gate table: every criterion must be tested ---------------------
+# The gate table is the only per-criterion evidence in the pull request. Without
+# it, `Closes` is a bare assertion. Read the Status column of every row under the
+# closure-gate header and refuse anything short of `tested` — including
+# `instructional`, which is never eligible for an unattended merge.
+gate_statuses="$(
+  awk -F'|' '
+    /^\|[[:space:]]*Acceptance criterion[[:space:]]*\|/ { in_table = 1; next }
+    in_table && $0 !~ /^\|/ { in_table = 0 }
+    in_table && /^\|[[:space:]]*-/ { next }
+    in_table && /^\|/ {
+      value = $(NF - 1)
+      gsub(/`/, "", value)
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      if (value != "") print tolower(value)
+    }
+  ' <<<"$pr_body"
+)"
+[[ -n "$gate_statuses" ]] \
+  || refuse "missing evidence: no closure gate table with acceptance-criterion rows"
+while IFS= read -r gate_status; do
+  [[ "$gate_status" == "tested" ]] \
+    || refuse "closure gate criterion is not tested: $gate_status"
+done <<<"$gate_statuses"
+
 # --- Required CI: bounded wait and one mechanical retry --------------------
 ci_started="$(date +%s)"
 ci_retried=0

@@ -41,13 +41,9 @@ JSON
     printf '%s\n' '[{"number":201,"title":"Discovered edge case","state":"OPEN","url":"https://github.com/acme/widget/issues/201","labels":[{"name":"afk-review"},{"name":"needs-triage"}]}]' ;;
   "issue list --state open --label Sandcastle --limit 1000 --json number,title,state,url,labels")
     printf '%s\n' '[{"number":202,"title":"Queued work","state":"OPEN","url":"https://github.com/acme/widget/issues/202","labels":[{"name":"ready-for-agent"},{"name":"Sandcastle"}]}]' ;;
-  "pr view 10 --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"}]}' ;;
-  "pr view 11 --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"}]}' ;;
-  "pr view 12 --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"}]}' ;;
-  "pr view 13 --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"}]}' ;;
-  "pr view 15 --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"}]}' ;;
-  "issue view 201 --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"},{"name":"needs-triage"}]}' ;;
-  "issue view 202 --json labels") printf '%s\n' '{"labels":[{"name":"Sandcastle"}]}' ;;
+  "pr view "*" -R acme/widget --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"}]}' ;;
+  "issue view 201 -R acme/widget --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"},{"name":"needs-triage"}]}' ;;
+  "issue view 202 -R acme/widget --json labels") printf '%s\n' '{"labels":[{"name":"Sandcastle"}]}' ;;
   pr\ edit\ *\ --remove-label\ afk-review) ;;
   issue\ edit\ *\ --remove-label\ afk-review) ;;
   *) printf 'Unexpected gh call: %s\n' "$*" >&2; exit 99 ;;
@@ -103,35 +99,66 @@ fi
 grep -Fq 'report-afk:' "$fixture/malformed.err"
 
 printf '' >"$events"
-(cd "$fixture/repo" && "$skill_root/scripts/report-afk.py" ack pr:11 issue:201) >"$fixture/ack.out"
-grep -Fxq 'pr edit 11 --remove-label afk-review' "$events"
-grep -Fxq 'issue edit 201 --remove-label afk-review' "$events"
-[[ "$(grep -Ec '^(pr|issue) edit ' "$events")" == 2 ]]
+status=0
+(cd "$fixture/repo" && "$skill_root/scripts/report-afk.py" ack pr:11 issue:201) \
+  >"$fixture/norepo.out" 2>"$fixture/norepo.err" || status=$?
+[[ "$status" == 1 ]]
+grep -Fq 'ack requires --repo' "$fixture/norepo.err"
+if grep -Eq '^(pr|issue) (edit|view) ' "$events"; then
+  printf 'Acknowledgement without an explicit repository touched GitHub\n' >&2
+  exit 1
+fi
 
 printf '' >"$events"
-(cd "$fixture/repo" && "$skill_root/scripts/report-afk.py" ack issue:202) >"$fixture/queue.out"
+status=0
+(cd "$fixture/repo" && "$skill_root/scripts/report-afk.py" ack --repo not-a-repo pr:11) \
+  >/dev/null 2>"$fixture/badrepo.err" || status=$?
+[[ "$status" == 1 ]]
+grep -Fq 'ack requires --repo' "$fixture/badrepo.err"
+
+printf '' >"$events"
+(cd "$fixture/repo" && "$skill_root/scripts/report-afk.py" ack --repo acme/widget pr:11 issue:201) \
+  >"$fixture/ack.out"
+grep -Fxq 'pr edit 11 -R acme/widget --remove-label afk-review' "$events"
+grep -Fxq 'issue edit 201 -R acme/widget --remove-label afk-review' "$events"
+[[ "$(grep -Ec '^(pr|issue) edit ' "$events")" == 2 ]]
+grep -Fq 'acked 2, skipped 0' "$fixture/ack.out"
+
+printf '' >"$events"
+status=0
+(cd "$fixture/repo" && "$skill_root/scripts/report-afk.py" ack --repo acme/widget issue:202) \
+  >"$fixture/queue.out" || status=$?
+[[ "$status" == 3 ]]
 grep -Fq 'issue:202 does not carry afk-review; skipping' "$fixture/queue.out"
+grep -Fq 'acked 0, skipped 1' "$fixture/queue.out"
 if grep -Eq '^(pr|issue) edit ' "$events"; then
   printf 'Queued issue without afk-review was acknowledged\n' >&2
   exit 1
 fi
 
 printf '' >"$events"
-(cd "$fixture/repo" && "$skill_root/scripts/report-afk.py" ack \
-  pr:10 pr:11 pr:12 pr:13 pr:15 issue:201 issue:202) >"$fixture/all.out"
+status=0
+(cd "$fixture/repo" && "$skill_root/scripts/report-afk.py" ack --repo acme/widget \
+  pr:10 pr:11 pr:12 pr:13 pr:15 issue:201 issue:202) >"$fixture/all.out" || status=$?
+[[ "$status" == 3 ]]
 for expected in \
-  'pr edit 10 --remove-label afk-review' \
-  'pr edit 11 --remove-label afk-review' \
-  'pr edit 12 --remove-label afk-review' \
-  'pr edit 13 --remove-label afk-review' \
-  'pr edit 15 --remove-label afk-review' \
-  'issue edit 201 --remove-label afk-review'; do
+  'pr edit 10 -R acme/widget --remove-label afk-review' \
+  'pr edit 11 -R acme/widget --remove-label afk-review' \
+  'pr edit 12 -R acme/widget --remove-label afk-review' \
+  'pr edit 13 -R acme/widget --remove-label afk-review' \
+  'pr edit 15 -R acme/widget --remove-label afk-review' \
+  'issue edit 201 -R acme/widget --remove-label afk-review'; do
   grep -Fxq "$expected" "$events"
 done
 [[ "$(grep -Ec '^(pr|issue) edit ' "$events")" == 6 ]]
 grep -Fq 'issue:202 does not carry afk-review; skipping' "$fixture/all.out"
+grep -Fq 'acked 6, skipped 1' "$fixture/all.out"
 if grep -Fq 'issue edit 202 ' "$events"; then
   printf 'Approve-all acknowledged a queue-only issue\n' >&2
+  exit 1
+fi
+if grep -Eq '^(pr|issue) (edit|view) [0-9]+ --' "$events"; then
+  printf 'A mutation or lookup resolved the repository from the working directory\n' >&2
   exit 1
 fi
 

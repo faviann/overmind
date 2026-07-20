@@ -13,6 +13,8 @@ from typing import Any
 PR_FIELDS = "number,title,state,mergedAt,url,body,mergeStateStatus"
 ISSUE_FIELDS = "number,title,state,url,labels"
 ARTIFACT_PATTERN = re.compile(r"^(pr|issue):([1-9][0-9]*)$")
+REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+USAGE = "usage: report-afk.py report | ack --repo <owner>/<name> <artifact-key...>"
 
 
 def gh(*args: str) -> str:
@@ -69,7 +71,7 @@ def checks_for(number: int) -> list[dict[str, Any]]:
     output = result.stdout.strip()
     diagnostic = result.stderr.strip()
     if result.returncode and not output:
-        if "no required checks" in diagnostic:
+        if diagnostic.startswith("no required checks"):
             return []
         detail = diagnostic or "unknown error"
         raise RuntimeError(f"{' '.join(args)} failed: {detail}")
@@ -120,26 +122,28 @@ def parse_artifacts(keys: list[str]) -> list[tuple[str, int]]:
     return parsed
 
 
-def remove_review_labels(artifacts: list[tuple[str, int]]) -> None:
-    for kind, number in artifacts:
-        gh(kind, "edit", str(number), "--remove-label", "afk-review")
-        print(f"Acknowledged {kind}:{number}")
-
-
-def acknowledge(keys: list[str]) -> None:
-    repository()
-    artifacts = parse_artifacts(keys)
+def acknowledge(args: list[str]) -> int:
+    if len(args) < 2 or args[0] != "--repo" or not REPO_PATTERN.fullmatch(args[1]):
+        raise RuntimeError("ack requires --repo <owner>/<name> before artifact keys")
+    repo = args[1]
+    artifacts = parse_artifacts(args[2:])
     if not artifacts:
         raise RuntimeError("ack requires at least one artifact key")
     pending = []
+    skipped = 0
     for kind, number in artifacts:
-        artifact = gh_json(kind, "view", str(number), "--json", "labels")
+        artifact = gh_json(kind, "view", str(number), "-R", repo, "--json", "labels")
         labels = {label["name"] for label in artifact.get("labels", [])}
         if "afk-review" in labels:
             pending.append((kind, number))
         else:
+            skipped += 1
             print(f"{kind}:{number} does not carry afk-review; skipping")
-    remove_review_labels(pending)
+    for kind, number in pending:
+        gh(kind, "edit", str(number), "-R", repo, "--remove-label", "afk-review")
+        print(f"Acknowledged {kind}:{number}")
+    print(f"acked {len(pending)}, skipped {skipped}")
+    return 3 if skipped else 0
 
 
 def report() -> None:
@@ -200,16 +204,16 @@ def report() -> None:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("usage: report-afk.py report | ack <artifact-key...>", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         return 2
     try:
         action = sys.argv[1]
         if action == "report" and len(sys.argv) == 2:
             report()
         elif action == "ack":
-            acknowledge(sys.argv[2:])
+            return acknowledge(sys.argv[2:])
         else:
-            print("usage: report-afk.py report | ack <artifact-key...>", file=sys.stderr)
+            print(USAGE, file=sys.stderr)
             return 2
     except (RuntimeError, KeyError, json.JSONDecodeError) as error:
         print(f"report-afk: {error}", file=sys.stderr)

@@ -23,13 +23,18 @@ Include open and merged `afk-review` pull requests, their linked
 Wait for the user to explicitly select artifact keys from the report. Then run:
 
 ```sh
-scripts/report-afk.py ack pr:123 issue:456
+scripts/report-afk.py ack --repo <owner>/<name> pr:123 issue:456
 ```
 
-Pass only the selected keys. Never acknowledge a queue entry unless it also
-appears as an `afk-review` artifact. Remove only `afk-review` during
-acknowledgement; never add or remove readiness, dependency, triage, or
-`Sandcastle` labels.
+Pass `--repo` exactly as the presented report's header names it; never let the
+working directory choose the repository. Pass only the selected keys. Never
+acknowledge a queue entry unless it also appears as an `afk-review` artifact.
+Remove only `afk-review` during acknowledgement; never add or remove readiness,
+dependency, triage, or `Sandcastle` labels.
+
+Exit codes: `0` every key acknowledged, `3` at least one key skipped because it
+no longer carries `afk-review`, `1` a failure. Report a `3` to the user with the
+skipped keys; never describe it as a clean acknowledgement.
 
 ## Approve all
 
@@ -39,7 +44,7 @@ artifact keys that appear in that presented report — every `pr:N` and
 `issue:N` key — never a new query or a reconstructed artifact list:
 
 ```sh
-scripts/report-afk.py ack pr:123 pr:124 issue:456
+scripts/report-afk.py ack --repo <owner>/<name> pr:123 pr:124 issue:456
 ```
 
 Queue entries carry no artifact key; never acknowledge them through

@@ -13,9 +13,6 @@ from typing import Any
 PR_FIELDS = "number,title,state,mergedAt,url,body,mergeStateStatus"
 ISSUE_FIELDS = "number,title,state,url,labels"
 ARTIFACT_PATTERN = re.compile(r"^(pr|issue):([1-9][0-9]*)$")
-REPORT_MARKER_PATTERN = re.compile(
-    r"<!-- report-afk:v1 repo=([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+) artifacts=([^ ]*) -->"
-)
 
 
 def gh(*args: str) -> str:
@@ -72,7 +69,7 @@ def checks_for(number: int) -> list[dict[str, Any]]:
     output = result.stdout.strip()
     diagnostic = result.stderr.strip()
     if result.returncode and not output:
-        if re.fullmatch(r"no required checks reported on the '[^']+' branch", diagnostic):
+        if "no required checks" in diagnostic:
             return []
         detail = diagnostic or "unknown error"
         raise RuntimeError(f"{' '.join(args)} failed: {detail}")
@@ -134,24 +131,15 @@ def acknowledge(keys: list[str]) -> None:
     artifacts = parse_artifacts(keys)
     if not artifacts:
         raise RuntimeError("ack requires at least one artifact key")
+    pending = []
     for kind, number in artifacts:
         artifact = gh_json(kind, "view", str(number), "--json", "labels")
         labels = {label["name"] for label in artifact.get("labels", [])}
-        if "afk-review" not in labels:
-            raise RuntimeError(f"{kind}:{number} does not currently carry afk-review")
-    remove_review_labels(artifacts)
-
-
-def approve_all(presented_report: str) -> None:
-    repo_name = repository()["nameWithOwner"]
-    markers = REPORT_MARKER_PATTERN.findall(presented_report)
-    if len(markers) != 1:
-        raise RuntimeError("approve-all requires exactly one complete presented report on stdin")
-    report_repo, artifact_csv = markers[0]
-    if report_repo != repo_name:
-        raise RuntimeError(f"presented report belongs to {report_repo}, not {repo_name}")
-    keys = artifact_csv.split(",") if artifact_csv else []
-    remove_review_labels(parse_artifacts(keys))
+        if "afk-review" in labels:
+            pending.append((kind, number))
+        else:
+            print(f"{kind}:{number} does not carry afk-review; skipping")
+    remove_review_labels(pending)
 
 
 def report() -> None:
@@ -167,10 +155,6 @@ def report() -> None:
     queue = gh_json(
         "issue", "list", "--state", "open", "--label", "Sandcastle", "--limit", "1000", "--json", ISSUE_FIELDS
     )
-    artifacts = [f"pr:{pr['number']}" for pr in prs] + [
-        f"issue:{issue['number']}" for issue in discoveries
-    ]
-
     print(f"# AFK review inbox — {repo_name}")
     print()
     print("## Pull requests")
@@ -213,13 +197,10 @@ def report() -> None:
     else:
         print("\nNone.")
 
-    artifact_csv = ",".join(artifacts)
-    print(f"\n<!-- report-afk:v1 repo={repo_name} artifacts={artifact_csv} -->")
-
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("usage: report-afk.py report | ack <artifact-key...> | approve-all", file=sys.stderr)
+        print("usage: report-afk.py report | ack <artifact-key...>", file=sys.stderr)
         return 2
     try:
         action = sys.argv[1]
@@ -227,10 +208,8 @@ def main() -> int:
             report()
         elif action == "ack":
             acknowledge(sys.argv[2:])
-        elif action == "approve-all" and len(sys.argv) == 2:
-            approve_all(sys.stdin.read())
         else:
-            print("usage: report-afk.py report | ack <artifact-key...> | approve-all", file=sys.stderr)
+            print("usage: report-afk.py report | ack <artifact-key...>", file=sys.stderr)
             return 2
     except (RuntimeError, KeyError, json.JSONDecodeError) as error:
         print(f"report-afk: {error}", file=sys.stderr)

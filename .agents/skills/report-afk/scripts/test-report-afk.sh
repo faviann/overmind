@@ -162,4 +162,23 @@ if grep -Eq '^(pr|issue) (edit|view) [0-9]+ --' "$events"; then
   exit 1
 fi
 
+# --- Shipped instructions ----------------------------------------------------
+# Selecting which keys to acknowledge, and deciding that the user asked, are the
+# agent's job and not the executable's — no scripted scenario can observe them.
+# What is observable is whether the shipped instructions still say so. These
+# assertions fail if a later edit drops or rewords a load-bearing sentence.
+skill_prose="$(tr '\n' ' ' <"$skill_root/SKILL.md" | tr -s ' ')"
+while IFS= read -r sentence; do
+  [[ -n "$sentence" ]] || continue
+  grep -Fq "$sentence" <<<"$skill_prose" || {
+    printf 'SKILL.md no longer instructs: %s\n' "$sentence" >&2
+    exit 1
+  }
+done <<'SENTENCES'
+Wait for the user to explicitly select artifact keys from the report.
+Approve all only after an explicit user instruction to approve every artifact in a report presented in the current context.
+Run `ack` with exactly the artifact keys that appear in that presented report
+Pass `--repo` exactly as the presented report's header names it
+SENTENCES
+
 printf 'AFK reporting and acknowledgement scenarios passed\n'

@@ -28,6 +28,68 @@ cat >"$bodies/closes" <<'EOF'
 
 Closes #42
 
+## Closure gate
+
+| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |
+|---|---|---|---|---|
+| First criterion | `run()` | Public invocation | Scenario output | tested |
+| Second criterion | `verify()` | Public invocation | Scenario output | tested |
+
+## Workflow telemetry
+
+| Field | Observed value |
+|---|---|
+| Final workflow outcome | Closes |
+EOF
+
+# Closing keyword and telemetry present, but no per-criterion gate table: the
+# `Closes` claim is unsupported by any acceptance-criterion evidence.
+cat >"$bodies/no-gate-table" <<'EOF'
+## Issues
+
+Closes #42
+
+## Workflow telemetry
+
+| Field | Observed value |
+|---|---|
+| Final workflow outcome | Closes |
+EOF
+
+# A gate table whose rows are not all `tested`.
+cat >"$bodies/gate-inferred" <<'EOF'
+## Issues
+
+Closes #42
+
+## Closure gate
+
+| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |
+|---|---|---|---|---|
+| First criterion | `run()` | Public invocation | Scenario output | tested |
+| Second criterion | `verify()` | None | Reasoned from the diff | inferred |
+
+## Workflow telemetry
+
+| Field | Observed value |
+|---|---|
+| Final workflow outcome | Closes |
+EOF
+
+# An `instructional` row is never eligible for an unattended merge; such a pull
+# request must use Progresses so a human reviews it.
+cat >"$bodies/gate-instructional" <<'EOF'
+## Issues
+
+Closes #42
+
+## Closure gate
+
+| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |
+|---|---|---|---|---|
+| First criterion | `run()` | Public invocation | Scenario output | tested |
+| Waits for explicit approval | `SKILL.md` | Imperative instruction | Sentence present, review confirmed | instructional |
+
 ## Workflow telemetry
 
 | Field | Observed value |
@@ -76,6 +138,12 @@ Closes #42
 ## Follow-ups
 
 - #77 - investigate an out-of-scope edge case
+
+## Closure gate
+
+| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |
+|---|---|---|---|---|
+| Only criterion | `run()` | Public invocation | Scenario output | tested |
 
 ## Workflow telemetry
 
@@ -261,11 +329,14 @@ prohibited=(
   "progresses-pr|good|progresses|$merge_clean"
   "unverified-outcome|good|contradiction|$merge_clean"
   "missing-evidence|good|missing|$merge_clean"
+  "no-gate-table|good|no-gate-table|$merge_clean|no closure gate table"
+  "gate-inferred|good|gate-inferred|$merge_clean|criterion is not tested: inferred"
+  "gate-instructional|good|gate-instructional|$merge_clean|criterion is not tested: instructional"
   "conflict|good|closes|$merge_conflict"
 )
 
 for scenario in "${prohibited[@]}"; do
-  IFS='|' read -r name protection body_name merge_state <<<"$scenario"
+  IFS='|' read -r name protection body_name merge_state expect_reason <<<"$scenario"
   setup_repo
   reset_events
   export AFK_TEST_PROTECTION="$protection"
@@ -279,6 +350,10 @@ for scenario in "${prohibited[@]}"; do
   fi
   grep -q '^merge refused: ' "$out" \
     || { echo "FAIL[$name]: no refusal reason printed" >&2; cat "$out" >&2; exit 1; }
+  if [[ -n "${expect_reason:-}" ]]; then
+    grep -q "^merge refused: .*${expect_reason}" "$out" \
+      || { echo "FAIL[$name]: refusal reason is not '${expect_reason}'" >&2; cat "$out" >&2; exit 1; }
+  fi
   grep -q 'awaits review' "$out" \
     || { echo "FAIL[$name]: awaits-review end state not reported" >&2; exit 1; }
   assert_no_merge_call "$name"

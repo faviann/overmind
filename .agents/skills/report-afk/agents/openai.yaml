@@ -1,0 +1,4 @@
+interface:
+  display_name: "Report AFK Outcomes"
+  short_description: "Review and acknowledge AFK workflow outcomes"
+  default_prompt: "Use $report-afk to show the current repository's AFK review inbox."

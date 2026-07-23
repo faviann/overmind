@@ -10,3 +10,4 @@ node_modules/
 
 # Version-matched SDK reference tree provisioned by `make sdk-reference`.
 reference/csharp-sdk/
+__pycache__/

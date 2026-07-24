@@ -44,24 +44,105 @@ trusted local agents, and includes the `memctl` operator CLI.
 
 ## Watch the authorized issue queue while AFK
 
-The repository's AFK watcher is intended to run inside an externally
-managed persistent shell such as tmux or herdr. Setup is deliberately separate:
-authenticate `gh` and `codex`, install the checked-in Node dependencies with
-`npm ci`, ensure the shared `work-on` skills and the `ready-for-agent`,
-`Sandcastle`, `afk-review`, and `needs-triage` labels exist, then authorize one
-ready issue by adding `Sandcastle`.
+Setup and launch are deliberately separate. Complete this one-time operator
+checklist before authorizing any issue:
 
-Run `make afk`. Preflight only checks policy and prerequisites; it never creates
-labels, installs skills, or repairs configuration. The command watches the live
-two-label queue, consumes an issue's `Sandcastle` label before launch, runs the
-full `work-on` lifecycle on a named isolated
-branch/worktree, and labels the resulting pull request `afk-review`. It
-processes one issue at a time and starts each selection from the latest verified
-default branch. An empty or unchanged ineligible queue is polled without
-invoking an agent or selector model. A first termination signal drains an
-active issue (or exits immediately while idle); a
-second signal forces termination. A consumed authorization cannot retry unless
-a human adds `Sandcastle` again.
+1. Authenticate the GitHub CLI and Codex, then verify both sessions:
+
+   ```sh
+   gh auth login
+   gh auth status
+   codex login
+   codex login status
+   ```
+
+2. Install the repository's checked-in Node dependencies:
+
+   ```sh
+   npm ci
+   ```
+
+3. Install or update the shared `work-on`, `select-issue`, `implement`, `tdd`,
+   and `code-review` skills. The watcher reads shared skills from
+   `${AFK_SKILLS_ROOT:-$HOME/.agents/skills}`.
+
+   ```sh
+   npx skills add mattpocock/skills --global --agent '*' \
+     --skill work-on --skill select-issue --skill implement --skill tdd \
+     --skill code-review --yes
+   npx skills update --global --yes
+
+   skills_root="${AFK_SKILLS_ROOT:-$HOME/.agents/skills}"
+   for skill in work-on select-issue implement tdd code-review; do
+     test -f "$skills_root/$skill/SKILL.md"
+   done
+   test -x "$skills_root/work-on/scripts/select-issue-codex.sh"
+   ```
+
+4. Create these repository labels if they are missing, then verify all four
+   before launch: `ready-for-agent`, `Sandcastle`, `afk-review`, and
+   `needs-triage`.
+
+   ```sh
+   gh label create ready-for-agent --color 0e8a16
+   gh label create Sandcastle --color fbca04
+   gh label create afk-review --color 1d76db
+   gh label create needs-triage --color d93f0b
+   gh label list --limit 1000 --json name --jq '.[].name'
+   ```
+
+   `gh label create` reports that a label already exists; that is not an error
+   requiring replacement. Confirm the existing label in the final listing.
+
+5. Protect the default branch in GitHub repository settings. Require pull
+   requests, require branches to be up to date before merging (strict status
+   checks), and require the `test`, `test-compose`, and `reference-compose` CI
+   contexts. This read-only check shows the configured policy:
+
+   ```sh
+   repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+   branch="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)"
+   gh api "repos/$repo/branches/$branch/protection" |
+     jq '{required_pull_request_reviews, required_status_checks}'
+   ```
+
+   `AFK_REQUIRED_CHECKS` is a space-separated override for the designated CI
+   contexts. When it is unset, the watcher requires all three contexts above:
+   `test test-compose reference-compose`. For example, an explicit equivalent
+   launch is:
+
+   ```sh
+   AFK_REQUIRED_CHECKS='test test-compose reference-compose' make afk
+   ```
+
+For each launch, choose exactly one open issue that is already
+`ready-for-agent`, review it, and add only the `Sandcastle` authorization:
+
+```sh
+gh issue view <issue-number> --json state,labels
+gh issue edit <issue-number> --add-label Sandcastle
+```
+
+Do not use `Sandcastle` to bypass triage or make an issue ready. Start
+`make afk` inside an operator-managed persistent shell such as tmux or herdr:
+
+```sh
+tmux new-session -s overmind-afk
+make afk
+```
+
+Launch preflight is read-only: it checks policy and prerequisites but never
+creates labels, installs skills, or repairs configuration. After preflight, the
+watcher observes the live `ready-for-agent` + `Sandcastle` queue and claims the
+selected issue by removing `Sandcastle` before agent launch. It then runs the
+full `work-on` lifecycle on a named isolated branch/worktree and labels the
+resulting pull request `afk-review`. It processes one issue at a time and starts
+each selection from the latest verified default branch. An empty or unchanged
+ineligible queue is polled without invoking an agent or selector model. A first
+termination signal drains an active issue (or exits immediately while idle); a
+second signal forces termination. The consumed `Sandcastle` authorization is
+one attempt: a retry requires an operator to review the issue again and
+explicitly re-add `Sandcastle`.
 
 After tagging `afk-review`, the watcher hands the pull request to a guarded merge
 stage. It merges unattended only when every gate holds, and otherwise leaves the

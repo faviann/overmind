@@ -53,6 +53,14 @@ public sealed class ServerStartupTests
             default_namespace: memory-system
             allowed_namespaces: [homelab]
         """)]
+    [InlineData("capture-form key", "reserved for capture credentials",
+        """
+        keys:
+          - key: mcap_0123456789abcdef0123456789abcdef
+            agent_id: agent-a
+            default_namespace: memory-system
+            allowed_namespaces: [memory-system]
+        """)]
     public async Task HttpServerFailsClosedOnMalformedKeyFile(string _, string expectedReason, string yaml)
     {
         var keysPath = Path.Combine(Path.GetTempPath(), $"bad-keys-{Guid.NewGuid():N}.yaml");

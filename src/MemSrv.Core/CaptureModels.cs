@@ -1,10 +1,24 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MemSrv.Core;
 
 public sealed record CaptureSource(string Harness, string? HarnessVersion, string? RecordType);
 public sealed record CaptureAdapter(string Name, string Version);
-public sealed record CaptureRelationship(string Type, string TargetNativeId, string? TargetKind);
+public sealed record CaptureLocator(
+    string Kind,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? NativeId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? ByteOffset,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? ByteLength);
+public sealed record CaptureSourceTimestamp(string Raw, DateTimeOffset? Parsed);
+public sealed record CaptureRelationshipTarget(
+    Guid? SourceStreamUuid,
+    string NativeId,
+    string? Kind);
+public sealed record CaptureRelationship(string Type, CaptureRelationshipTarget Target);
 public sealed record CaptureEvent(
     string PartKey,
     int PartOrder,
@@ -17,7 +31,8 @@ public sealed record CaptureObservationRequest(
     int ContractVersion,
     string SourceSessionId,
     long SourcePosition,
-    string SourceLocator,
+    CaptureLocator Locator,
+    CaptureSourceTimestamp? SourceTimestamp,
     CaptureSource Source,
     CaptureAdapter Adapter,
     JsonElement SourcePayload,
@@ -31,9 +46,9 @@ public sealed record CaptureScanReceipt(
 public sealed record CaptureObservationReceipt(
     Guid ObservationUuid,
     Guid SourceStreamUuid,
-    long SourcePosition,
-    string SourceLocator,
     CaptureSource Source,
+    CaptureLocator Locator,
+    CaptureSourceTimestamp? SourceTimestamp,
     CaptureAdapter Adapter,
     JsonElement SafeSourcePayload,
     CaptureScanReceipt Scan,
@@ -51,6 +66,23 @@ public sealed record CaptureEventReceipt(
     int PayloadVersion,
     JsonElement Payload,
     IReadOnlyList<CaptureRelationship> Relationships);
+public sealed record CanonicalCapturedEvent(
+    Guid TraceUuid,
+    string SessionId,
+    string AgentId,
+    string Namespace,
+    string PartKey,
+    int PartOrder,
+    string Kind,
+    string Actor,
+    DateTimeOffset? OccurredAt,
+    int PayloadVersion,
+    JsonElement Payload);
+public sealed record CapturedEventEnvelope(
+    int ContractVersion,
+    CaptureObservationReceipt Observation,
+    CanonicalCapturedEvent Event,
+    IReadOnlyList<CaptureRelationship> Relationships);
 public sealed record CaptureReceipt(
     Guid ObservationUuid,
     string Status,
@@ -65,7 +97,6 @@ public sealed record CaptureReceiptRecord(
     string Harness,
     string SourceSessionId,
     long SourcePosition,
-    string SourceLocator,
     string EffectiveNamespace,
     string RouteBasis,
     string Status,

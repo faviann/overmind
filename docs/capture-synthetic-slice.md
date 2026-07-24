@@ -6,9 +6,12 @@ product**.
 
 ## Operator exercise
 
-Create a random credential in a mode-`0600` file, then enroll one stable source
-binding. The credential file avoids exposing the credential in process
-arguments:
+Create a random capture credential in a mode-`0600` file, then enroll one stable
+source binding. Capture credentials use the structurally reserved form
+`mcap_` followed by at least 32 URL-safe random characters. Ordinary agent
+bearer keys are rejected by capture enrollment/import, and `mcap_` credentials
+are rejected by agent-key provisioning. The credential file avoids exposing
+the credential in process arguments:
 
 ```sh
 memctl capture enroll my-codex-fixture \
@@ -36,13 +39,23 @@ docker run --rm \
 It reads only the baked synthetic three-record JSONL fixture and sends three
 ordered observations (message, tool call, tool result) to
 `POST /capture/v1/observations`. Each persisted JSONL source record has its own
-numeric source position, locator, idempotency identity, and receipt. The tool
-result retains its source-native `result_for` relationship to the call.
+numeric source position, verified `byte_range` locator measured from the actual
+fixture bytes, idempotency identity, and receipt. Imports may instead use a
+`native_id` locator when the source exposes one. A source-stated timestamp is
+retained as its exact raw string plus a nullable parsed timestamp; it never
+falls back to event occurrence or server capture time. The tool result retains
+its source-native `result_for` relationship to the call.
 Read any durable operator receipt with:
 
 ```sh
 memctl capture receipt <observation_uuid>
 ```
+
+The receipt command writes JSON Lines: one canonical captured-event envelope
+per event. Every line repeats the immutable observation, carries exactly one
+event, and places that event's source relationships at top level. It does not
+emit the HTTP delivery status/route wrapper; the import endpoint retains those
+delivery facts alongside its complete immutable observation and event facts.
 
 ## Explicit limitations
 

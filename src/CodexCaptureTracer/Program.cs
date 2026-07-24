@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 
 const string EnableValue = "synthetic-non-production";
@@ -17,28 +18,44 @@ if (!string.Equals(
 string endpoint = Required("OVERMIND_CAPTURE_URL").TrimEnd('/');
 string credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
 string fixturePath = Required("OVERMIND_CODEX_FIXTURE");
-var records = new List<JsonElement>();
-foreach (string line in await File.ReadAllLinesAsync(fixturePath))
+byte[] fixtureBytes = await File.ReadAllBytesAsync(fixturePath);
+var records = new List<(JsonElement Payload, long ByteOffset, long ByteLength)>();
+int lineStart = 0;
+for (int index = 0; index <= fixtureBytes.Length; index++)
 {
-    if (!string.IsNullOrWhiteSpace(line))
+    if (index != fixtureBytes.Length && fixtureBytes[index] != (byte)'\n')
     {
-        records.Add(JsonDocument.Parse(line).RootElement.Clone());
+        continue;
     }
+    int lineLength = index - lineStart;
+    if (lineLength > 0 && fixtureBytes[index - 1] == (byte)'\r')
+    {
+        lineLength--;
+    }
+    if (lineLength > 0)
+    {
+        string line = Encoding.UTF8.GetString(fixtureBytes, lineStart, lineLength);
+        records.Add((
+            JsonDocument.Parse(line).RootElement.Clone(),
+            lineStart,
+            lineLength));
+    }
+    lineStart = index + 1;
 }
 
 if (records.Count != 3)
 {
     throw new InvalidOperationException("Synthetic Codex fixture must contain exactly three JSONL records.");
 }
-if (records[0].GetProperty("type").GetString() != "response_item"
-    || records[0].GetProperty("item_type").GetString() != "message"
-    || records[0].GetProperty("role").GetString() != "user")
+if (records[0].Payload.GetProperty("type").GetString() != "response_item"
+    || records[0].Payload.GetProperty("item_type").GetString() != "message"
+    || records[0].Payload.GetProperty("role").GetString() != "user")
 {
     throw new InvalidOperationException(
         "Synthetic Codex message must be a model-facing response_item/message with role user.");
 }
 
-string sessionId = records[0].GetProperty("session_id").GetString()
+string sessionId = records[0].Payload.GetProperty("session_id").GetString()
     ?? throw new InvalidOperationException("Fixture session_id is required.");
 var events = new object[]
 {
@@ -48,7 +65,7 @@ var events = new object[]
         partOrder = 0,
         kind = "message",
         actor = "user",
-        payload = new { text = records[0].GetProperty("text").GetString() }
+        payload = new { text = records[0].Payload.GetProperty("text").GetString() }
     },
     new
     {
@@ -58,9 +75,9 @@ var events = new object[]
         actor = "assistant",
         payload = new
         {
-            callId = records[1].GetProperty("call_id").GetString(),
-            tool = records[1].GetProperty("name").GetString(),
-            arguments = records[1].GetProperty("arguments")
+            callId = records[1].Payload.GetProperty("call_id").GetString(),
+            tool = records[1].Payload.GetProperty("name").GetString(),
+            arguments = records[1].Payload.GetProperty("arguments")
         }
     },
     new
@@ -71,17 +88,20 @@ var events = new object[]
         actor = "tool",
         payload = new
         {
-            callId = records[2].GetProperty("call_id").GetString(),
+            callId = records[2].Payload.GetProperty("call_id").GetString(),
             outcome = "succeeded",
-            output = records[2].GetProperty("output").GetString()
+            output = records[2].Payload.GetProperty("output").GetString()
         },
         relationships = new[]
         {
             new
             {
                 type = "result_for",
-                targetNativeId = records[2].GetProperty("call_id").GetString(),
-                targetKind = "tool_call"
+                target = new
+                {
+                    nativeId = records[2].Payload.GetProperty("call_id").GetString(),
+                    kind = "tool_call"
+                }
             }
         }
     }
@@ -96,15 +116,20 @@ for (var position = 0; position < records.Count; position++)
         contractVersion = 1,
         sourceSessionId = sessionId,
         sourcePosition = position,
-        sourceLocator = $"synthetic-jsonl:{position + 1}",
+        locator = new
+        {
+            kind = "byte_range",
+            byteOffset = records[position].ByteOffset,
+            byteLength = records[position].ByteLength
+        },
         source = new
         {
             harness = "codex",
             harnessVersion = "synthetic",
-            recordType = records[position].GetProperty("type").GetString()
+            recordType = records[position].Payload.GetProperty("type").GetString()
         },
         adapter = new { name = "codex-synthetic-jsonl", version = "1" },
-        sourcePayload = records[position],
+        sourcePayload = records[position].Payload,
         events = new[] { events[position] }
     };
     var response = await client.PostAsJsonAsync($"{endpoint}/capture/v1/observations", observation);

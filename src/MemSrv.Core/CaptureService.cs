@@ -16,6 +16,10 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         string credential,
         CancellationToken cancellationToken = default)
     {
+        if (!CaptureCredential.IsCaptureForm(credential))
+        {
+            return false;
+        }
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         return await connection.ExecuteScalarAsync<bool>(
@@ -39,7 +43,7 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         EnsureSafetyConfigured();
         Require(stableName, nameof(stableName));
         Require(agentId, nameof(agentId));
-        Require(credential, nameof(credential));
+        CaptureCredential.RequireCaptureForm(credential);
         if (!string.Equals(harness, "codex", StringComparison.Ordinal))
         {
             throw new InvalidOperationException("This disabled slice enrolls only harness 'codex'.");
@@ -108,7 +112,8 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             new CaptureSignatureContent(
                 request.ContractVersion,
                 request.SourceSessionId,
-                request.SourceLocator,
+                request.Locator,
+                request.SourceTimestamp,
                 request.Source,
                 request.Adapter,
                 request.SourcePayload,
@@ -117,7 +122,15 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
         AssertSafe(request.SourceSessionId, scan);
-        AssertSafe(request.SourceLocator, scan);
+        AssertSafe(request.Locator.Kind, scan);
+        if (request.Locator.NativeId is not null)
+        {
+            AssertSafe(request.Locator.NativeId, scan);
+        }
+        if (request.SourceTimestamp is not null)
+        {
+            AssertSafe(request.SourceTimestamp.Raw, scan);
+        }
         foreach (var item in request.Events)
         {
             AssertSafe(item.PartKey, scan);
@@ -136,8 +149,10 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             Redact(item.Payload.GetRawText(), scan),
             (item.Relationships ?? []).Select(relationship => new SafeRelationship(
                 relationship,
-                Redact(relationship.TargetNativeId, scan),
-                relationship.TargetKind is null ? null : Redact(relationship.TargetKind, scan))).ToArray()
+                Redact(relationship.Target.NativeId, scan),
+                relationship.Target.Kind is null
+                    ? null
+                    : Redact(relationship.Target.Kind, scan))).ToArray()
         )).ToArray();
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -177,16 +192,35 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         var existingMatches = (await connection.QueryAsync<ExistingObservation>(
             """
             SELECT observation_uuid AS ObservationUuid, source_position AS SourcePosition,
-                   source_locator AS SourceLocator, content_signature AS ContentSignature
+                   locator_kind AS LocatorKind, locator_native_id AS LocatorNativeId,
+                   locator_byte_offset AS LocatorByteOffset,
+                   locator_byte_length AS LocatorByteLength,
+                   content_signature AS ContentSignature
             FROM capture_observations
             WHERE stream_uuid = @StreamUuid
-              AND (source_position = @SourcePosition OR source_locator = @SourceLocator)
+              AND (
+                source_position = @SourcePosition
+                OR (
+                  locator_kind = @Kind
+                  AND locator_native_id IS NOT DISTINCT FROM @NativeId
+                  AND locator_byte_offset IS NOT DISTINCT FROM @ByteOffset
+                  AND locator_byte_length IS NOT DISTINCT FROM @ByteLength
+                )
+              )
             """,
-            new { stream.StreamUuid, request.SourcePosition, request.SourceLocator }, transaction)).AsList();
+            new
+            {
+                stream.StreamUuid,
+                request.SourcePosition,
+                request.Locator.Kind,
+                request.Locator.NativeId,
+                request.Locator.ByteOffset,
+                request.Locator.ByteLength
+            }, transaction)).AsList();
         if (existingMatches.Count > 0)
         {
             var locatorMatch = existingMatches.SingleOrDefault(candidate =>
-                string.Equals(candidate.SourceLocator, request.SourceLocator, StringComparison.Ordinal));
+                candidate.Matches(request.Locator));
             if (locatorMatch is not null)
             {
                 if (!string.Equals(
@@ -194,7 +228,7 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 {
                     await transaction.RollbackAsync(cancellationToken);
                     throw new CaptureConflictException(
-                        $"Source position {request.SourcePosition} or locator '{request.SourceLocator}' " +
+                        $"Source position {request.SourcePosition} or locator '{Describe(request.Locator)}' " +
                         "was already accepted with different identity or content.");
                 }
 
@@ -210,7 +244,7 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
 
             await transaction.RollbackAsync(cancellationToken);
             throw new CaptureConflictException(
-                $"Source position {request.SourcePosition} or locator '{request.SourceLocator}' " +
+                $"Source position {request.SourcePosition} or locator '{Describe(request.Locator)}' " +
                 "was already accepted with different identity or content.");
         }
 
@@ -226,12 +260,16 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         var observationUuid = await connection.ExecuteScalarAsync<Guid>(
             """
             INSERT INTO capture_observations
-              (stream_uuid, source_position, source_locator, content_signature,
+              (stream_uuid, source_position, locator_kind, locator_native_id,
+               locator_byte_offset, locator_byte_length,
+               source_timestamp_raw, source_timestamp_parsed, content_signature,
                effective_namespace, route_basis, source, adapter, safe_source_payload,
                scan_status, scan_rule_set_version, scan_rule_ids, scan_categories,
                scan_redaction_count)
             VALUES
-              (@StreamUuid, @SourcePosition, @SourceLocator, @contentSignature,
+              (@StreamUuid, @SourcePosition, @Kind, @NativeId,
+               @ByteOffset, @ByteLength, @SourceTimestampRaw, @SourceTimestampParsed,
+               @contentSignature,
                @EffectiveNamespace, @RouteBasis, CAST(@source AS jsonb), CAST(@adapter AS jsonb),
                CAST(@safePayload AS jsonb), @ScanStatus, @RuleSetVersion, @RuleIds,
                @Categories, @RedactionCount)
@@ -241,7 +279,12 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             {
                 stream.StreamUuid,
                 request.SourcePosition,
-                request.SourceLocator,
+                request.Locator.Kind,
+                request.Locator.NativeId,
+                request.Locator.ByteOffset,
+                request.Locator.ByteLength,
+                SourceTimestampRaw = request.SourceTimestamp?.Raw,
+                SourceTimestampParsed = request.SourceTimestamp?.Parsed,
                 contentSignature,
                 stream.EffectiveNamespace,
                 stream.RouteBasis,
@@ -327,7 +370,7 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             """
             SELECT o.observation_uuid AS ObservationUuid, b.stable_name AS StableName,
                    b.harness, s.source_session_id AS SourceSessionId,
-                   o.source_position AS SourcePosition, o.source_locator AS SourceLocator,
+                   o.source_position AS SourcePosition,
                    o.effective_namespace AS EffectiveNamespace,
                    o.route_basis AS RouteBasis, o.safe_source_payload::text AS SafeSourcePayload,
                    o.scan_status AS ScanStatus,
@@ -350,7 +393,7 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         var events = await LoadEventReceiptsAsync(connection, observationUuid);
         return new CaptureReceiptRecord(
             row.ObservationUuid, row.StableName, row.Harness, row.SourceSessionId,
-            row.SourcePosition, row.SourceLocator, row.EffectiveNamespace, row.RouteBasis, "new",
+            row.SourcePosition, row.EffectiveNamespace, row.RouteBasis, "new",
             row.ScanStatus, row.ScanRuleSetVersion, row.ScanRuleIds, row.ScanCategories,
             row.ScanRedactionCount,
             row.SafeSourcePayload, row.CapturedAt, observation, events);
@@ -363,7 +406,11 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             throw new InvalidOperationException("Only capture contractVersion 1 is supported.");
         }
         Require(request.SourceSessionId, nameof(request.SourceSessionId));
-        Require(request.SourceLocator, nameof(request.SourceLocator));
+        ValidateLocator(request.Locator);
+        if (request.SourceTimestamp is not null)
+        {
+            Require(request.SourceTimestamp.Raw, "sourceTimestamp.raw");
+        }
         if (!string.Equals(binding.Harness, request.Source.Harness, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Source harness does not match the authenticated binding.");
@@ -376,11 +423,62 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         {
             throw new InvalidOperationException("Event partKey values must be unique within an observation.");
         }
+        foreach (var relationship in request.Events.SelectMany(item => item.Relationships ?? []))
+        {
+            Require(relationship.Type, "relationship.type");
+            if (relationship.Target is null)
+            {
+                throw new ArgumentException("relationship.target is required.");
+            }
+            Require(relationship.Target.NativeId, "relationship.target.nativeId");
+            if (relationship.Target.SourceStreamUuid is not null)
+            {
+                throw new ArgumentException(
+                    "relationship.target.sourceStreamUuid is server-derived for this capture slice.");
+            }
+        }
         if (request.SourcePosition < 0)
         {
             throw new InvalidOperationException("sourcePosition must be zero or greater.");
         }
     }
+
+    private static void ValidateLocator(CaptureLocator locator)
+    {
+        if (locator is null)
+        {
+            throw new ArgumentException("locator is required.");
+        }
+        if (string.Equals(locator.Kind, "native_id", StringComparison.Ordinal))
+        {
+            Require(locator.NativeId ?? "", "locator.nativeId");
+            if (locator.ByteOffset is not null || locator.ByteLength is not null)
+            {
+                throw new ArgumentException(
+                    "native_id locator accepts nativeId only.");
+            }
+            return;
+        }
+        if (string.Equals(locator.Kind, "byte_range", StringComparison.Ordinal))
+        {
+            if (locator.NativeId is not null
+                || locator.ByteOffset is null
+                || locator.ByteOffset < 0
+                || locator.ByteLength is null
+                || locator.ByteLength <= 0)
+            {
+                throw new ArgumentException(
+                    "byte_range locator requires byteOffset >= 0 and byteLength > 0 only.");
+            }
+            return;
+        }
+        throw new ArgumentException("locator.kind must be native_id or byte_range.");
+    }
+
+    private static string Describe(CaptureLocator locator) =>
+        locator.Kind == "native_id"
+            ? locator.NativeId ?? ""
+            : $"{locator.ByteOffset}+{locator.ByteLength}";
 
     private static void Require(string value, string name)
     {
@@ -434,8 +532,12 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             """
             SELECT o.observation_uuid AS ObservationUuid,
                    o.stream_uuid AS SourceStreamUuid,
-                   o.source_position AS SourcePosition,
-                   o.source_locator AS SourceLocator,
+                   o.locator_kind AS LocatorKind,
+                   o.locator_native_id AS LocatorNativeId,
+                   o.locator_byte_offset AS LocatorByteOffset,
+                   o.locator_byte_length AS LocatorByteLength,
+                   o.source_timestamp_raw AS SourceTimestampRaw,
+                   o.source_timestamp_parsed AS SourceTimestampParsed,
                    o.source::text AS SourceJson,
                    o.adapter::text AS AdapterJson,
                    o.safe_source_payload::text AS SafeSourcePayloadJson,
@@ -452,9 +554,16 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         return new CaptureObservationReceipt(
             row.ObservationUuid,
             row.SourceStreamUuid,
-            row.SourcePosition,
-            row.SourceLocator,
             JsonSerializer.Deserialize<CaptureSource>(row.SourceJson, JsonOptions)!,
+            new CaptureLocator(
+                row.LocatorKind,
+                row.LocatorNativeId,
+                row.LocatorByteOffset,
+                row.LocatorByteLength),
+            row.SourceTimestampRaw is null
+                ? null
+                : new CaptureSourceTimestamp(
+                    row.SourceTimestampRaw, row.SourceTimestampParsed),
             JsonSerializer.Deserialize<CaptureAdapter>(row.AdapterJson, JsonOptions)!,
             JsonDocument.Parse(row.SafeSourcePayloadJson).RootElement.Clone(),
             new CaptureScanReceipt(
@@ -475,18 +584,20 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             """
             SELECT trace_uuid AS TraceUuid, session_id AS SessionId,
                    agent_id AS AgentId, namespace,
+                   o.stream_uuid AS SourceStreamUuid,
                    part_key AS PartKey, part_order AS PartOrder,
                    kind, actor, occurred_at AS OccurredAt,
                    payload_version AS PayloadVersion, payload::text AS PayloadJson
-            FROM captured_events
-            WHERE observation_uuid = @observationUuid
+            FROM captured_events e
+            JOIN capture_observations o USING (observation_uuid)
+            WHERE e.observation_uuid = @observationUuid
             ORDER BY part_order
             """,
             new { observationUuid }, transaction)).AsList();
         var receipts = new List<CaptureEventReceipt>(events.Count);
         foreach (var item in events)
         {
-            var relationships = (await connection.QueryAsync<CaptureRelationship>(
+            var relationships = (await connection.QueryAsync<RelationshipRow>(
                 """
                 SELECT relationship_type AS Type, target_native_id AS TargetNativeId,
                        target_kind AS TargetKind
@@ -507,7 +618,12 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 item.OccurredAt,
                 item.PayloadVersion,
                 JsonDocument.Parse(item.PayloadJson).RootElement.Clone(),
-                relationships));
+                relationships.Select(relationship => new CaptureRelationship(
+                    relationship.Type,
+                    new CaptureRelationshipTarget(
+                        item.SourceStreamUuid,
+                        relationship.TargetNativeId,
+                        relationship.TargetKind))).ToArray()));
         }
         return receipts;
     }
@@ -533,8 +649,17 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
     {
         public Guid ObservationUuid { get; set; }
         public long SourcePosition { get; set; }
-        public string SourceLocator { get; set; } = "";
+        public string LocatorKind { get; set; } = "";
+        public string? LocatorNativeId { get; set; }
+        public long? LocatorByteOffset { get; set; }
+        public long? LocatorByteLength { get; set; }
         public string ContentSignature { get; set; } = "";
+
+        public bool Matches(CaptureLocator locator) =>
+            string.Equals(LocatorKind, locator.Kind, StringComparison.Ordinal)
+            && string.Equals(LocatorNativeId, locator.NativeId, StringComparison.Ordinal)
+            && LocatorByteOffset == locator.ByteOffset
+            && LocatorByteLength == locator.ByteLength;
     }
     private sealed class ReceiptRow
     {
@@ -543,7 +668,6 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         public string Harness { get; set; } = "";
         public string SourceSessionId { get; set; } = "";
         public long SourcePosition { get; set; }
-        public string SourceLocator { get; set; } = "";
         public string EffectiveNamespace { get; set; } = "";
         public string RouteBasis { get; set; } = "";
         public string SafeSourcePayload { get; set; } = "";
@@ -567,13 +691,24 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         public DateTimeOffset? OccurredAt { get; set; }
         public int PayloadVersion { get; set; }
         public string PayloadJson { get; set; } = "";
+        public Guid SourceStreamUuid { get; set; }
+    }
+    private sealed class RelationshipRow
+    {
+        public string Type { get; set; } = "";
+        public string TargetNativeId { get; set; } = "";
+        public string? TargetKind { get; set; }
     }
     private sealed class ObservationReceiptRow
     {
         public Guid ObservationUuid { get; set; }
         public Guid SourceStreamUuid { get; set; }
-        public long SourcePosition { get; set; }
-        public string SourceLocator { get; set; } = "";
+        public string LocatorKind { get; set; } = "";
+        public string? LocatorNativeId { get; set; }
+        public long? LocatorByteOffset { get; set; }
+        public long? LocatorByteLength { get; set; }
+        public string? SourceTimestampRaw { get; set; }
+        public DateTimeOffset? SourceTimestampParsed { get; set; }
         public string SourceJson { get; set; } = "";
         public string AdapterJson { get; set; } = "";
         public string SafeSourcePayloadJson { get; set; } = "";
@@ -591,7 +726,8 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
     private sealed record CaptureSignatureContent(
         int ContractVersion,
         string SourceSessionId,
-        string SourceLocator,
+        CaptureLocator Locator,
+        CaptureSourceTimestamp? SourceTimestamp,
         CaptureSource Source,
         CaptureAdapter Adapter,
         JsonElement SourcePayload,

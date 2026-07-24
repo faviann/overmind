@@ -303,55 +303,27 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
         case "receipt":
             RequireArgs(args, 3);
             var receipt = await capture.ReadReceiptAsync(Guid.Parse(args[2]));
-            Console.WriteLine(
-                $"{receipt.ObservationUuid} status={receipt.Status} " +
-                $"position={receipt.SourcePosition} namespace={receipt.EffectiveNamespace} " +
-                $"route={receipt.RouteBasis}");
-            Console.WriteLine(
-                $"binding={receipt.StableName} harness={receipt.Harness} " +
-                $"session={receipt.SourceSessionId} locator={receipt.SourceLocator}");
-            Console.WriteLine($"content={receipt.SafeSourcePayload}");
-            Console.WriteLine(
-                $"source_stream={receipt.Observation.SourceStreamUuid} " +
-                $"position={receipt.Observation.SourcePosition} " +
-                $"locator={receipt.Observation.SourceLocator} " +
-                $"captured_at={receipt.Observation.CapturedAt:O}");
-            Console.WriteLine(
-                $"source={receipt.Observation.Source.Harness}:" +
-                $"{receipt.Observation.Source.HarnessVersion ?? "<none>"} " +
-                $"record_type={receipt.Observation.Source.RecordType ?? "<none>"}");
-            Console.WriteLine(
-                $"adapter={receipt.Observation.Adapter.Name}:" +
-                $"{receipt.Observation.Adapter.Version}");
-            Console.WriteLine(
-                $"safe_source_payload={JsonSerializer.Serialize(receipt.Observation.SafeSourcePayload)}");
-            Console.WriteLine(
-                $"scan={receipt.ScanStatus} rule_set={receipt.ScanRuleSetVersion} " +
-                $"rules={string.Join(',', receipt.ScanRuleIds)} " +
-                $"categories={string.Join(',', receipt.ScanCategories)} " +
-                $"redactions={receipt.ScanRedactionCount}");
             foreach (var item in receipt.Events)
             {
-                Console.WriteLine($"event={item.TraceUuid} part={item.PartKey}");
-                Console.WriteLine(
-                    $"session={item.SessionId} agent={item.AgentId} namespace={item.Namespace}");
-                Console.WriteLine(
-                    $"part={item.PartKey} order={item.PartOrder} kind={item.Kind} " +
-                    $"actor={item.Actor}");
-                Console.WriteLine(
-                    $"occurred_at={item.OccurredAt?.ToString("O") ?? "<none>"} " +
-                    $"payload_version={item.PayloadVersion}");
-                Console.WriteLine($"payload={JsonSerializer.Serialize(item.Payload)}");
-                foreach (var relationship in item.Relationships)
-                {
-                    Console.WriteLine(
-                        $"relationship={relationship.Type} " +
-                        $"target={relationship.TargetNativeId} " +
-                        $"target_kind={relationship.TargetKind ?? "<none>"}");
-                }
+                var envelope = new CapturedEventEnvelope(
+                    1,
+                    receipt.Observation,
+                    new CanonicalCapturedEvent(
+                        item.TraceUuid,
+                        item.SessionId,
+                        item.AgentId,
+                        item.Namespace,
+                        item.PartKey,
+                        item.PartOrder,
+                        item.Kind,
+                        item.Actor,
+                        item.OccurredAt,
+                        item.PayloadVersion,
+                        item.Payload),
+                    item.Relationships);
+                Console.WriteLine(JsonSerializer.Serialize(
+                    envelope, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
             }
-            Console.WriteLine(
-                "LIMITATION: receipt is for the disabled non-production synthetic Codex slice.");
             return 0;
 
         default:

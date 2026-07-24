@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -19,7 +20,11 @@ string endpoint = Required("OVERMIND_CAPTURE_URL").TrimEnd('/');
 string credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
 string fixturePath = Required("OVERMIND_CODEX_FIXTURE");
 byte[] fixtureBytes = await File.ReadAllBytesAsync(fixturePath);
-var records = new List<(JsonElement Payload, long ByteOffset, long ByteLength)>();
+var records = new List<(
+    JsonElement Payload,
+    long ByteOffset,
+    long ByteLength,
+    string SourceContentSha256)>();
 int lineStart = 0;
 for (int index = 0; index <= fixtureBytes.Length; index++)
 {
@@ -38,7 +43,10 @@ for (int index = 0; index <= fixtureBytes.Length; index++)
         records.Add((
             JsonDocument.Parse(line).RootElement.Clone(),
             lineStart,
-            lineLength));
+            lineLength,
+            Convert.ToHexString(
+                SHA256.HashData(fixtureBytes.AsSpan(lineStart, lineLength)))
+                .ToLowerInvariant()));
     }
     lineStart = index + 1;
 }
@@ -120,7 +128,8 @@ for (var position = 0; position < records.Count; position++)
         {
             kind = "byte_range",
             byteOffset = records[position].ByteOffset,
-            byteLength = records[position].ByteLength
+            byteLength = records[position].ByteLength,
+            sourceContentSha256 = records[position].SourceContentSha256
         },
         source = new
         {

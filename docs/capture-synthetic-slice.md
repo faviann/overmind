@@ -71,6 +71,11 @@ writes and checkpoint movement, not reads.
 - Source positions begin at zero and must advance exactly one past the
   server-owned contiguous checkpoint. Stream namespace and route basis are
   fixed by the binding policy on first import and reused by later catch-up.
+- A `byte_range` import includes the lowercase SHA-256 of those exact trusted
+  source bytes. The server validates it and includes it only inside the
+  binding-keyed retry signature; the raw digest is neither persisted nor
+  returned. Equal-length source rewrites therefore conflict even when they
+  parse to the same JSON. A `native_id` locator has no byte-content digest.
 - Retry comparison uses a server-owned random per-binding HMAC key. Receipts
   expose canonical scan status, rule-set version, applied rule IDs/categories,
   and aggregate redaction count; raw unsafe input and an unkeyed fingerprint of
@@ -83,3 +88,7 @@ writes and checkpoint movement, not reads.
 - The endpoint is versioned and non-MCP. Capture credentials work only there;
   agent bearer keys work only at `/mcp`. There is no captured-content read
   capability.
+- The runtime role may insert capture bindings, streams, and ledger rows, but
+  has no binding UPDATE authority. Its only stream UPDATE columns are
+  `checkpoint_position` and `updated_at`; binding identity/credentials/routes
+  and stream identity/routes remain immutable to the server process.

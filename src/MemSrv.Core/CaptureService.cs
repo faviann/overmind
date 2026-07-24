@@ -129,6 +129,10 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         {
             AssertSafe(request.Locator.NativeId, scan);
         }
+        if (request.Locator.SourceContentSha256 is not null)
+        {
+            AssertSafe(request.Locator.SourceContentSha256, scan);
+        }
         if (request.SourceTimestamp is not null)
         {
             AssertSafe(request.SourceTimestamp.Raw, scan);
@@ -451,7 +455,9 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         if (string.Equals(locator.Kind, "native_id", StringComparison.Ordinal))
         {
             Require(locator.NativeId ?? "", "locator.nativeId");
-            if (locator.ByteOffset is not null || locator.ByteLength is not null)
+            if (locator.ByteOffset is not null
+                || locator.ByteLength is not null
+                || locator.SourceContentSha256 is not null)
             {
                 throw new ArgumentException(
                     "native_id locator accepts nativeId only.");
@@ -464,15 +470,21 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 || locator.ByteOffset is null
                 || locator.ByteOffset < 0
                 || locator.ByteLength is null
-                || locator.ByteLength <= 0)
+                || locator.ByteLength <= 0
+                || !IsLowerHexSha256(locator.SourceContentSha256))
             {
                 throw new ArgumentException(
-                    "byte_range locator requires byteOffset >= 0 and byteLength > 0 only.");
+                    "byte_range locator requires byteOffset >= 0, byteLength > 0, " +
+                    "and a 64-character lowercase sourceContentSha256.");
             }
             return;
         }
         throw new ArgumentException("locator.kind must be native_id or byte_range.");
     }
+
+    private static bool IsLowerHexSha256(string? value) =>
+        value is { Length: 64 }
+        && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static string Describe(CaptureLocator locator) =>
         locator.Kind == "native_id"
@@ -558,7 +570,8 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 row.LocatorKind,
                 row.LocatorNativeId,
                 row.LocatorByteOffset,
-                row.LocatorByteLength),
+                row.LocatorByteLength,
+                null),
             row.SourceTimestampRaw is null
                 ? null
                 : new CaptureSourceTimestamp(

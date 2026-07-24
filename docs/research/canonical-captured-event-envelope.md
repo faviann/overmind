@@ -148,6 +148,13 @@ deterministically. If scanning, structure, or size budgets fail, metadata is
 retained while the unsafe field or payload becomes an explicit omission marker.
 The ledger never stores an unscanned tail.
 
+For a verified byte locator, delivery also supplies an exact source-byte
+SHA-256 to make retry comparison sensitive to byte-preserving semantic
+rewrites such as JSON whitespace changes. That transport proof is validated
+and folded only into a binding-keyed content signature. It is not canonical
+observation provenance, is not persisted or returned as a raw unkeyed digest,
+and is absent for native-ID locators.
+
 ## Event contract
 
 The relational event header contains stable, frequently queried invariants:

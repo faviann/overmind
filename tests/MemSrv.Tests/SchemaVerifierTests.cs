@@ -108,6 +108,56 @@ public sealed class SchemaVerifierTests
     }
 
     [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenMemsrvCanUpdateCaptureBindingAuthority()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, "GRANT UPDATE ON capture_source_bindings TO memsrv");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains("capture_source_bindings.stable_name", stderr, StringComparison.Ordinal);
+            Assert.Contains("capture_source_bindings.credential_hash", stderr, StringComparison.Ordinal);
+            Assert.Contains("capture_source_bindings.content_signature_key", stderr, StringComparison.Ordinal);
+            Assert.Contains("capture_source_bindings.route_namespace", stderr, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenMemsrvCanUpdateCaptureStreamAuthority()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, "GRANT UPDATE ON capture_source_streams TO memsrv");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains("capture_source_streams.binding_uuid", stderr, StringComparison.Ordinal);
+            Assert.Contains("capture_source_streams.source_session_id", stderr, StringComparison.Ordinal);
+            Assert.Contains("capture_source_streams.effective_namespace", stderr, StringComparison.Ordinal);
+            Assert.Contains("capture_source_streams.route_basis", stderr, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenCaptureCheckpointColumnGrantIsMissing()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(
+                admin,
+                "REVOKE UPDATE (checkpoint_position) ON capture_source_streams FROM memsrv");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains(
+                "missing UPDATE on 'public.capture_source_streams.checkpoint_position'",
+                stderr,
+                StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public async Task MemCtlVerifySchemaFailsWhenBootstrapNamespaceIsMissing()
     {
         await WithDisposableDbAsync(async admin =>

@@ -37,8 +37,8 @@ public static class SchemaVerifier
         ("jobs", ["SELECT", "INSERT", "UPDATE"]),
         ("retrieval_config", ["SELECT", "INSERT", "UPDATE"]),
         ("namespaces", ["SELECT", "INSERT", "UPDATE"]),
-        ("capture_source_bindings", ["SELECT", "INSERT", "UPDATE"]),
-        ("capture_source_streams", ["SELECT", "INSERT", "UPDATE"]),
+        ("capture_source_bindings", ["SELECT", "INSERT"]),
+        ("capture_source_streams", ["SELECT", "INSERT"]),
         ("capture_observations", ["SELECT", "INSERT"]),
         ("captured_events", ["SELECT", "INSERT"]),
         ("captured_event_relationships", ["SELECT", "INSERT"]),
@@ -250,6 +250,8 @@ public static class SchemaVerifier
             }
         }
 
+        await CheckCaptureUpdateGrantsAsync(conn, existingTables, result);
+
         // traces (and its snapshots) are append-only by grant as well as by trigger.
         foreach (var table in new[]
         {
@@ -291,6 +293,55 @@ public static class SchemaVerifier
                     new { role = MemsrvRole, sequence = $"public.{sequence}" }))
             {
                 result.Fail($"Role '{MemsrvRole}' is missing USAGE on sequence 'public.{sequence}'.");
+            }
+        }
+    }
+
+    private static async Task CheckCaptureUpdateGrantsAsync(
+        NpgsqlConnection conn,
+        HashSet<string> existingTables,
+        SchemaVerificationResult result)
+    {
+        foreach (var (table, allowedColumns) in new[]
+        {
+            ("capture_source_bindings", Array.Empty<string>()),
+            ("capture_source_streams", new[] { "checkpoint_position", "updated_at" })
+        })
+        {
+            if (!existingTables.Contains(table))
+            {
+                continue;
+            }
+
+            var columns = await conn.QueryAsync<string>(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = @table
+                ORDER BY ordinal_position
+                """,
+                new { table });
+            foreach (var column in columns)
+            {
+                bool granted = await conn.ExecuteScalarAsync<bool>(
+                    "SELECT has_column_privilege(@role, @table, @column, 'UPDATE')",
+                    new
+                    {
+                        role = MemsrvRole,
+                        table = $"public.{table}",
+                        column
+                    });
+                bool expected = allowedColumns.Contains(column, StringComparer.Ordinal);
+                if (expected && !granted)
+                {
+                    result.Fail(
+                        $"Role '{MemsrvRole}' is missing UPDATE on 'public.{table}.{column}'.");
+                }
+                else if (!expected && granted)
+                {
+                    result.Fail(
+                        $"Role '{MemsrvRole}' must not have UPDATE on 'public.{table}.{column}'.");
+                }
             }
         }
     }

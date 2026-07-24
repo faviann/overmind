@@ -12,7 +12,9 @@ public sealed record CaptureLocator(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     long? ByteOffset,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    long? ByteLength);
+    long? ByteLength,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? SourceContentSha256);
 public sealed record CaptureSourceTimestamp(string Raw, DateTimeOffset? Parsed);
 public sealed record CaptureRelationshipTarget(
     Guid? SourceStreamUuid,

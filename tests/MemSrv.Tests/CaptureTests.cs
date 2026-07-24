@@ -397,7 +397,21 @@ public sealed class CaptureTests : HttpSeamTestBase
                 nativeId = $"native-{Guid.NewGuid():N}",
                 byteOffset = 0L
             },
+            new
+            {
+                kind = "native_id",
+                nativeId = $"native-{Guid.NewGuid():N}",
+                sourceContentSha256 = new string('a', 64)
+            },
             new { kind = "byte_range", byteOffset = 0L },
+            new { kind = "byte_range", byteOffset = 0L, byteLength = 10L },
+            new
+            {
+                kind = "byte_range",
+                byteOffset = 0L,
+                byteLength = 10L,
+                sourceContentSha256 = new string('A', 64)
+            },
             new
             {
                 kind = "byte_range",
@@ -620,6 +634,59 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ByteRangeRetryConflictsWhenExactFixtureBytesChangeWithoutChangingJson()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-byte-identity-{Guid.NewGuid():N}", captureKey);
+        string fixtureSessionId = UniqueSession();
+        string fixtureCallId = $"call_{Guid.NewGuid():N}";
+        string fixturePath = Path.Combine(
+            Path.GetTempPath(), $"codex-byte-identity-{Guid.NewGuid():N}.jsonl");
+        string fixture = await File.ReadAllTextAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+        fixture = fixture
+            .Replace("codex-synthetic-session", fixtureSessionId, StringComparison.Ordinal)
+            .Replace("call_fixture_1", fixtureCallId, StringComparison.Ordinal);
+        string firstBytes = fixture.Replace(
+            "\"type\":\"response_item\"",
+            "\"type\": \"response_item\"",
+            StringComparison.Ordinal);
+        string changedBytes = fixture.Replace(
+            "\"type\":\"response_item\"",
+            "\"type\" :\"response_item\"",
+            StringComparison.Ordinal);
+        Assert.Equal(
+            Encoding.UTF8.GetByteCount(firstBytes),
+            Encoding.UTF8.GetByteCount(changedBytes));
+
+        try
+        {
+            await File.WriteAllTextAsync(fixturePath, firstBytes, new UTF8Encoding(false));
+            var first = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(0, first.ExitCode);
+            var firstReceipt = JsonDocument.Parse(first.Stdout.Split(
+                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
+            Guid observationUuid = firstReceipt.GetProperty("observationUuid").GetGuid();
+            string beforeConflict = await RunMemCtlAsync(
+                "capture", "receipt", observationUuid.ToString());
+
+            await File.WriteAllTextAsync(fixturePath, changedBytes, new UTF8Encoding(false));
+            var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(1, conflict.ExitCode);
+            Assert.Empty(conflict.Stdout);
+            Assert.Contains("HTTP 409", conflict.Stderr);
+
+            string afterConflict = await RunMemCtlAsync(
+                "capture", "receipt", observationUuid.ToString());
+            Assert.Equal(beforeConflict, afterConflict);
+        }
+        finally
+        {
+            File.Delete(fixturePath);
+        }
+    }
+
+    [Fact]
     public async Task ObservationFanoutAndCheckpointAdvanceAreAtomic()
     {
         var captureKey = CaptureCredential();
@@ -802,6 +869,18 @@ public sealed class CaptureTests : HttpSeamTestBase
             File.Delete(path);
         }
     }
+
+    private Task<(int ExitCode, string Stdout, string Stderr)> RunEnabledTracerAsync(
+        string captureKey,
+        string fixturePath) =>
+        TestProcessRunner.RunCaptureTracerToExitAsync(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_FIXTURE"] = fixturePath
+            });
 
     private static object Observation(
         string sourceSessionId, long position, string nativeId, string message) => new

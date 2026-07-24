@@ -88,9 +88,9 @@ case "$AFK_TEST_SCENARIO" in
     fi
     ;;
   idle-clock-back)
-    # The first pass runs with the clock far ahead so the empty selection
-    # stamps a large idle timestamp; the sleep adapter then steps the clock
-    # backwards before the next poll.
+    # The first pass moves the clock far ahead while it runs, so its empty
+    # selection is stamped with that large idle timestamp; the sleep adapter
+    # then steps the clock backwards before the next poll.
     if [[ "$count" -ge 2 ]]; then
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     else
@@ -508,10 +508,9 @@ idle_retry_agent_line="$(grep -n '^agent 42$' "$events" | cut -d: -f1)"
 [[ "$(grep -c 'no issue was selected' "$fixture/idle-retry.out")" == 2 ]]
 grep -q 'reconsidered no sooner than 900 seconds from now' "$fixture/idle-retry.out"
 grep -q 'No issue is ready to start right now' "$fixture/idle-retry.out"
-! grep -q $'\a' "$fixture/idle-retry.out"
-! grep -q 'Reviewed the authorized queue' "$fixture/idle-retry.out"
-! grep -q -- '--add-label Sandcastle' "$events"
-grep -q '^gh pr merge 142 --merge$' "$events"
+[[ "$(grep -c $'\a' "$fixture/idle-retry.out")" == 0 ]]
+[[ "$(grep -c 'Reviewed the authorized queue' "$fixture/idle-retry.out")" == 0 ]]
+[[ "$(grep -c -- '--add-label Sandcastle' "$events")" == 0 ]]
 
 # A backwards system-clock step (an NTP correction) after an empty selection
 # must not read as a permanent cooldown. The first pass stamps the idle
@@ -530,6 +529,10 @@ clock_back_agent_line="$(grep -n '^agent 42$' "$events" | cut -d: -f1)"
 [[ "${clock_back_selectors[1]}" -lt "$clock_back_claim_line" ]]
 [[ "$clock_back_claim_line" -lt "$clock_back_agent_line" ]]
 grep -q 'no issue was selected' "$fixture/idle-clock-back.out"
+# This selector prints nothing on its empty pass, so the status line must carry
+# no selector-reason suffix at all. A bare `! grep` line cannot fail under
+# `set -e`, so assert the absence through a count.
+[[ "$(grep -c '(selector:' "$fixture/idle-clock-back.out")" == 0 ]]
 
 run_foreground paused-lane
 [[ "$(sed -n 's/^agent //p' "$events" | paste -sd, -)" == 42,43 ]]

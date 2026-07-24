@@ -224,7 +224,6 @@ while :; do
       sleep_until_poll
       continue
     fi
-    last_idle_frontier=""
   fi
 
   selection="$($selector afk)" || fail "intelligent AFK selection failed"

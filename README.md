@@ -70,7 +70,8 @@ pull request open for review:
 - Merge preflight requires the default branch to be protected: it must require
   pull requests, require branches to be up to date before merging (strict
   status checks), and require every designated CI check. Designated checks come
-  from `AFK_REQUIRED_CHECKS` (space-separated, default `test`). An unprotected
+  from `AFK_REQUIRED_CHECKS` (space-separated, default
+  `test test-compose reference-compose`). An unprotected
   or under-protected branch refuses the merge.
 - Merge eligibility requires durable evidence that the work fully closed the
   issue: the pull request body must `Closes #<issue>` (never `Progresses` it)

@@ -266,7 +266,7 @@ case "$*" in
     fi ;;
   pr\ view\ *\ --json\ body\ --jq\ .body)
     pr="${3}"; issue="$((pr - 100))"
-    if [[ "$AFK_TEST_SCENARIO" == paused-lane || "$AFK_TEST_SCENARIO" == paused-only ]] && [[ "$issue" == 42 ]]; then
+    if [[ "$AFK_TEST_SCENARIO" == paused-lane || "$AFK_TEST_SCENARIO" == paused-only || "$AFK_TEST_SCENARIO" == default-race ]] && [[ "$issue" == 42 ]]; then
       printf 'Progresses #%s\n\n| Final workflow outcome | Progresses |\n' "$issue"
     elif [[ "$AFK_TEST_SCENARIO" == nonblocking-discovery || "$AFK_TEST_SCENARIO" == blocking-discovery-lane || "$AFK_TEST_SCENARIO" == uncertain-discovery-only || "$AFK_TEST_SCENARIO" == idle-discovery-uncertain ]] && [[ "$issue" == 42 ]]; then
       printf 'Closes #%s\n\n## Follow-ups\n\n- #77 - discovered work\n\n## Closure gate\n\n| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |\n|---|---|---|---|---|\n| Scripted watcher criterion | `run-afk-once.sh` | Public watcher fixture | Scenario output | tested |\n\n| Final workflow outcome | Closes |\n' "$issue"
@@ -578,7 +578,8 @@ run_foreground default-race
 [[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
 advanced_oid="$(sed -n 's/^agent-base 42 //p' "$events")"
 [[ -n "$advanced_oid" && "$advanced_oid" != "$base_oid" ]]
-git -C "$repo" merge-base --is-ancestor "$advanced_oid" origin/main || {
+! grep -q '^gh pr merge 142 --merge$' "$events"
+[[ "$advanced_oid" == "$(git -C "$repo" rev-parse origin/main)" ]] || {
   cat "$fixture/default-race.out" >&2
   cat "$events" >&2
   exit 1

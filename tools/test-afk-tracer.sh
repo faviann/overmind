@@ -87,6 +87,12 @@ cat >"$AFK_TEST_PR_BODY" <<'BODY'
 
 Closes #42
 
+## Closure gate
+
+| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |
+|---|---|---|---|---|
+| Scripted AFK workflow completes issue #42 | `run-afk-once.sh` | Public one-shot tracer fixture | Scenario output | tested |
+
 ## Workflow telemetry
 
 | Field | Observed value |
@@ -112,7 +118,10 @@ printf 'gh %s\n' "$*" >>"$AFK_TEST_EVENTS"
 if [[ "${1:-} ${2:-}" == "pr create" ]]; then
   [[ "$*" == "pr create --head afk/issue-42 --body-file $AFK_TEST_PR_BODY" ]]
   grep -q '^Closes #42$' "$AFK_TEST_PR_BODY"
+  grep -q '^## Closure gate$' "$AFK_TEST_PR_BODY"
+  grep -Fq '| Scripted AFK workflow completes issue #42 | `run-afk-once.sh` | Public one-shot tracer fixture | Scenario output | tested |' "$AFK_TEST_PR_BODY"
   grep -q '^## Workflow telemetry$' "$AFK_TEST_PR_BODY"
+  grep -Fq '| Final workflow outcome | Closes |' "$AFK_TEST_PR_BODY"
   printf 'pr-created\n' >>"$AFK_TEST_STATE"
   printf 'https://github.com/acme/widget/pull/7\n'
   exit 0
@@ -144,16 +153,19 @@ case "$*" in
       printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"},{"name":"Sandcastle"}]}\n'
     fi ;;
   "api repos/acme/widget/branches/main/protection")
-    # The fixture default branch is unprotected, so the guarded merge stage
-    # must refuse and leave the pull request awaiting review.
-    printf 'Branch not protected\n' >&2
-    exit 1
+    protection_call="$(grep -c '^gh api repos/acme/widget/branches/main/protection$' "$AFK_TEST_EVENTS")"
+    if [[ "$protection_call" == 2 ]]; then
+      printf '%s\n' '{"required_pull_request_reviews":null,"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}'
+    else
+      printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}'
+    fi
     ;;
   "pr list --head afk/issue-42 --state open --json number --jq .[].number")
     grep -qx pr-created "$AFK_TEST_STATE"
     printf '7\n'
     ;;
   "pr edit 7 --add-label afk-review") ;;
+  "pr view 7 --json body --jq .body") cat "$AFK_TEST_PR_BODY" ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 90 ;;
 esac
 EOF
@@ -266,7 +278,9 @@ grep -Eq '^codex-agent cwd=.*/\.sandcastle/worktrees/.* branch=afk/issue-42 args
 git -C "$repo" show-ref --verify --quiet refs/heads/afk/issue-42
 git -C "$repo" show afk/issue-42:afk-result.txt | grep -q '^completed by scripted work-on boundary$'
 grep -qx pr-created "$state"
-grep -q '^gh pr edit 7 --add-label afk-review$' "$events"
+[[ "$(grep -c '^gh pr edit 7 --add-label afk-review$' "$events")" == 2 ]]
+[[ "$(grep -c '^gh api repos/acme/widget/branches/main/protection$' "$events")" == 2 ]]
+! grep -q '^gh pr checks 7 ' "$events"
 grep -Fxq '1200000' "$timer_events" || {
   echo "real Sandcastle did not schedule the configured 1,200,000 ms idle timer" >&2
   cat "$timer_events" >&2

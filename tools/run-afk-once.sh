@@ -46,6 +46,31 @@ git ls-remote --exit-code origin "refs/heads/$default_branch" >/dev/null 2>&1 ||
 git fetch --quiet origin "refs/heads/$default_branch:refs/remotes/origin/$default_branch" || \
   fail "could not synchronize origin/$default_branch; no issue was claimed"
 
+read -ra required_checks <<<"${AFK_REQUIRED_CHECKS:-test test-compose reference-compose}"
+[[ "${#required_checks[@]}" -gt 0 ]] || \
+  fail "no designated CI checks configured"
+
+protection="$(gh api "repos/$repo_name/branches/$default_branch/protection" 2>/dev/null)" || \
+  fail "default branch $default_branch is not protected"
+[[ "$(jq -r '.required_pull_request_reviews != null' <<<"$protection")" == true ]] || \
+  fail "default branch $default_branch does not require pull requests"
+[[ "$(jq -r '.required_status_checks.strict == true' <<<"$protection")" == true ]] || \
+  fail "default branch $default_branch does not require up-to-date branches"
+
+mapfile -t protected_checks < <(
+  jq -r '((.required_status_checks.checks // []) | map(.context))
+         + (.required_status_checks.contexts // [])
+         | .[]' <<<"$protection"
+)
+for required_check in "${required_checks[@]}"; do
+  present=0
+  for protected_check in "${protected_checks[@]}"; do
+    [[ "$protected_check" == "$required_check" ]] && { present=1; break; }
+  done
+  [[ "$present" == 1 ]] || \
+    fail "default branch $default_branch does not require designated check: $required_check"
+done
+
 [[ -x "$workflow_root/node_modules/.bin/tsx" && \
   -f "$workflow_root/node_modules/@ai-hero/sandcastle/package.json" ]] || \
   fail "checked-in AFK dependencies are not installed; run 'npm ci' in $workflow_root before launch"

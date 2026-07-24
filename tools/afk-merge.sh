@@ -17,7 +17,7 @@ branch="${2:?usage: afk-merge.sh <issue-number> <branch> <default-branch> <pr-nu
 default_branch="${3:?usage: afk-merge.sh <issue-number> <branch> <default-branch> <pr-number>}"
 pr_number="${4:?usage: afk-merge.sh <issue-number> <branch> <default-branch> <pr-number>}"
 
-read -ra required_checks <<<"${AFK_REQUIRED_CHECKS:-test}"
+read -ra required_checks <<<"${AFK_REQUIRED_CHECKS:-test test-compose reference-compose}"
 readonly ci_timeout_seconds=3600
 readonly ci_poll_seconds=30
 

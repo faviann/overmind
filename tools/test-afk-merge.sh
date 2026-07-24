@@ -177,10 +177,10 @@ case "$*" in
   "api repos/acme/widget/branches/main/protection")
     case "${AFK_TEST_PROTECTION:-good}" in
       404) printf 'Branch not protected (HTTP 404)\n' >&2; exit 1 ;;
-      good) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"}]}}' ;;
-      no-prs) printf '%s\n' '{"required_pull_request_reviews":null,"required_status_checks":{"strict":true,"checks":[{"context":"test"}]}}' ;;
-      not-strict) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":1},"required_status_checks":{"strict":false,"checks":[{"context":"test"}]}}' ;;
-      missing-check) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":1},"required_status_checks":{"strict":true,"checks":[{"context":"lint"}]}}' ;;
+      good) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}' ;;
+      no-prs) printf '%s\n' '{"required_pull_request_reviews":null,"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}' ;;
+      not-strict) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":1},"required_status_checks":{"strict":false,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}' ;;
+      missing-check) printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":1},"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"}]}}' ;;
       *) printf 'unexpected protection fixture: %s\n' "${AFK_TEST_PROTECTION}" >&2; exit 91 ;;
     esac ;;
   "pr view 7 --json body --jq .body")
@@ -192,15 +192,15 @@ case "$*" in
   "pr checks 7 --required --json name,state,bucket,link")
     checks_call="$(grep -c '^gh pr checks 7 ' "$AFK_TEST_EVENTS")"
     case "${AFK_TEST_CHECKS:-pass}" in
-      pass) printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]' ;;
+      pass) printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/100/job/1"},{"name":"test-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/100/job/2"},{"name":"reference-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/100/job/3"}]' ;;
       retry-pass)
         if [[ "$checks_call" == 1 ]]; then
-          printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]'
+          printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"},{"name":"test-compose","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/2"},{"name":"reference-compose","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/3"}]'
         else
-          printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/2"}]'
+          printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/1"},{"name":"test-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/2"},{"name":"reference-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/3"}]'
         fi ;;
-      repeat-fail) printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]' ;;
-      pending) printf '%s\n' '[{"name":"test","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]' ;;
+      repeat-fail) printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"},{"name":"test-compose","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/2"},{"name":"reference-compose","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/3"}]' ;;
+      pending) printf '%s\n' '[{"name":"test","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/1"},{"name":"test-compose","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/2"},{"name":"reference-compose","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/3"}]' ;;
       *) exit 91 ;;
     esac ;;
   "run rerun 100 --failed") ;;

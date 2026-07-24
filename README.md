@@ -139,8 +139,9 @@ full `work-on` lifecycle on a named isolated branch/worktree and labels the
 resulting pull request `afk-review`. It processes one issue at a time and starts
 each selection from the latest verified default branch. An empty or unchanged
 ineligible queue is polled without invoking an agent or selector model. When a
-selection pass chooses no issue, the watcher mutates nothing, reports the idle
-reason, and reconsiders the same unchanged authorized queue at the first poll
+selection pass chooses no issue, the watcher mutates nothing, always reports
+that no issue was selected — including the selector's reason when one is
+available — and reconsiders the same unchanged authorized queue at the first poll
 after a fixed 900-second cooldown; any real queue, dependency, issue-state, or
 default-branch change is reconsidered on the next poll. A first termination
 signal drains an active issue (or exits immediately while idle); a second

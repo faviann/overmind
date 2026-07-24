@@ -87,6 +87,16 @@ case "$AFK_TEST_SCENARIO" in
       printf 'Reviewed the authorized queue.\nNo issue is ready to start right now.\a\n\n'
     fi
     ;;
+  idle-clock-back)
+    # The first pass runs with the clock far ahead so the empty selection
+    # stamps a large idle timestamp; the sleep adapter then steps the clock
+    # backwards before the next poll.
+    if [[ "$count" -ge 2 ]]; then
+      printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
+    else
+      printf '5000\n' >"$AFK_TEST_CLOCK"
+    fi
+    ;;
   claim-race)
     printf 'authorization-removed\n' >>"$AFK_TEST_STATE"
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
@@ -170,6 +180,14 @@ case "$AFK_TEST_SCENARIO" in
       2) printf '1000\n' >"$AFK_TEST_CLOCK" ;;
       3) printf '1100\n' >"$AFK_TEST_CLOCK" ;;
       4) printf '2000\n' >"$AFK_TEST_CLOCK" ;;
+      *) kill -TERM "$PPID" ;;
+    esac ;;
+  idle-clock-back)
+    # Step the clock backwards past the stamped idle timestamp, as an NTP
+    # correction would. Elapsed time goes negative, and selection must still
+    # run on the following poll.
+    case "$count" in
+      1) printf '1000\n' >"$AFK_TEST_CLOCK" ;;
       *) kill -TERM "$PPID" ;;
     esac ;;
   reauthorize)
@@ -494,6 +512,24 @@ grep -q 'No issue is ready to start right now' "$fixture/idle-retry.out"
 ! grep -q 'Reviewed the authorized queue' "$fixture/idle-retry.out"
 ! grep -q -- '--add-label Sandcastle' "$events"
 grep -q '^gh pr merge 142 --merge$' "$events"
+
+# A backwards system-clock step (an NTP correction) after an empty selection
+# must not read as a permanent cooldown. The first pass stamps the idle
+# timestamp at 5000, the poll then moves the clock back to 1000, and the
+# unchanged authorized queue must still be reconsidered, claimed, and launched.
+run_foreground idle-clock-back
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
+mapfile -t clock_back_selectors < <(grep -n '^selector$' "$events" | cut -d: -f1)
+clock_back_sleep_line="$(grep -n '^sleep 0$' "$events" | head -n1 | cut -d: -f1)"
+clock_back_claim_line="$(grep -n '^claim 42$' "$events" | cut -d: -f1)"
+clock_back_agent_line="$(grep -n '^agent 42$' "$events" | cut -d: -f1)"
+[[ "${clock_back_selectors[0]}" -lt "$clock_back_sleep_line" ]]
+[[ "$clock_back_sleep_line" -lt "${clock_back_selectors[1]}" ]]
+[[ "${clock_back_selectors[1]}" -lt "$clock_back_claim_line" ]]
+[[ "$clock_back_claim_line" -lt "$clock_back_agent_line" ]]
+grep -q 'no issue was selected' "$fixture/idle-clock-back.out"
 
 run_foreground paused-lane
 [[ "$(sed -n 's/^agent //p' "$events" | paste -sd, -)" == 42,43 ]]

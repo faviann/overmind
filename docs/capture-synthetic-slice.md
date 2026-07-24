@@ -56,6 +56,9 @@ per event. Every line repeats the immutable observation, carries exactly one
 event, and places that event's source relationships at top level. It does not
 emit the HTTP delivery status/route wrapper; the import endpoint retains those
 delivery facts alongside its complete immutable observation and event facts.
+Receipt reads use already-sanitized durable rows and remain available when the
+scanner configuration is unavailable; scanner health gates enrollment/import
+writes and checkpoint movement, not reads.
 
 ## Explicit limitations
 
@@ -72,6 +75,11 @@ delivery facts alongside its complete immutable observation and event facts.
   expose canonical scan status, rule-set version, applied rule IDs/categories,
   and aggregate redaction count; raw unsafe input and an unkeyed fingerprint of
   it are not persisted.
+- Binding stable names and derived capture agent identities are rejected before
+  enrollment if the never-store gate detects a secret. Relationship target
+  stream scope remains nullable source evidence: an explicit
+  `target.sourceStreamUuid` round-trips unchanged, while an omitted scope stays
+  null rather than inheriting the source event's stream.
 - The endpoint is versioned and non-MCP. Capture credentials work only there;
   agent bearer keys work only at `/mcp`. There is no captured-content read
   capability.

@@ -140,11 +140,15 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
     }
 
-    [Fact]
-    public async Task AgentCredentialCannotBeEnrolledAsCaptureCredential()
+    [Theory]
+    [InlineData(AgentAKey)]
+    [InlineData("mcap_short")]
+    [InlineData("mcap_invalid!")]
+    public async Task InvalidCaptureFormCannotBeEnrolledAsCaptureCredential(
+        string invalidCredential)
     {
         var credentialPath = Path.Combine(Path.GetTempPath(), $"capture-key-{Guid.NewGuid():N}");
-        await File.WriteAllTextAsync(credentialPath, AgentAKey);
+        await File.WriteAllTextAsync(credentialPath, invalidCredential);
         try
         {
             var result = await RunMemCtlForResultAsync(
@@ -160,6 +164,124 @@ public sealed class CaptureTests : HttpSeamTestBase
         {
             File.Delete(credentialPath);
         }
+    }
+
+    [Fact]
+    public async Task CaptureBindingIdentityMustCrossNeverStoreBeforeEnrollment()
+    {
+        string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
+        foreach (bool secretInStableName in new[] { true, false })
+        {
+            string captureKey = CaptureCredential();
+            string credentialPath = Path.Combine(
+                Path.GetTempPath(), $"capture-key-{Guid.NewGuid():N}");
+            await File.WriteAllTextAsync(credentialPath, captureKey);
+            try
+            {
+                string stableName = secretInStableName
+                    ? seededSyntheticSecret
+                    : $"safe-binding-{Guid.NewGuid():N}";
+                string agentId = secretInStableName
+                    ? $"capture:safe-{Guid.NewGuid():N}"
+                    : seededSyntheticSecret;
+                var rejected = await RunMemCtlForResultAsync(
+                    null,
+                    "capture", "enroll", stableName,
+                    "--harness", "codex",
+                    "--agent-id", agentId,
+                    "--credential-file", credentialPath);
+                Assert.NotEqual(0, rejected.ExitCode);
+                Assert.Contains("never-store", rejected.Stderr);
+                Assert.DoesNotContain(seededSyntheticSecret, rejected.Stderr);
+
+                var accepted = await RunMemCtlForResultAsync(
+                    null,
+                    "capture", "enroll", $"safe-binding-{Guid.NewGuid():N}",
+                    "--harness", "codex",
+                    "--agent-id", $"capture:safe-{Guid.NewGuid():N}",
+                    "--credential-file", credentialPath);
+                Assert.Equal(0, accepted.ExitCode);
+            }
+            finally
+            {
+                File.Delete(credentialPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DurableReceiptRemainsReadableWhenScannerConfigurationIsUnavailable()
+    {
+        var captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"codex-readable-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            Observation(sourceSessionId, 0, $"receipt-{Guid.NewGuid():N}", "durable"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var receipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        var shown = await RunMemCtlForResultAsync(
+            new Dictionary<string, string>
+            {
+                ["MemSrv__NeverStorePath"] = Path.Combine(
+                    Path.GetTempPath(), $"missing-never-store-{Guid.NewGuid():N}.yaml")
+            },
+            "capture", "receipt",
+            receipt.GetProperty("observationUuid").GetGuid().ToString());
+
+        Assert.Equal(0, shown.ExitCode);
+        Assert.Equal(3, shown.Stdout.Split(
+            Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Length);
+    }
+
+    [Fact]
+    public async Task RelationshipTargetStreamScopeRoundTripsWithoutInference()
+    {
+        var captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"codex-relationship-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        Guid explicitTargetStream = Guid.NewGuid();
+
+        var omitted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RelationshipObservation(
+                sourceSessionId, 0, $"relationship-{Guid.NewGuid():N}", null));
+        Assert.Equal(HttpStatusCode.OK, omitted.StatusCode);
+        var omittedReceipt = await omitted.Content.ReadFromJsonAsync<JsonElement>();
+        var omittedHttpTarget = Assert.Single(
+            Assert.Single(omittedReceipt.GetProperty("events").EnumerateArray())
+                .GetProperty("relationships").EnumerateArray()).GetProperty("target");
+        Assert.Equal(JsonValueKind.Null, omittedHttpTarget.GetProperty("sourceStreamUuid").ValueKind);
+        var omittedEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "receipt",
+            omittedReceipt.GetProperty("observationUuid").GetGuid().ToString())).RootElement;
+        Assert.Equal(
+            JsonValueKind.Null,
+            Assert.Single(omittedEnvelope.GetProperty("relationships").EnumerateArray())
+                .GetProperty("target").GetProperty("sourceStreamUuid").ValueKind);
+
+        var explicitScope = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RelationshipObservation(
+                sourceSessionId, 1, $"relationship-{Guid.NewGuid():N}", explicitTargetStream));
+        Assert.Equal(HttpStatusCode.OK, explicitScope.StatusCode);
+        var explicitReceipt = await explicitScope.Content.ReadFromJsonAsync<JsonElement>();
+        var explicitHttpTarget = Assert.Single(
+            Assert.Single(explicitReceipt.GetProperty("events").EnumerateArray())
+                .GetProperty("relationships").EnumerateArray()).GetProperty("target");
+        Assert.Equal(
+            explicitTargetStream,
+            explicitHttpTarget.GetProperty("sourceStreamUuid").GetGuid());
+        var explicitEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "receipt",
+            explicitReceipt.GetProperty("observationUuid").GetGuid().ToString())).RootElement;
+        Assert.Equal(
+            explicitTargetStream,
+            Assert.Single(explicitEnvelope.GetProperty("relationships").EnumerateArray())
+                .GetProperty("target").GetProperty("sourceStreamUuid").GetGuid());
     }
 
     [Fact]
@@ -487,8 +609,8 @@ public sealed class CaptureTests : HttpSeamTestBase
                 fixtureCallId,
                 canonicalRelationship.GetProperty("target").GetProperty("nativeId").GetString());
             Assert.Equal(
-                messageObservation.GetProperty("sourceStreamUuid").GetGuid(),
-                canonicalRelationship.GetProperty("target").GetProperty("sourceStreamUuid").GetGuid());
+                JsonValueKind.Null,
+                canonicalRelationship.GetProperty("target").GetProperty("sourceStreamUuid").ValueKind);
             Assert.Contains("LIMITATION:", enabled.Stderr);
         }
         finally
@@ -731,6 +853,45 @@ public sealed class CaptureTests : HttpSeamTestBase
             }
         }
     };
+
+    private static object RelationshipObservation(
+        string sourceSessionId,
+        long position,
+        string nativeId,
+        Guid? targetSourceStreamUuid) => new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourcePosition = position,
+            locator = new { kind = "native_id", nativeId },
+            source = new { harness = "codex", harnessVersion = "synthetic", recordType = "turn" },
+            adapter = new { name = "codex-synthetic", version = "1" },
+            sourcePayload = new { text = "relationship" },
+            events = new object[]
+            {
+                new
+                {
+                    partKey = "tool/0",
+                    partOrder = 0,
+                    kind = "tool_result",
+                    actor = "tool",
+                    payload = new { output = "done" },
+                    relationships = new[]
+                    {
+                        new
+                        {
+                            type = "result_for",
+                            target = new
+                            {
+                                sourceStreamUuid = targetSourceStreamUuid,
+                                nativeId = $"call-{Guid.NewGuid():N}",
+                                kind = "tool_call"
+                            }
+                        }
+                    }
+                }
+            }
+        };
 
     private static object ObservationWithDuplicatePartOrder(
         string sourceSessionId, long position, string nativeId) => new

@@ -43,6 +43,8 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         EnsureSafetyConfigured();
         Require(stableName, nameof(stableName));
         Require(agentId, nameof(agentId));
+        neverStore.AssertAllowed(stableName);
+        neverStore.AssertAllowed(agentId);
         CaptureCredential.RequireCaptureForm(credential);
         if (!string.Equals(harness, "codex", StringComparison.Ordinal))
         {
@@ -330,13 +332,16 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 await connection.ExecuteAsync(
                     """
                     INSERT INTO captured_event_relationships
-                      (source_trace_uuid, relationship_type, target_native_id, target_kind)
-                    VALUES (@traceUuid, @Type, @TargetNativeId, @TargetKind)
+                      (source_trace_uuid, relationship_type, target_source_stream_uuid,
+                       target_native_id, target_kind)
+                    VALUES
+                      (@traceUuid, @Type, @TargetSourceStreamUuid, @TargetNativeId, @TargetKind)
                     """,
                     new
                     {
                         traceUuid,
                         relationship.Type,
+                        TargetSourceStreamUuid = relationship.Target.SourceStreamUuid,
                         TargetNativeId = safeRelationship.TargetNativeId,
                         TargetKind = safeRelationship.TargetKind
                     }, transaction);
@@ -364,7 +369,6 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         Guid observationUuid,
         CancellationToken cancellationToken = default)
     {
-        EnsureSafetyConfigured();
         await using var connection = new NpgsqlConnection(connectionString);
         var row = await connection.QuerySingleOrDefaultAsync<ReceiptRow>(
             """
@@ -431,11 +435,6 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 throw new ArgumentException("relationship.target is required.");
             }
             Require(relationship.Target.NativeId, "relationship.target.nativeId");
-            if (relationship.Target.SourceStreamUuid is not null)
-            {
-                throw new ArgumentException(
-                    "relationship.target.sourceStreamUuid is server-derived for this capture slice.");
-            }
         }
         if (request.SourcePosition < 0)
         {
@@ -584,13 +583,11 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             """
             SELECT trace_uuid AS TraceUuid, session_id AS SessionId,
                    agent_id AS AgentId, namespace,
-                   o.stream_uuid AS SourceStreamUuid,
                    part_key AS PartKey, part_order AS PartOrder,
                    kind, actor, occurred_at AS OccurredAt,
                    payload_version AS PayloadVersion, payload::text AS PayloadJson
-            FROM captured_events e
-            JOIN capture_observations o USING (observation_uuid)
-            WHERE e.observation_uuid = @observationUuid
+            FROM captured_events
+            WHERE observation_uuid = @observationUuid
             ORDER BY part_order
             """,
             new { observationUuid }, transaction)).AsList();
@@ -599,7 +596,9 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         {
             var relationships = (await connection.QueryAsync<RelationshipRow>(
                 """
-                SELECT relationship_type AS Type, target_native_id AS TargetNativeId,
+                SELECT relationship_type AS Type,
+                       target_source_stream_uuid AS TargetSourceStreamUuid,
+                       target_native_id AS TargetNativeId,
                        target_kind AS TargetKind
                 FROM captured_event_relationships
                 WHERE source_trace_uuid = @TraceUuid
@@ -621,7 +620,7 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 relationships.Select(relationship => new CaptureRelationship(
                     relationship.Type,
                     new CaptureRelationshipTarget(
-                        item.SourceStreamUuid,
+                        relationship.TargetSourceStreamUuid,
                         relationship.TargetNativeId,
                         relationship.TargetKind))).ToArray()));
         }
@@ -691,11 +690,11 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         public DateTimeOffset? OccurredAt { get; set; }
         public int PayloadVersion { get; set; }
         public string PayloadJson { get; set; } = "";
-        public Guid SourceStreamUuid { get; set; }
     }
     private sealed class RelationshipRow
     {
         public string Type { get; set; } = "";
+        public Guid? TargetSourceStreamUuid { get; set; }
         public string TargetNativeId { get; set; } = "";
         public string? TargetKind { get; set; }
     }

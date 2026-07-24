@@ -230,34 +230,6 @@ public sealed class HttpTransportTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
-    [Theory]
-    [InlineData("blank agent id", "", "memory-system", new[] { "memory-system" })]
-    [InlineData("default outside allowlist", "agent-x", "memory-system", new[] { "homelab" })]
-    public void IncompleteCredentialIsRejectedByDirectStoreConstruction(
-        string _, string agentId, string defaultNamespace, string[] allowedNamespaces)
-    {
-        const string presentKey = "present-key-incomplete-identity";
-        var error = Assert.Throws<InvalidOperationException>(() => new AgentKeyStore(new[]
-        {
-            new AgentKey(presentKey, agentId, defaultNamespace, allowedNamespaces)
-        }));
-        Assert.Contains("Agent key is invalid", error.Message);
-    }
-
-    [Fact]
-    public void CaptureFormCredentialCannotBeProvisionedAsAnAgentKey()
-    {
-        var error = Assert.Throws<InvalidOperationException>(() => new AgentKeyStore(new[]
-        {
-            new AgentKey(
-                $"mcap_{Guid.NewGuid():N}",
-                "agent-x",
-                "memory-system",
-                ["memory-system"])
-        }));
-        Assert.Contains("reserved for capture credentials", error.Message);
-    }
-
     [Fact]
     public async Task ForeignNamespaceCallIsRejectedAndNothingLands()
     {

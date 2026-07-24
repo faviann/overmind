@@ -101,7 +101,7 @@ public sealed class AgentKeyStore
         {
             return "key is blank";
         }
-        if (CaptureCredential.IsCaptureForm(key))
+        if (CaptureCredential.HasReservedPrefix(key))
         {
             return "mcap_ credential format is reserved for capture credentials";
         }
@@ -151,9 +151,12 @@ public static class CaptureCredential
     private const string Prefix = "mcap_";
     private const int MinimumMaterialLength = 32;
 
+    public static bool HasReservedPrefix(string value) =>
+        value.StartsWith(Prefix, StringComparison.Ordinal);
+
     public static bool IsCaptureForm(string value)
     {
-        if (!value.StartsWith(Prefix, StringComparison.Ordinal)
+        if (!HasReservedPrefix(value)
             || value.Length < Prefix.Length + MinimumMaterialLength)
         {
             return false;

@@ -61,6 +61,22 @@ public sealed class ServerStartupTests
             default_namespace: memory-system
             allowed_namespaces: [memory-system]
         """)]
+    [InlineData("short capture-prefixed key", "reserved for capture credentials",
+        """
+        keys:
+          - key: mcap_short
+            agent_id: agent-a
+            default_namespace: memory-system
+            allowed_namespaces: [memory-system]
+        """)]
+    [InlineData("malformed capture-prefixed key", "reserved for capture credentials",
+        """
+        keys:
+          - key: mcap_invalid!
+            agent_id: agent-a
+            default_namespace: memory-system
+            allowed_namespaces: [memory-system]
+        """)]
     public async Task HttpServerFailsClosedOnMalformedKeyFile(string _, string expectedReason, string yaml)
     {
         var keysPath = Path.Combine(Path.GetTempPath(), $"bad-keys-{Guid.NewGuid():N}.yaml");

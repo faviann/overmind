@@ -17,6 +17,10 @@ namespace MemSrv.Server;
 /// </summary>
 public static class HttpServerHost
 {
+    private const int CaptureRequestLimitBytes = 1_000_000;
+    private static readonly JsonSerializerOptions JsonOptions =
+        new(JsonSerializerDefaults.Web);
+
     public static WebApplication Build(MemSrvOptions options, AgentKeyStore keyStore)
     {
         var builder = WebApplication.CreateBuilder();
@@ -92,8 +96,14 @@ public static class HttpServerHost
             CaptureObservationRequest? request;
             try
             {
-                request = await http.Request.ReadFromJsonAsync<CaptureObservationRequest>(
-                    cancellationToken: http.RequestAborted);
+                byte[]? body = await ReadCaptureBodyAsync(
+                    http.Request, http.RequestAborted);
+                if (body is null)
+                {
+                    return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+                }
+                request = JsonSerializer.Deserialize<CaptureObservationRequest>(
+                    body, JsonOptions);
                 if (request is null)
                 {
                     return Results.BadRequest(new { error = "A capture observation body is required." });
@@ -126,5 +136,29 @@ public static class HttpServerHost
         app.MapMcp("/mcp").RequireAuthorization();
 
         return app;
+    }
+
+    private static async Task<byte[]?> ReadCaptureBodyAsync(
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.ContentLength > CaptureRequestLimitBytes)
+        {
+            return null;
+        }
+
+        byte[] buffer = new byte[CaptureRequestLimitBytes + 1];
+        int length = 0;
+        while (length < buffer.Length)
+        {
+            int read = await request.Body.ReadAsync(
+                buffer.AsMemory(length), cancellationToken);
+            if (read == 0)
+            {
+                return buffer[..length];
+            }
+            length += read;
+        }
+        return null;
     }
 }

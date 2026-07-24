@@ -36,13 +36,25 @@ docker run --rm \
   overmind-codex-capture-fixture
 ```
 
-It reads only the baked synthetic three-record JSONL fixture and sends three
-ordered observations (message, tool call, tool result) to
-`POST /capture/v1/observations`. Each persisted JSONL source record has its own
-numeric source position, verified `byte_range` locator measured from the actual
-fixture bytes, idempotency identity, and receipt. Imports may instead use a
-`native_id` locator when the source exposes one. A source-stated timestamp is
-retained as its exact raw string plus a nullable parsed timestamp; it never
+It defaults to the baked synthetic three-record JSONL fixture.
+`OVERMIND_CODEX_FIXTURE` may explicitly select another synthetic fixture for
+non-production tests. The exact-value enable gate and strict three-record
+rollout-schema validation still apply.
+
+The fixture uses representative persisted Codex rollout records shaped as
+`{timestamp,type,payload}`: a nested `message`/`input_text`, a
+`function_call` with JSON-string arguments, and a `function_call_output`.
+Rollout records do not invent a per-record session ID; this disabled adapter
+uses one stable synthetic source session, while capture bindings isolate
+installations. It sends the three ordered observations to
+`POST /capture/v1/observations`.
+
+Each JSONL record has its own numeric source position, verified `byte_range`
+locator measured from the actual fixture bytes, idempotency identity, and
+receipt. The locator and exact-byte digest cover the JSON content plus its LF
+or CRLF separator when present, while JSON parsing excludes the separator.
+Imports may instead use a `native_id` locator when the source exposes one. The
+source timestamp is retained as its exact raw string plus parsed time; it never
 falls back to event occurrence or server capture time. The tool result retains
 its source-native `result_for` relationship to the call.
 Read any durable operator receipt with:
@@ -66,8 +78,11 @@ writes and checkpoint movement, not reads.
 - No production adapter compatibility or supported capture installation.
 - No console/OIDC flow, complete router, queue product, or Claude delivery.
 - The existing deterministic never-store gate is applied before append, with a
-  one-megabyte observation ceiling. This slice does not claim the complete
-  bounded scanner product described by the capture safety research.
+  one-megabyte observation ceiling. For known credentials, the HTTP boundary
+  rejects an oversized request before full JSON deserialization; unknown
+  credentials still receive 401 before any body or safety work. The service
+  repeats the size check as defense in depth. This slice does not claim the
+  complete bounded scanner product described by the capture safety research.
 - Source positions begin at zero and must advance exactly one past the
   server-owned contiguous checkpoint. Stream namespace and route basis are
   fixed by the binding policy on first import and reused by later catch-up.
@@ -75,7 +90,9 @@ writes and checkpoint movement, not reads.
   source bytes. The server validates it and includes it only inside the
   binding-keyed retry signature; the raw digest is neither persisted nor
   returned. Equal-length source rewrites therefore conflict even when they
-  parse to the same JSON. A `native_id` locator has no byte-content digest.
+  parse to the same JSON. LF/CRLF and final-newline changes also change source
+  identity and stop the stream. A `native_id` locator has no byte-content
+  digest.
 - Retry comparison uses a server-owned random per-binding HMAC key. Receipts
   expose canonical scan status, rule-set version, applied rule IDs/categories,
   and aggregate redaction count; raw unsafe input and an unkeyed fingerprint of

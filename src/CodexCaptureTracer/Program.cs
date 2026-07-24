@@ -1,7 +1,7 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 const string EnableValue = "synthetic-non-production";
@@ -21,7 +21,7 @@ string credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
 string fixturePath = Required("OVERMIND_CODEX_FIXTURE");
 byte[] fixtureBytes = await File.ReadAllBytesAsync(fixturePath);
 var records = new List<(
-    JsonElement Payload,
+    JsonElement Record,
     long ByteOffset,
     long ByteLength,
     string SourceContentSha256)>();
@@ -32,20 +32,20 @@ for (int index = 0; index <= fixtureBytes.Length; index++)
     {
         continue;
     }
-    int lineLength = index - lineStart;
-    if (lineLength > 0 && fixtureBytes[index - 1] == (byte)'\r')
+    int separatorLength = index == fixtureBytes.Length
+        ? 0
+        : index > lineStart && fixtureBytes[index - 1] == (byte)'\r' ? 2 : 1;
+    int contentLength = index - lineStart - (separatorLength == 2 ? 1 : 0);
+    int recordLength = contentLength + separatorLength;
+    if (contentLength > 0)
     {
-        lineLength--;
-    }
-    if (lineLength > 0)
-    {
-        string line = Encoding.UTF8.GetString(fixtureBytes, lineStart, lineLength);
         records.Add((
-            JsonDocument.Parse(line).RootElement.Clone(),
+            JsonDocument.Parse(fixtureBytes.AsMemory(lineStart, contentLength))
+                .RootElement.Clone(),
             lineStart,
-            lineLength,
+            recordLength,
             Convert.ToHexString(
-                SHA256.HashData(fixtureBytes.AsSpan(lineStart, lineLength)))
+                SHA256.HashData(fixtureBytes.AsSpan(lineStart, recordLength)))
                 .ToLowerInvariant()));
     }
     lineStart = index + 1;
@@ -55,16 +55,45 @@ if (records.Count != 3)
 {
     throw new InvalidOperationException("Synthetic Codex fixture must contain exactly three JSONL records.");
 }
-if (records[0].Payload.GetProperty("type").GetString() != "response_item"
-    || records[0].Payload.GetProperty("item_type").GetString() != "message"
-    || records[0].Payload.GetProperty("role").GetString() != "user")
+if (records.Any(record =>
+        record.Record.GetProperty("type").GetString() != "response_item"
+        || record.Record.GetProperty("timestamp").ValueKind != JsonValueKind.String))
 {
     throw new InvalidOperationException(
-        "Synthetic Codex message must be a model-facing response_item/message with role user.");
+        "Every synthetic Codex record must be a timestamped response_item rollout record.");
 }
 
-string sessionId = records[0].Payload.GetProperty("session_id").GetString()
-    ?? throw new InvalidOperationException("Fixture session_id is required.");
+var message = records[0].Record.GetProperty("payload");
+var call = records[1].Record.GetProperty("payload");
+var result = records[2].Record.GetProperty("payload");
+if (message.GetProperty("type").GetString() != "message"
+    || message.GetProperty("role").GetString() != "user"
+    || message.GetProperty("content").ValueKind != JsonValueKind.Array
+    || message.GetProperty("content").GetArrayLength() != 1
+    || message.GetProperty("content")[0].GetProperty("type").GetString() != "input_text"
+    || call.GetProperty("type").GetString() != "function_call"
+    || call.GetProperty("arguments").ValueKind != JsonValueKind.String
+    || result.GetProperty("type").GetString() != "function_call_output")
+{
+    throw new InvalidOperationException(
+        "Synthetic Codex fixture must contain message, function_call, and " +
+        "function_call_output response_item payloads in order.");
+}
+
+const string sessionId = "codex-synthetic-rollout-v1";
+string callId = call.GetProperty("call_id").GetString()
+    ?? throw new InvalidOperationException("Synthetic function_call call_id is required.");
+if (!string.Equals(
+        callId,
+        result.GetProperty("call_id").GetString(),
+        StringComparison.Ordinal))
+{
+    throw new InvalidOperationException("Synthetic tool result must match the function_call call_id.");
+}
+var arguments = JsonDocument.Parse(
+    call.GetProperty("arguments").GetString()
+    ?? throw new InvalidOperationException("Synthetic function_call arguments are required."))
+    .RootElement.Clone();
 var events = new object[]
 {
     new
@@ -73,7 +102,7 @@ var events = new object[]
         partOrder = 0,
         kind = "message",
         actor = "user",
-        payload = new { text = records[0].Payload.GetProperty("text").GetString() }
+        payload = new { text = message.GetProperty("content")[0].GetProperty("text").GetString() }
     },
     new
     {
@@ -83,9 +112,9 @@ var events = new object[]
         actor = "assistant",
         payload = new
         {
-            callId = records[1].Payload.GetProperty("call_id").GetString(),
-            tool = records[1].Payload.GetProperty("name").GetString(),
-            arguments = records[1].Payload.GetProperty("arguments")
+            callId,
+            tool = call.GetProperty("name").GetString(),
+            arguments
         }
     },
     new
@@ -96,9 +125,9 @@ var events = new object[]
         actor = "tool",
         payload = new
         {
-            callId = records[2].Payload.GetProperty("call_id").GetString(),
+            callId,
             outcome = "succeeded",
-            output = records[2].Payload.GetProperty("output").GetString()
+            output = result.GetProperty("output").GetString()
         },
         relationships = new[]
         {
@@ -107,7 +136,7 @@ var events = new object[]
                 type = "result_for",
                 target = new
                 {
-                    nativeId = records[2].Payload.GetProperty("call_id").GetString(),
+                    nativeId = callId,
                     kind = "tool_call"
                 }
             }
@@ -131,14 +160,15 @@ for (var position = 0; position < records.Count; position++)
             byteLength = records[position].ByteLength,
             sourceContentSha256 = records[position].SourceContentSha256
         },
+        sourceTimestamp = SourceTimestamp(records[position].Record),
         source = new
         {
             harness = "codex",
             harnessVersion = "synthetic",
-            recordType = records[position].Payload.GetProperty("type").GetString()
+            recordType = records[position].Record.GetProperty("type").GetString()
         },
         adapter = new { name = "codex-synthetic-jsonl", version = "1" },
-        sourcePayload = records[position].Payload,
+        sourcePayload = records[position].Record,
         events = new[] { events[position] }
     };
     var response = await client.PostAsJsonAsync($"{endpoint}/capture/v1/observations", observation);
@@ -163,3 +193,17 @@ static string Required(string name) =>
     Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
         ? value
         : throw new InvalidOperationException($"{name} is required.");
+
+static object SourceTimestamp(JsonElement record)
+{
+    string raw = record.GetProperty("timestamp").GetString()
+        ?? throw new InvalidOperationException("Synthetic rollout timestamp is required.");
+    DateTimeOffset? parsed = DateTimeOffset.TryParse(
+        raw,
+        CultureInfo.InvariantCulture,
+        DateTimeStyles.RoundtripKind,
+        out var value)
+        ? value
+        : null;
+    return new { raw, parsed };
+}

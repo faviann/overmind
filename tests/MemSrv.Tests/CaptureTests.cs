@@ -37,13 +37,48 @@ public sealed class CaptureTests : HttpSeamTestBase
             var response = await client.PostAsync(
                 "/capture/v1/observations",
                 new StringContent("not-json", Encoding.UTF8, "application/json"));
-
             Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+
+            var oversized = await client.PostAsync(
+                "/capture/v1/observations",
+                new StringContent(
+                    new string('x', 1_000_001),
+                    Encoding.UTF8,
+                    "application/json"));
+            Assert.Equal(HttpStatusCode.Unauthorized, oversized.StatusCode);
         }
         finally
         {
             await app.StopAsync();
         }
+    }
+
+    [Fact]
+    public async Task KnownCredentialRejectsOversizedBodyBeforeParsingOrPersistence()
+    {
+        var captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"codex-body-limit-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var oversized = await client.PostAsync(
+            "/capture/v1/observations",
+            new StringContent(
+                new string('x', 1_000_001),
+                Encoding.UTF8,
+                "application/json"));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, oversized.StatusCode);
+
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            Observation(
+                sourceSessionId,
+                0,
+                $"body-limit-{Guid.NewGuid():N}",
+                "accepted after oversized rejection"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var receipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(0, receipt.GetProperty("sourcePosition").GetInt64());
     }
 
     [Fact]
@@ -476,15 +511,13 @@ public sealed class CaptureTests : HttpSeamTestBase
     {
         var captureKey = CaptureCredential();
         await EnrollAsync("codex-tracer", captureKey);
-        string fixtureSessionId = UniqueSession();
         string fixtureCallId = $"call_{Guid.NewGuid():N}";
         string fixturePath = Path.Combine(
             Path.GetTempPath(), $"codex-synthetic-{Guid.NewGuid():N}.jsonl");
         string fixture = await File.ReadAllTextAsync(
             Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
-        fixture = fixture
-            .Replace("codex-synthetic-session", fixtureSessionId, StringComparison.Ordinal)
-            .Replace("call_fixture_1", fixtureCallId, StringComparison.Ordinal);
+        fixture = fixture.Replace(
+            "call_fixture_1", fixtureCallId, StringComparison.Ordinal);
         await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
 
         try
@@ -535,11 +568,15 @@ public sealed class CaptureTests : HttpSeamTestBase
                     .EnumerateObject().Select(property => property.Name));
             Assert.Equal(0, messageObservation.GetProperty("locator").GetProperty("byteOffset").GetInt64());
             Assert.Equal(
-                firstNewline,
+                firstNewline + 1,
                 messageObservation.GetProperty("locator").GetProperty("byteLength").GetInt64());
             Assert.Equal(
-                JsonValueKind.Null,
-                messageObservation.GetProperty("sourceTimestamp").ValueKind);
+                "2026-07-14T12:00:00.000Z",
+                messageObservation.GetProperty("sourceTimestamp").GetProperty("raw").GetString());
+            Assert.Equal(
+                DateTimeOffset.Parse("2026-07-14T12:00:00.000Z"),
+                messageObservation.GetProperty("sourceTimestamp").GetProperty("parsed")
+                    .GetDateTimeOffset());
             Assert.Equal(
                 "synthetic",
                 messageObservation.GetProperty("source").GetProperty("harnessVersion").GetString());
@@ -548,7 +585,9 @@ public sealed class CaptureTests : HttpSeamTestBase
                 messageObservation.GetProperty("adapter").GetProperty("name").GetString());
             Assert.Equal(
                 "Show the working directory.",
-                messageObservation.GetProperty("safeSourcePayload").GetProperty("text").GetString());
+                messageObservation.GetProperty("safeSourcePayload")
+                    .GetProperty("payload").GetProperty("content")[0]
+                    .GetProperty("text").GetString());
             Assert.Equal(
                 "clean",
                 messageObservation.GetProperty("scan").GetProperty("status").GetString());
@@ -638,15 +677,13 @@ public sealed class CaptureTests : HttpSeamTestBase
     {
         var captureKey = CaptureCredential();
         await EnrollAsync($"codex-byte-identity-{Guid.NewGuid():N}", captureKey);
-        string fixtureSessionId = UniqueSession();
         string fixtureCallId = $"call_{Guid.NewGuid():N}";
         string fixturePath = Path.Combine(
             Path.GetTempPath(), $"codex-byte-identity-{Guid.NewGuid():N}.jsonl");
         string fixture = await File.ReadAllTextAsync(
             Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
-        fixture = fixture
-            .Replace("codex-synthetic-session", fixtureSessionId, StringComparison.Ordinal)
-            .Replace("call_fixture_1", fixtureCallId, StringComparison.Ordinal);
+        fixture = fixture.Replace(
+            "call_fixture_1", fixtureCallId, StringComparison.Ordinal);
         string firstBytes = fixture.Replace(
             "\"type\":\"response_item\"",
             "\"type\": \"response_item\"",
@@ -679,6 +716,45 @@ public sealed class CaptureTests : HttpSeamTestBase
             string afterConflict = await RunMemCtlAsync(
                 "capture", "receipt", observationUuid.ToString());
             Assert.Equal(beforeConflict, afterConflict);
+        }
+        finally
+        {
+            File.Delete(fixturePath);
+        }
+    }
+
+    [Fact]
+    public async Task ByteRangeRetryConflictsWhenOnlyJsonlSeparatorsChange()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-separator-identity-{Guid.NewGuid():N}", captureKey);
+        string fixturePath = Path.Combine(
+            Path.GetTempPath(), $"codex-separator-identity-{Guid.NewGuid():N}.jsonl");
+        string fixture = await File.ReadAllTextAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+        fixture = fixture.Replace(
+            "call_fixture_1", $"call_{Guid.NewGuid():N}", StringComparison.Ordinal);
+
+        try
+        {
+            await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
+            var first = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(0, first.ExitCode);
+            var firstReceipt = JsonDocument.Parse(first.Stdout.Split(
+                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
+            Guid observationUuid = firstReceipt.GetProperty("observationUuid").GetGuid();
+            string beforeConflict = await RunMemCtlAsync(
+                "capture", "receipt", observationUuid.ToString());
+
+            string crlfFixture = fixture.Replace("\n", "\r\n", StringComparison.Ordinal);
+            await File.WriteAllTextAsync(fixturePath, crlfFixture, new UTF8Encoding(false));
+            var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(1, conflict.ExitCode);
+            Assert.Empty(conflict.Stdout);
+            Assert.Contains("HTTP 409", conflict.Stderr);
+            Assert.Equal(
+                beforeConflict,
+                await RunMemCtlAsync("capture", "receipt", observationUuid.ToString()));
         }
         finally
         {

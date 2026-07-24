@@ -115,6 +115,10 @@ checklist before authorizing any issue:
    AFK_REQUIRED_CHECKS='test test-compose reference-compose' make afk
    ```
 
+   `AFK_IDLE_RETRY_SECONDS` (positive whole seconds, default `900`) is how long
+   the watcher waits before re-running selection on an authorized queue that is
+   unchanged since a pass that selected nothing.
+
 For each launch, choose exactly one open issue that is already
 `ready-for-agent`, review it, and add only the `Sandcastle` authorization:
 
@@ -138,7 +142,11 @@ selected issue by removing `Sandcastle` before agent launch. It then runs the
 full `work-on` lifecycle on a named isolated branch/worktree and labels the
 resulting pull request `afk-review`. It processes one issue at a time and starts
 each selection from the latest verified default branch. An empty or unchanged
-ineligible queue is polled without invoking an agent or selector model. A first
+ineligible queue is polled without invoking an agent or selector model. When a
+selection pass chooses no issue, the watcher mutates nothing, reports the idle
+reason, and reconsiders the same unchanged authorized queue after
+`AFK_IDLE_RETRY_SECONDS` (default `900`); any real queue, dependency,
+issue-state, or default-branch change is reconsidered on the next poll. A first
 termination signal drains an active issue (or exits immediately while idle); a
 second signal forces termination. The consumed `Sandcastle` authorization is
 one attempt: a retry requires an operator to review the issue again and

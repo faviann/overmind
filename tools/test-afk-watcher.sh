@@ -80,6 +80,13 @@ case "$AFK_TEST_SCENARIO" in
     fi
     ;;
   token-wait) ;;
+  idle-retry)
+    if [[ "$count" -ge 2 ]]; then
+      printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
+    else
+      printf 'Reviewed the authorized queue.\nNo issue is ready to start right now.\a\n\n'
+    fi
+    ;;
   claim-race)
     printf 'authorization-removed\n' >>"$AFK_TEST_STATE"
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
@@ -154,6 +161,8 @@ case "$AFK_TEST_SCENARIO" in
     if [[ "$count" == 1 ]]; then printf 'blocker-closed\n' >>"$AFK_TEST_STATE"; else kill -TERM "$PPID"; fi ;;
   token-wait)
     if [[ "$count" -ge 3 ]]; then kill -TERM "$PPID"; fi ;;
+  idle-retry)
+    if [[ "$count" == 1 ]]; then printf '1000\n' >"$AFK_TEST_CLOCK"; else kill -TERM "$PPID"; fi ;;
   reauthorize)
     if ! grep -qx human-reauthorized "$AFK_TEST_STATE"; then
       printf 'human-reauthorized\n' >>"$AFK_TEST_STATE"
@@ -441,6 +450,29 @@ run_foreground token-wait
 [[ "$(grep -c '^selector$' "$events")" == 1 ]]
 ! grep -q '^agent ' "$events"
 [[ "$(grep -c '^sleep 0$' "$events")" == 3 ]]
+
+# A transient empty selection must not suppress an unchanged authorized queue:
+# the first pass mutates nothing and reports the idle reason, and the second
+# pass after the cooldown claims and launches the same issue without a restart.
+run_foreground idle-retry
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
+mapfile -t idle_retry_selectors < <(grep -n '^selector$' "$events" | cut -d: -f1)
+idle_retry_sleep_line="$(grep -n '^sleep 0$' "$events" | head -n1 | cut -d: -f1)"
+idle_retry_claim_line="$(grep -n '^claim 42$' "$events" | cut -d: -f1)"
+idle_retry_agent_line="$(grep -n '^agent 42$' "$events" | cut -d: -f1)"
+[[ "${idle_retry_selectors[0]}" -lt "$idle_retry_sleep_line" ]]
+[[ "$idle_retry_sleep_line" -lt "${idle_retry_selectors[1]}" ]]
+[[ "${idle_retry_selectors[1]}" -lt "$idle_retry_claim_line" ]]
+[[ "$idle_retry_claim_line" -lt "$idle_retry_agent_line" ]]
+grep -q 'no issue was selected' "$fixture/idle-retry.out"
+grep -q 'reconsidered in 900 seconds' "$fixture/idle-retry.out"
+grep -q 'No issue is ready to start right now' "$fixture/idle-retry.out"
+! grep -q $'\a' "$fixture/idle-retry.out"
+! grep -q 'Reviewed the authorized queue' "$fixture/idle-retry.out"
+! grep -q -- '--add-label Sandcastle' "$events"
+grep -q '^gh pr merge 142 --merge$' "$events"
 
 run_foreground paused-lane
 [[ "$(sed -n 's/^agent //p' "$events" | paste -sd, -)" == 42,43 ]]

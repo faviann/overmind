@@ -65,7 +65,7 @@ case "$AFK_TEST_SCENARIO" in
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     fi
     ;;
-  live-add|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check)
+  live-add|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override)
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   drain|force)
     if grep -qx claim-42 "$AFK_TEST_STATE"; then
@@ -161,7 +161,7 @@ case "$AFK_TEST_SCENARIO" in
     else
       kill -TERM "$PPID"
     fi ;;
-  claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check)
+  claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override)
     kill -TERM "$PPID" ;;
   chain|paused-lane|paused-only|idle-artifact|idle-artifact-label-fail|idle-discovery-uncertain|ci-retry-pass|ci-repeat-lane|ci-timeout-only|nonblocking-discovery|blocking-discovery-lane|uncertain-discovery-only)
     kill -TERM "$PPID" ;;
@@ -259,7 +259,7 @@ case "$*" in
       printf '%s\n' '{"required_pull_request_reviews":null,"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}'
     elif [[ "$AFK_TEST_SCENARIO" == launch-not-strict ]]; then
       printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":false,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}'
-    elif [[ "$AFK_TEST_SCENARIO" == launch-missing-check ]]; then
+    elif [[ "$AFK_TEST_SCENARIO" == launch-missing-check || "$AFK_TEST_SCENARIO" == required-checks-override ]]; then
       printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"}]}}'
     else
       printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}'
@@ -329,8 +329,13 @@ setup_scenario() {
 
 run_watcher() {
   local scenario="$1"
+  local -a required_checks_override=()
+  if [[ "$#" -eq 2 ]]; then
+    required_checks_override=("AFK_REQUIRED_CHECKS=$2")
+  fi
   cd "$repo"
-  exec env PATH="$adapters:$PATH" AFK_SKILLS_ROOT="$skills" AFK_POLL_SECONDS=0 \
+  exec env "${required_checks_override[@]}" \
+      PATH="$adapters:$PATH" AFK_SKILLS_ROOT="$skills" AFK_POLL_SECONDS=0 \
       AFK_TEST_REAL_GIT="$real_git" AFK_TEST_SCENARIO="$scenario" \
       AFK_TEST_EVENTS="$events" AFK_TEST_STATE="$state" \
       AFK_TEST_ACTIVE="$fixture/active" AFK_TEST_RELEASE="$fixture/release" \
@@ -344,7 +349,7 @@ run_watcher() {
 run_foreground() {
   local scenario="$1"
   setup_scenario
-  if ! (run_watcher "$scenario") >"$fixture/$scenario.out" 2>&1; then
+  if ! (run_watcher "$@") >"$fixture/$scenario.out" 2>&1; then
     printf 'FAIL[%s]\n' "$scenario" >&2
     cat "$fixture/$scenario.out" >&2
     exit 1
@@ -401,6 +406,12 @@ for launch_policy_case in "${launch_policy_cases[@]}"; do
     exit 1
   fi
 done
+
+run_foreground required-checks-override 'test test-compose'
+[[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^gh api repos/acme/widget/branches/main/protection$' "$events")" == 2 ]]
+grep -q '^gh pr merge 142 --merge$' "$events"
 
 run_foreground chain
 [[ "$(grep -c '^agent ' "$events")" == 2 ]] || {

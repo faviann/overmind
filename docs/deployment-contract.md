@@ -135,6 +135,9 @@ What it asserts:
   migration.
 - Bootstrap rows exist: the `memory-system` and `homelab` namespaces and the
   default (`*`/`*`) retrieval config.
+- The disabled capture slice's binding, stream, observation, event, and
+  relationship tables exist; immutable capture-ledger triggers and restricted
+  grants are present; and `capture/unscoped` exists.
 
 Run it against a **disposable** target only — dev/test/CI use a locally
 provisioned database, never the persistent production `memory`.
@@ -196,9 +199,20 @@ modes run from the same image.
   path via `MEMSRV_AGENT_KEYS_PATH`. Plaintext entries under a top-level `keys:`
   list, each `{key, agent_id, default_namespace, allowed_namespaces[]}`.
   Rotation is a redeploy; there is no key CRUD in the app.
+  Values beginning with the reserved capture credential prefix `mcap_` are
+  invalid agent keys and fail startup rather than acquiring MCP authority.
 - **Day-1 agent URL:** `http://overmind.faviann.vms:8080/mcp` — DNS name, plain
   HTTP on the LAN. Traefik/TLS is a later, purely infra-side add-on requiring no
   app or contract change.
+
+## Disabled synthetic capture artifact — NOT A DEPLOYMENT CONTRACT
+
+`Dockerfile.capture-tracer` builds an explicitly disabled, non-production OCI
+tracer for the synthetic Codex fixture. It is separate from
+`ghcr.io/faviann/overmind:<version>`, is not published by the release workflow,
+and does not alter the supported server topology. Its temporary operator
+procedure and limitations are documented in
+`docs/capture-synthetic-slice.md`.
 
 ## Release verification
 

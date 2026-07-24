@@ -19,10 +19,12 @@ public static class SchemaVerifier
     private static readonly string[] RequiredTables =
     [
         "namespaces", "traces", "trace_snapshots", "memories",
-        "retrieval_config", "workstreams", "jobs"
+        "retrieval_config", "workstreams", "jobs",
+        "capture_source_bindings", "capture_source_streams",
+        "capture_observations", "captured_events", "captured_event_relationships"
     ];
 
-    private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab"];
+    private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab", "capture/unscoped"];
 
     // Table grants memsrv must hold, mirroring migrations/0001_init.sql. DELETE is
     // never listed here and is asserted absent everywhere by a separate check.
@@ -35,6 +37,11 @@ public static class SchemaVerifier
         ("jobs", ["SELECT", "INSERT", "UPDATE"]),
         ("retrieval_config", ["SELECT", "INSERT", "UPDATE"]),
         ("namespaces", ["SELECT", "INSERT", "UPDATE"]),
+        ("capture_source_bindings", ["SELECT", "INSERT"]),
+        ("capture_source_streams", ["SELECT", "INSERT"]),
+        ("capture_observations", ["SELECT", "INSERT"]),
+        ("captured_events", ["SELECT", "INSERT"]),
+        ("captured_event_relationships", ["SELECT", "INSERT"]),
     ];
 
     public static async Task<SchemaVerificationResult> VerifyAsync(string adminConnectionString)
@@ -91,6 +98,28 @@ public static class SchemaVerifier
         if (!triggerExists)
         {
             result.Fail("Missing append-only trigger 'traces_immutable' on 'public.traces'.");
+        }
+
+        foreach (var (table, trigger) in new[]
+        {
+            ("capture_observations", "capture_observations_immutable"),
+            ("captured_events", "captured_events_immutable"),
+            ("captured_event_relationships", "captured_event_relationships_immutable")
+        })
+        {
+            var exists = await conn.ExecuteScalarAsync<bool>(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM pg_trigger t
+                  JOIN pg_class c ON c.oid = t.tgrelid
+                  WHERE c.relname = @table AND t.tgname = @trigger AND NOT t.tgisinternal
+                )
+                """,
+                new { table, trigger });
+            if (!exists)
+            {
+                result.Fail($"Missing append-only trigger '{trigger}' on 'public.{table}'.");
+            }
         }
     }
 
@@ -221,8 +250,14 @@ public static class SchemaVerifier
             }
         }
 
+        await CheckCaptureUpdateGrantsAsync(conn, existingTables, result);
+
         // traces (and its snapshots) are append-only by grant as well as by trigger.
-        foreach (var table in new[] { "traces", "trace_snapshots" })
+        foreach (var table in new[]
+        {
+            "traces", "trace_snapshots", "capture_observations",
+            "captured_events", "captured_event_relationships"
+        })
         {
             if (!existingTables.Contains(table))
             {
@@ -258,6 +293,55 @@ public static class SchemaVerifier
                     new { role = MemsrvRole, sequence = $"public.{sequence}" }))
             {
                 result.Fail($"Role '{MemsrvRole}' is missing USAGE on sequence 'public.{sequence}'.");
+            }
+        }
+    }
+
+    private static async Task CheckCaptureUpdateGrantsAsync(
+        NpgsqlConnection conn,
+        HashSet<string> existingTables,
+        SchemaVerificationResult result)
+    {
+        foreach (var (table, allowedColumns) in new[]
+        {
+            ("capture_source_bindings", Array.Empty<string>()),
+            ("capture_source_streams", new[] { "checkpoint_position", "updated_at" })
+        })
+        {
+            if (!existingTables.Contains(table))
+            {
+                continue;
+            }
+
+            var columns = await conn.QueryAsync<string>(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = @table
+                ORDER BY ordinal_position
+                """,
+                new { table });
+            foreach (var column in columns)
+            {
+                bool granted = await conn.ExecuteScalarAsync<bool>(
+                    "SELECT has_column_privilege(@role, @table, @column, 'UPDATE')",
+                    new
+                    {
+                        role = MemsrvRole,
+                        table = $"public.{table}",
+                        column
+                    });
+                bool expected = allowedColumns.Contains(column, StringComparer.Ordinal);
+                if (expected && !granted)
+                {
+                    result.Fail(
+                        $"Role '{MemsrvRole}' is missing UPDATE on 'public.{table}.{column}'.");
+                }
+                else if (!expected && granted)
+                {
+                    result.Fail(
+                        $"Role '{MemsrvRole}' must not have UPDATE on 'public.{table}.{column}'.");
+                }
             }
         }
     }

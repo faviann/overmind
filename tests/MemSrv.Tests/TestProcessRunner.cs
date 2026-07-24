@@ -27,6 +27,7 @@ internal static class TestProcessRunner
     private static readonly Lazy<string> _repoRoot = new(FindRepoRoot);
     private static readonly Lazy<string> _memCtlPath = new(() => ResolveApphost("MemCtl"));
     private static readonly Lazy<string> _serverPath = new(() => ResolveApphost("MemSrv.Server"));
+    private static readonly Lazy<string> _captureTracerPath = new(() => ResolveApphost("CodexCaptureTracer"));
 
     public static string RepoRoot => _repoRoot.Value;
 
@@ -37,6 +38,8 @@ internal static class TestProcessRunner
     // owns the process lifecycle (e.g. StdioClientTransport) can launch the
     // same binary the runner would.
     public static string ServerPath => _serverPath.Value;
+
+    public static string CaptureTracerPath => _captureTracerPath.Value;
 
     // Runs memctl to completion. Failure-tolerant: returns the exit code and
     // both streams so tests can assert on refusals too.
@@ -96,6 +99,13 @@ internal static class TestProcessRunner
         return Process.Start(startInfo)
             ?? throw new InvalidOperationException("Failed to start MemSrv.Server.");
     }
+
+    public static Task<(int ExitCode, string Stdout, string Stderr)> RunCaptureTracerToExitAsync(
+        IReadOnlyDictionary<string, string> environment) =>
+        RunToExitAsync(
+            CreateStartInfo(CaptureTracerPath, [], environment),
+            TimeSpan.FromSeconds(60),
+            "CodexCaptureTracer");
 
     private static ProcessStartInfo CreateStartInfo(
         string apphostPath, IReadOnlyList<string> args, IReadOnlyDictionary<string, string> environment)

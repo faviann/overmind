@@ -27,7 +27,17 @@ public sealed class AgentKeyStore
 
     public AgentKeyStore(IEnumerable<AgentKey> keys)
     {
-        _byKey = keys.ToDictionary(entry => entry.Key, StringComparer.Ordinal);
+        var entries = keys.ToArray();
+        foreach (var entry in entries)
+        {
+            string? invalid = ValidationError(
+                entry.Key, entry.AgentId, entry.DefaultNamespace, entry.AllowedNamespaces);
+            if (invalid is not null)
+            {
+                throw new InvalidOperationException($"Agent key is invalid: {invalid}.");
+            }
+        }
+        _byKey = entries.ToDictionary(entry => entry.Key, StringComparer.Ordinal);
     }
 
     public int Count => _byKey.Count;
@@ -91,6 +101,10 @@ public sealed class AgentKeyStore
         {
             return "key is blank";
         }
+        if (CaptureCredential.HasReservedPrefix(key))
+        {
+            return "mcap_ credential format is reserved for capture credentials";
+        }
         if (string.IsNullOrWhiteSpace(agentId))
         {
             return "agent_id is blank";
@@ -129,5 +143,35 @@ public sealed class AgentKeyStore
         public string? AgentId { get; set; }
         public string? DefaultNamespace { get; set; }
         public List<string>? AllowedNamespaces { get; set; }
+    }
+}
+
+public static class CaptureCredential
+{
+    private const string Prefix = "mcap_";
+    private const int MinimumMaterialLength = 32;
+
+    public static bool HasReservedPrefix(string value) =>
+        value.StartsWith(Prefix, StringComparison.Ordinal);
+
+    public static bool IsCaptureForm(string value)
+    {
+        if (!HasReservedPrefix(value)
+            || value.Length < Prefix.Length + MinimumMaterialLength)
+        {
+            return false;
+        }
+
+        return value.AsSpan(Prefix.Length).IndexOfAnyExcept(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") < 0;
+    }
+
+    public static void RequireCaptureForm(string value)
+    {
+        if (!IsCaptureForm(value))
+        {
+            throw new ArgumentException(
+                "Capture credential must use mcap_ followed by at least 32 URL-safe random characters.");
+        }
     }
 }

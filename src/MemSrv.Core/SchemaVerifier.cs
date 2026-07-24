@@ -19,10 +19,12 @@ public static class SchemaVerifier
     private static readonly string[] RequiredTables =
     [
         "namespaces", "traces", "trace_snapshots", "memories",
-        "retrieval_config", "workstreams", "jobs"
+        "retrieval_config", "workstreams", "jobs",
+        "capture_source_bindings", "capture_source_streams",
+        "capture_observations", "captured_events", "captured_event_relationships"
     ];
 
-    private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab"];
+    private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab", "capture/unscoped"];
 
     // Table grants memsrv must hold, mirroring migrations/0001_init.sql. DELETE is
     // never listed here and is asserted absent everywhere by a separate check.
@@ -35,6 +37,11 @@ public static class SchemaVerifier
         ("jobs", ["SELECT", "INSERT", "UPDATE"]),
         ("retrieval_config", ["SELECT", "INSERT", "UPDATE"]),
         ("namespaces", ["SELECT", "INSERT", "UPDATE"]),
+        ("capture_source_bindings", ["SELECT", "INSERT", "UPDATE"]),
+        ("capture_source_streams", ["SELECT", "INSERT", "UPDATE"]),
+        ("capture_observations", ["SELECT", "INSERT"]),
+        ("captured_events", ["SELECT", "INSERT"]),
+        ("captured_event_relationships", ["SELECT", "INSERT"]),
     ];
 
     public static async Task<SchemaVerificationResult> VerifyAsync(string adminConnectionString)
@@ -91,6 +98,28 @@ public static class SchemaVerifier
         if (!triggerExists)
         {
             result.Fail("Missing append-only trigger 'traces_immutable' on 'public.traces'.");
+        }
+
+        foreach (var (table, trigger) in new[]
+        {
+            ("capture_observations", "capture_observations_immutable"),
+            ("captured_events", "captured_events_immutable"),
+            ("captured_event_relationships", "captured_event_relationships_immutable")
+        })
+        {
+            var exists = await conn.ExecuteScalarAsync<bool>(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM pg_trigger t
+                  JOIN pg_class c ON c.oid = t.tgrelid
+                  WHERE c.relname = @table AND t.tgname = @trigger AND NOT t.tgisinternal
+                )
+                """,
+                new { table, trigger });
+            if (!exists)
+            {
+                result.Fail($"Missing append-only trigger '{trigger}' on 'public.{table}'.");
+            }
         }
     }
 
@@ -222,7 +251,11 @@ public static class SchemaVerifier
         }
 
         // traces (and its snapshots) are append-only by grant as well as by trigger.
-        foreach (var table in new[] { "traces", "trace_snapshots" })
+        foreach (var table in new[]
+        {
+            "traces", "trace_snapshots", "capture_observations",
+            "captured_events", "captured_event_relationships"
+        })
         {
             if (!existingTables.Contains(table))
             {

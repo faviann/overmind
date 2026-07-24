@@ -44,6 +44,11 @@ assert that mechanism directly:
 - migration-keyed test-template lifecycle: changing the migration fingerprint
   rebuilds the template, and each atomic clone exposes exactly the schema for
   the migration set that requested it
+- capture-ledger transaction atomicity, locator/event-part uniqueness, immutable
+  observation/event/relationship triggers, and the corresponding restricted
+  grants. These are mechanical checks of the narrow disabled capture slice;
+  routing, receipts, authorization, and retry behavior stay at the HTTP/memctl
+  public seams.
 
 Namespace isolation and private-memory invisibility are binding acceptance
 behaviors, but their seam is keyed MCP agents. Verify them through public

@@ -84,6 +84,10 @@ try
             await TraceAsync(options, args[1]);
             return 0;
 
+        case "capture":
+            RequireArgs(args, 2);
+            return await CaptureAsync(options, args);
+
         default:
             Usage();
             return 2;
@@ -273,6 +277,51 @@ static async Task TraceAsync(MemSrvOptions options, string sessionId)
     }
 }
 
+static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
+{
+    var capture = new CaptureService(
+        options.ConnectionString, new NeverStoreGate(options.NeverStorePath));
+    switch (args[1])
+    {
+        case "enroll":
+            RequireArgs(args, 3);
+            string credentialPath = RequireOption(args, "--credential-file");
+            string credential = (await File.ReadAllTextAsync(credentialPath)).Trim();
+            var bindingUuid = await capture.EnrollAsync(
+                args[2],
+                RequireOption(args, "--harness"),
+                RequireOption(args, "--agent-id"),
+                credential,
+                FindOption(args, "--namespace"));
+            Console.WriteLine($"enrolled {bindingUuid} stable_name={args[2]}");
+            Console.WriteLine(
+                "LIMITATION: disabled non-production Codex synthetic capture only; " +
+                "no scheduler, hooks, scanner product, or supported capture adapter.");
+            return 0;
+
+        case "receipt":
+            RequireArgs(args, 3);
+            var receipt = await capture.ReadReceiptAsync(Guid.Parse(args[2]));
+            Console.WriteLine(
+                $"{receipt.ObservationUuid} status={receipt.Status} " +
+                $"namespace={receipt.EffectiveNamespace} route={receipt.RouteBasis}");
+            Console.WriteLine(
+                $"binding={receipt.StableName} harness={receipt.Harness} " +
+                $"session={receipt.SourceSessionId} locator={receipt.SourceLocator}");
+            Console.WriteLine($"content={receipt.SafeSourcePayload}");
+            foreach (var item in receipt.Events)
+            {
+                Console.WriteLine($"event={item.TraceUuid} part={item.PartKey}");
+            }
+            Console.WriteLine(
+                "LIMITATION: receipt is for the disabled non-production synthetic Codex slice.");
+            return 0;
+
+        default:
+            throw new ArgumentException($"Unknown capture command '{args[1]}'.");
+    }
+}
+
 static string? FindOption(string[] args, string name)
 {
     for (var i = 0; i < args.Length - 1; i++)
@@ -313,4 +362,8 @@ static void Usage()
     Console.Error.WriteLine("memctl why <uuid>");
     Console.Error.WriteLine("memctl consumed <session_id>");
     Console.Error.WriteLine("memctl trace <session_id>");
+    Console.Error.WriteLine(
+        "memctl capture enroll <stable_name> --harness codex --agent-id id " +
+        "--credential-file path [--namespace name]");
+    Console.Error.WriteLine("memctl capture receipt <observation_uuid>");
 }

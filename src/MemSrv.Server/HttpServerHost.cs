@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Npgsql;
+using System.Text.Json;
 
 namespace MemSrv.Server;
 
@@ -30,6 +32,8 @@ public static class HttpServerHost
         builder.Services.AddSingleton(_ => new NeverStoreGate(options.NeverStorePath));
         builder.Services.AddSingleton(provider =>
             new MemoryService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
+        builder.Services.AddSingleton(provider =>
+            new CaptureService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddSingleton<MemoryContextResolver>();
@@ -63,6 +67,60 @@ public static class HttpServerHost
             timeout.CancelAfter(TimeSpan.FromSeconds(2));
             bool healthy = await memory.PingAsync(timeout.Token);
             return healthy ? Results.Ok("ok") : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        });
+
+        // Deliberately outside MCP authentication: capture credentials are a
+        // separate capability and are resolved only by the capture service.
+        // Read the body only after the credential has resolved, so unknown
+        // credentials receive 401 before payload parsing or safety work.
+        app.MapPost("/capture/v1/observations", async (HttpContext http, CaptureService capture) =>
+        {
+            string header = http.Request.Headers.Authorization.ToString();
+            const string prefix = "Bearer ";
+            if (!header.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                || string.IsNullOrWhiteSpace(header[prefix.Length..]))
+            {
+                return Results.Unauthorized();
+            }
+
+            string credential = header[prefix.Length..].Trim();
+            if (!await capture.IsCredentialKnownAsync(credential, http.RequestAborted))
+            {
+                return Results.Unauthorized();
+            }
+
+            CaptureObservationRequest? request;
+            try
+            {
+                request = await http.Request.ReadFromJsonAsync<CaptureObservationRequest>(
+                    cancellationToken: http.RequestAborted);
+                if (request is null)
+                {
+                    return Results.BadRequest(new { error = "A capture observation body is required." });
+                }
+                var receipt = await capture.ImportAsync(credential, request, http.RequestAborted);
+                return receipt is null ? Results.Unauthorized() : Results.Ok(receipt);
+            }
+            catch (CaptureConflictException ex)
+            {
+                return Results.Conflict(new { error = ex.Message });
+            }
+            catch (JsonException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+            {
+                return Results.BadRequest(new { error = "Capture event identities must be unique." });
+            }
         });
 
         app.MapMcp("/mcp").RequireAuthorization();

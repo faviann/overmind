@@ -14,6 +14,8 @@ public sealed class NeverStoreGate
 {
     private readonly IReadOnlyList<Rule> _rules;
 
+    public bool IsConfigured => _rules.Count > 0;
+
     public NeverStoreGate(string path)
     {
         _rules = File.Exists(path) ? Load(path) : [];

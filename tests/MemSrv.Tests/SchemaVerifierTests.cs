@@ -54,6 +54,20 @@ public sealed class SchemaVerifierTests
     }
 
     [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenCaptureLedgerTriggerIsMissing()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, "DROP TRIGGER captured_events_immutable ON captured_events");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains("captured_events_immutable", stderr, StringComparison.Ordinal);
+            Assert.Contains("append-only", stderr, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public async Task MemCtlVerifySchemaFailsWhenMemsrvHasDeleteGrantOnTraces()
     {
         await WithDisposableDbAsync(async admin =>

@@ -85,13 +85,13 @@ git commit --quiet -m 'Complete scripted AFK issue'
 cat >"$AFK_TEST_PR_BODY" <<'BODY'
 ## Issues
 
-Closes #42
+Progresses #42
 
 ## Workflow telemetry
 
 | Field | Observed value |
 |---|---|
-| Final workflow outcome | Closes |
+| Final workflow outcome | Progresses |
 BODY
 gh pr create --head "$branch" --body-file "$AFK_TEST_PR_BODY" >/dev/null
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"<promise>COMPLETE</promise>"}}'
@@ -111,7 +111,7 @@ set -euo pipefail
 printf 'gh %s\n' "$*" >>"$AFK_TEST_EVENTS"
 if [[ "${1:-} ${2:-}" == "pr create" ]]; then
   [[ "$*" == "pr create --head afk/issue-42 --body-file $AFK_TEST_PR_BODY" ]]
-  grep -q '^Closes #42$' "$AFK_TEST_PR_BODY"
+  grep -q '^Progresses #42$' "$AFK_TEST_PR_BODY"
   grep -q '^## Workflow telemetry$' "$AFK_TEST_PR_BODY"
   printf 'pr-created\n' >>"$AFK_TEST_STATE"
   printf 'https://github.com/acme/widget/pull/7\n'
@@ -144,16 +144,13 @@ case "$*" in
       printf '{"state":"OPEN","labels":[{"name":"ready-for-agent"},{"name":"Sandcastle"}]}\n'
     fi ;;
   "api repos/acme/widget/branches/main/protection")
-    # The fixture default branch is unprotected, so the guarded merge stage
-    # must refuse and leave the pull request awaiting review.
-    printf 'Branch not protected\n' >&2
-    exit 1
-    ;;
+    printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}' ;;
   "pr list --head afk/issue-42 --state open --json number --jq .[].number")
     grep -qx pr-created "$AFK_TEST_STATE"
     printf '7\n'
     ;;
   "pr edit 7 --add-label afk-review") ;;
+  "pr view 7 --json body --jq .body") cat "$AFK_TEST_PR_BODY" ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 90 ;;
 esac
 EOF

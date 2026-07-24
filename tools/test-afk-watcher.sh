@@ -65,7 +65,8 @@ case "$AFK_TEST_SCENARIO" in
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     fi
     ;;
-  live-add|drain-before-claim) printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
+  live-add|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check)
+    printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   drain|force)
     if grep -qx claim-42 "$AFK_TEST_STATE"; then
       printf 'Selected issue: https://github.com/acme/widget/issues/43\n'
@@ -160,7 +161,7 @@ case "$AFK_TEST_SCENARIO" in
     else
       kill -TERM "$PPID"
     fi ;;
-  claim-race|eligibility-race|default-race|drain-before-claim)
+  claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check)
     kill -TERM "$PPID" ;;
   chain|paused-lane|paused-only|idle-artifact|idle-artifact-label-fail|idle-discovery-uncertain|ci-retry-pass|ci-repeat-lane|ci-timeout-only|nonblocking-discovery|blocking-discovery-lane|uncertain-discovery-only)
     kill -TERM "$PPID" ;;
@@ -252,35 +253,37 @@ case "$*" in
     [[ "$AFK_TEST_SCENARIO" != idle-artifact-label-fail ]] ;;
   issue\ edit\ 77\ --add-label\ needs-triage\ --add-label\ afk-review) ;;
   api\ repos/acme/widget/branches/main/protection)
-    if [[ "$AFK_TEST_SCENARIO" == chain || "$AFK_TEST_SCENARIO" == paused-lane || "$AFK_TEST_SCENARIO" == paused-only ||
-          "$AFK_TEST_SCENARIO" == ci-retry-pass || "$AFK_TEST_SCENARIO" == ci-repeat-lane ||
-          "$AFK_TEST_SCENARIO" == ci-timeout-only || "$AFK_TEST_SCENARIO" == nonblocking-discovery ||
-          "$AFK_TEST_SCENARIO" == blocking-discovery-lane || "$AFK_TEST_SCENARIO" == uncertain-discovery-only ||
-          "$AFK_TEST_SCENARIO" == reauthorize ]]; then
-      printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"}]}}'
-    else
+    if [[ "$AFK_TEST_SCENARIO" == launch-unprotected ]]; then
       exit 1
+    elif [[ "$AFK_TEST_SCENARIO" == launch-no-prs ]]; then
+      printf '%s\n' '{"required_pull_request_reviews":null,"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}'
+    elif [[ "$AFK_TEST_SCENARIO" == launch-not-strict ]]; then
+      printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":false,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}'
+    elif [[ "$AFK_TEST_SCENARIO" == launch-missing-check ]]; then
+      printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"}]}}'
+    else
+      printf '%s\n' '{"required_pull_request_reviews":{"required_approving_review_count":0},"required_status_checks":{"strict":true,"checks":[{"context":"test"},{"context":"test-compose"},{"context":"reference-compose"}]}}'
     fi ;;
   pr\ view\ *\ --json\ body\ --jq\ .body)
     pr="${3}"; issue="$((pr - 100))"
     if [[ "$AFK_TEST_SCENARIO" == paused-lane || "$AFK_TEST_SCENARIO" == paused-only ]] && [[ "$issue" == 42 ]]; then
       printf 'Progresses #%s\n\n| Final workflow outcome | Progresses |\n' "$issue"
     elif [[ "$AFK_TEST_SCENARIO" == nonblocking-discovery || "$AFK_TEST_SCENARIO" == blocking-discovery-lane || "$AFK_TEST_SCENARIO" == uncertain-discovery-only || "$AFK_TEST_SCENARIO" == idle-discovery-uncertain ]] && [[ "$issue" == 42 ]]; then
-      printf 'Closes #%s\n\n## Follow-ups\n\n- #77 - discovered work\n\n| Final workflow outcome | Closes |\n' "$issue"
+      printf 'Closes #%s\n\n## Follow-ups\n\n- #77 - discovered work\n\n## Closure gate\n\n| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |\n|---|---|---|---|---|\n| Scripted watcher criterion | `run-afk-once.sh` | Public watcher fixture | Scenario output | tested |\n\n| Final workflow outcome | Closes |\n' "$issue"
     else
-      printf 'Closes #%s\n\n| Final workflow outcome | Closes |\n' "$issue"
+      printf 'Closes #%s\n\n## Closure gate\n\n| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |\n|---|---|---|---|---|\n| Scripted watcher criterion | `run-afk-once.sh` | Public watcher fixture | Scenario output | tested |\n\n| Final workflow outcome | Closes |\n' "$issue"
     fi ;;
   pr\ checks\ *\ --required\ --json\ name,state,bucket,link)
     pr="${3}"
     checks_call="$(grep -c "^gh pr checks $pr " "$AFK_TEST_EVENTS")"
     if [[ "$pr" == 142 && "$AFK_TEST_SCENARIO" == ci-retry-pass && "$checks_call" == 1 ]]; then
-      printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]'
+      printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"},{"name":"test-compose","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/2"},{"name":"reference-compose","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/3"}]'
     elif [[ "$pr" == 142 && "$AFK_TEST_SCENARIO" == ci-repeat-lane ]]; then
-      printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]'
+      printf '%s\n' '[{"name":"test","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/1"},{"name":"test-compose","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/2"},{"name":"reference-compose","state":"FAILURE","bucket":"fail","link":"https://github.com/acme/widget/actions/runs/100/job/3"}]'
     elif [[ "$pr" == 142 && "$AFK_TEST_SCENARIO" == ci-timeout-only ]]; then
-      printf '%s\n' '[{"name":"test","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/1"}]'
+      printf '%s\n' '[{"name":"test","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/1"},{"name":"test-compose","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/2"},{"name":"reference-compose","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/acme/widget/actions/runs/100/job/3"}]'
     else
-      printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/2"}]'
+      printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/2"},{"name":"test-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/3"},{"name":"reference-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/4"}]'
     fi ;;
   "run rerun 100 --failed") ;;
   "api repos/acme/widget/issues/42/dependencies/blocked_by --paginate --jq .[].number")
@@ -374,6 +377,30 @@ wait_output() {
   printf 'timed out waiting for output: %s\n' "$pattern" >&2
   exit 1
 }
+
+launch_policy_cases=(
+  'launch-unprotected|default branch main is not protected'
+  'launch-no-prs|default branch main does not require pull requests'
+  'launch-not-strict|default branch main does not require up-to-date branches'
+  'launch-missing-check|default branch main does not require designated check: reference-compose'
+)
+for launch_policy_case in "${launch_policy_cases[@]}"; do
+  IFS='|' read -r scenario diagnostic <<<"$launch_policy_case"
+  setup_scenario
+  if (run_watcher "$scenario") >"$fixture/$scenario.out" 2>&1; then
+    printf 'FAIL[%s]: launch policy failure must exit nonzero\n' "$scenario" >&2
+    exit 1
+  fi
+  grep -Fq "AFK preflight failed: $diagnostic" "$fixture/$scenario.out" || {
+    cat "$fixture/$scenario.out" >&2
+    exit 1
+  }
+  if grep -Eq '^(selector|claim |agent |gh (label (create|edit)|api --method (DELETE|PATCH|PUT)|issue edit|pr ))' "$events"; then
+    printf 'FAIL[%s]: policy repair or issue work began\n' "$scenario" >&2
+    cat "$events" >&2
+    exit 1
+  fi
+done
 
 run_foreground chain
 [[ "$(grep -c '^agent ' "$events")" == 2 ]] || {
@@ -549,9 +576,13 @@ grep -q 'no issue was claimed' "$fixture/drain-before-claim.out"
 run_foreground default-race
 [[ "$(grep -c '^selector$' "$events")" == 2 ]]
 [[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
-advanced_oid="$(git -C "$repo" rev-parse origin/main)"
-[[ "$advanced_oid" != "$base_oid" ]]
-grep -q "^agent-base 42 $advanced_oid$" "$events"
+advanced_oid="$(sed -n 's/^agent-base 42 //p' "$events")"
+[[ -n "$advanced_oid" && "$advanced_oid" != "$base_oid" ]]
+git -C "$repo" merge-base --is-ancestor "$advanced_oid" origin/main || {
+  cat "$fixture/default-race.out" >&2
+  cat "$events" >&2
+  exit 1
+}
 
 run_background drain
 wait_event '^agent 42$'

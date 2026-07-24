@@ -16,7 +16,6 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         string credential,
         CancellationToken cancellationToken = default)
     {
-        EnsureSafetyConfigured();
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         return await connection.ExecuteScalarAsync<bool>(
@@ -79,7 +78,6 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         CaptureObservationRequest request,
         CancellationToken cancellationToken = default)
     {
-        EnsureSafetyConfigured();
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
@@ -98,6 +96,7 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             return null;
         }
 
+        EnsureSafetyConfigured();
         Validate(binding, request);
         string inputJson = JsonSerializer.Serialize(request, JsonOptions);
         if (Encoding.UTF8.GetByteCount(inputJson) > 1_000_000)
@@ -105,7 +104,17 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             throw new InvalidOperationException("Capture observation exceeds the 1000000-byte non-production limit.");
         }
 
-        string contentSignature = Sign(inputJson, binding.ContentSignatureKey);
+        string signatureContent = JsonSerializer.Serialize(
+            new CaptureSignatureContent(
+                request.ContractVersion,
+                request.SourceSessionId,
+                request.SourceLocator,
+                request.Source,
+                request.Adapter,
+                request.SourcePayload,
+                request.Events),
+            JsonOptions);
+        string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
         AssertSafe(request.SourceSessionId, scan);
         AssertSafe(request.SourceLocator, scan);
@@ -176,26 +185,33 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             new { stream.StreamUuid, request.SourcePosition, request.SourceLocator }, transaction)).AsList();
         if (existingMatches.Count > 0)
         {
-            var existing = existingMatches.SingleOrDefault(candidate =>
-                candidate.SourcePosition == request.SourcePosition
-                && string.Equals(candidate.SourceLocator, request.SourceLocator, StringComparison.Ordinal));
-            if (existing is null
-                || existing.SourcePosition != request.SourcePosition
-                || !string.Equals(existing.SourceLocator, request.SourceLocator, StringComparison.Ordinal)
-                || !string.Equals(existing.ContentSignature, contentSignature, StringComparison.Ordinal))
+            var locatorMatch = existingMatches.SingleOrDefault(candidate =>
+                string.Equals(candidate.SourceLocator, request.SourceLocator, StringComparison.Ordinal));
+            if (locatorMatch is not null)
             {
-                await transaction.RollbackAsync(cancellationToken);
-                throw new CaptureConflictException(
-                    $"Source position {request.SourcePosition} or locator '{request.SourceLocator}' " +
-                    "was already accepted with different identity or content.");
+                if (!string.Equals(
+                    locatorMatch.ContentSignature, contentSignature, StringComparison.Ordinal))
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    throw new CaptureConflictException(
+                        $"Source position {request.SourcePosition} or locator '{request.SourceLocator}' " +
+                        "was already accepted with different identity or content.");
+                }
+
+                var oldObservation = await LoadObservationReceiptAsync(
+                    connection, locatorMatch.ObservationUuid, transaction);
+                var oldEvents = await LoadEventReceiptsAsync(
+                    connection, locatorMatch.ObservationUuid, transaction);
+                await transaction.CommitAsync(cancellationToken);
+                return new CaptureReceipt(
+                    locatorMatch.ObservationUuid, "already_accepted", locatorMatch.SourcePosition,
+                    stream.EffectiveNamespace, stream.RouteBasis, oldObservation, oldEvents);
             }
 
-            var oldEvents = await LoadEventReceiptsAsync(
-                connection, existing.ObservationUuid, transaction);
-            await transaction.CommitAsync(cancellationToken);
-            return new CaptureReceipt(
-                existing.ObservationUuid, "already_accepted", request.SourcePosition,
-                stream.EffectiveNamespace, stream.RouteBasis, oldEvents);
+            await transaction.RollbackAsync(cancellationToken);
+            throw new CaptureConflictException(
+                $"Source position {request.SourcePosition} or locator '{request.SourceLocator}' " +
+                "was already accepted with different identity or content.");
         }
 
         long expectedPosition = (stream.CheckpointPosition ?? -1) + 1;
@@ -239,7 +255,6 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 scan.RedactionCount
             }, transaction);
 
-        var receipts = new List<CaptureEventReceipt>(request.Events.Count);
         foreach (var safeEvent in safeEvents)
         {
             var item = safeEvent.Event;
@@ -283,13 +298,6 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                         TargetKind = safeRelationship.TargetKind
                     }, transaction);
             }
-            receipts.Add(new CaptureEventReceipt(
-                traceUuid,
-                item.PartKey,
-                safeEvent.Relationships.Select(relationship => new CaptureRelationship(
-                    relationship.Relationship.Type,
-                    relationship.TargetNativeId,
-                    relationship.TargetKind)).ToArray()));
         }
 
         await connection.ExecuteAsync(
@@ -299,10 +307,14 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             WHERE stream_uuid = @StreamUuid
             """,
             new { request.SourcePosition, stream.StreamUuid }, transaction);
+        var observation = await LoadObservationReceiptAsync(
+            connection, observationUuid, transaction);
+        var receipts = await LoadEventReceiptsAsync(
+            connection, observationUuid, transaction);
         await transaction.CommitAsync(cancellationToken);
         return new CaptureReceipt(
             observationUuid, "new", request.SourcePosition,
-            stream.EffectiveNamespace, stream.RouteBasis, receipts);
+            stream.EffectiveNamespace, stream.RouteBasis, observation, receipts);
     }
 
     public async Task<CaptureReceiptRecord> ReadReceiptAsync(
@@ -334,13 +346,14 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             throw new InvalidOperationException($"Capture observation '{observationUuid}' was not found.");
         }
 
+        var observation = await LoadObservationReceiptAsync(connection, observationUuid);
         var events = await LoadEventReceiptsAsync(connection, observationUuid);
         return new CaptureReceiptRecord(
             row.ObservationUuid, row.StableName, row.Harness, row.SourceSessionId,
             row.SourcePosition, row.SourceLocator, row.EffectiveNamespace, row.RouteBasis, "new",
             row.ScanStatus, row.ScanRuleSetVersion, row.ScanRuleIds, row.ScanCategories,
             row.ScanRedactionCount,
-            row.SafeSourcePayload, row.CapturedAt, events);
+            row.SafeSourcePayload, row.CapturedAt, observation, events);
     }
 
     private static void Validate(BindingRow binding, CaptureObservationRequest request)
@@ -412,6 +425,47 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         return result.Redacted;
     }
 
+    private static async Task<CaptureObservationReceipt> LoadObservationReceiptAsync(
+        NpgsqlConnection connection,
+        Guid observationUuid,
+        NpgsqlTransaction? transaction = null)
+    {
+        var row = await connection.QuerySingleAsync<ObservationReceiptRow>(
+            """
+            SELECT o.observation_uuid AS ObservationUuid,
+                   o.stream_uuid AS SourceStreamUuid,
+                   o.source_position AS SourcePosition,
+                   o.source_locator AS SourceLocator,
+                   o.source::text AS SourceJson,
+                   o.adapter::text AS AdapterJson,
+                   o.safe_source_payload::text AS SafeSourcePayloadJson,
+                   o.scan_status AS ScanStatus,
+                   o.scan_rule_set_version AS ScanRuleSetVersion,
+                   o.scan_rule_ids AS ScanRuleIds,
+                   o.scan_categories AS ScanCategories,
+                   o.scan_redaction_count AS ScanRedactionCount,
+                   o.captured_at AS CapturedAt
+            FROM capture_observations o
+            WHERE o.observation_uuid = @observationUuid
+            """,
+            new { observationUuid }, transaction);
+        return new CaptureObservationReceipt(
+            row.ObservationUuid,
+            row.SourceStreamUuid,
+            row.SourcePosition,
+            row.SourceLocator,
+            JsonSerializer.Deserialize<CaptureSource>(row.SourceJson, JsonOptions)!,
+            JsonSerializer.Deserialize<CaptureAdapter>(row.AdapterJson, JsonOptions)!,
+            JsonDocument.Parse(row.SafeSourcePayloadJson).RootElement.Clone(),
+            new CaptureScanReceipt(
+                row.ScanStatus,
+                row.ScanRuleSetVersion,
+                row.ScanRuleIds,
+                row.ScanCategories,
+                row.ScanRedactionCount),
+            row.CapturedAt);
+    }
+
     private static async Task<IReadOnlyList<CaptureEventReceipt>> LoadEventReceiptsAsync(
         NpgsqlConnection connection,
         Guid observationUuid,
@@ -419,7 +473,11 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
     {
         var events = (await connection.QueryAsync<EventReceiptRow>(
             """
-            SELECT trace_uuid AS TraceUuid, part_key AS PartKey
+            SELECT trace_uuid AS TraceUuid, session_id AS SessionId,
+                   agent_id AS AgentId, namespace,
+                   part_key AS PartKey, part_order AS PartOrder,
+                   kind, actor, occurred_at AS OccurredAt,
+                   payload_version AS PayloadVersion, payload::text AS PayloadJson
             FROM captured_events
             WHERE observation_uuid = @observationUuid
             ORDER BY part_order
@@ -437,7 +495,19 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                 ORDER BY relationship_type, target_native_id
                 """,
                 new { item.TraceUuid }, transaction)).AsList();
-            receipts.Add(new CaptureEventReceipt(item.TraceUuid, item.PartKey, relationships));
+            receipts.Add(new CaptureEventReceipt(
+                item.TraceUuid,
+                item.SessionId,
+                item.AgentId,
+                item.Namespace,
+                item.PartKey,
+                item.PartOrder,
+                item.Kind,
+                item.Actor,
+                item.OccurredAt,
+                item.PayloadVersion,
+                JsonDocument.Parse(item.PayloadJson).RootElement.Clone(),
+                relationships));
         }
         return receipts;
     }
@@ -487,12 +557,45 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
     private sealed class EventReceiptRow
     {
         public Guid TraceUuid { get; set; }
+        public string SessionId { get; set; } = "";
+        public string AgentId { get; set; } = "";
+        public string Namespace { get; set; } = "";
         public string PartKey { get; set; } = "";
+        public int PartOrder { get; set; }
+        public string Kind { get; set; } = "";
+        public string Actor { get; set; } = "";
+        public DateTimeOffset? OccurredAt { get; set; }
+        public int PayloadVersion { get; set; }
+        public string PayloadJson { get; set; } = "";
+    }
+    private sealed class ObservationReceiptRow
+    {
+        public Guid ObservationUuid { get; set; }
+        public Guid SourceStreamUuid { get; set; }
+        public long SourcePosition { get; set; }
+        public string SourceLocator { get; set; } = "";
+        public string SourceJson { get; set; } = "";
+        public string AdapterJson { get; set; } = "";
+        public string SafeSourcePayloadJson { get; set; } = "";
+        public string ScanStatus { get; set; } = "";
+        public string ScanRuleSetVersion { get; set; } = "";
+        public string[] ScanRuleIds { get; set; } = [];
+        public string[] ScanCategories { get; set; } = [];
+        public int ScanRedactionCount { get; set; }
+        public DateTimeOffset CapturedAt { get; set; }
     }
     private sealed record SafeEvent(
         CaptureEvent Event, string Payload, IReadOnlyList<SafeRelationship> Relationships);
     private sealed record SafeRelationship(
         CaptureRelationship Relationship, string TargetNativeId, string? TargetKind);
+    private sealed record CaptureSignatureContent(
+        int ContractVersion,
+        string SourceSessionId,
+        string SourceLocator,
+        CaptureSource Source,
+        CaptureAdapter Adapter,
+        JsonElement SourcePayload,
+        IReadOnlyList<CaptureEvent> Events);
 
     private sealed class ScanAccumulator(string ruleSetVersion)
     {

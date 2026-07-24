@@ -30,6 +30,13 @@ if (records.Count != 3)
 {
     throw new InvalidOperationException("Synthetic Codex fixture must contain exactly three JSONL records.");
 }
+if (records[0].GetProperty("type").GetString() != "response_item"
+    || records[0].GetProperty("item_type").GetString() != "message"
+    || records[0].GetProperty("role").GetString() != "user")
+{
+    throw new InvalidOperationException(
+        "Synthetic Codex message must be a model-facing response_item/message with role user.");
+}
 
 string sessionId = records[0].GetProperty("session_id").GetString()
     ?? throw new InvalidOperationException("Fixture session_id is required.");

@@ -22,9 +22,34 @@ public sealed record CaptureObservationRequest(
     CaptureAdapter Adapter,
     JsonElement SourcePayload,
     IReadOnlyList<CaptureEvent> Events);
+public sealed record CaptureScanReceipt(
+    string Status,
+    string RuleSetVersion,
+    IReadOnlyList<string> RuleIds,
+    IReadOnlyList<string> Categories,
+    int RedactionCount);
+public sealed record CaptureObservationReceipt(
+    Guid ObservationUuid,
+    Guid SourceStreamUuid,
+    long SourcePosition,
+    string SourceLocator,
+    CaptureSource Source,
+    CaptureAdapter Adapter,
+    JsonElement SafeSourcePayload,
+    CaptureScanReceipt Scan,
+    DateTimeOffset CapturedAt);
 public sealed record CaptureEventReceipt(
     Guid TraceUuid,
+    string SessionId,
+    string AgentId,
+    string Namespace,
     string PartKey,
+    int PartOrder,
+    string Kind,
+    string Actor,
+    DateTimeOffset? OccurredAt,
+    int PayloadVersion,
+    JsonElement Payload,
     IReadOnlyList<CaptureRelationship> Relationships);
 public sealed record CaptureReceipt(
     Guid ObservationUuid,
@@ -32,6 +57,7 @@ public sealed record CaptureReceipt(
     long SourcePosition,
     string EffectiveNamespace,
     string RouteBasis,
+    CaptureObservationReceipt Observation,
     IReadOnlyList<CaptureEventReceipt> Events);
 public sealed record CaptureReceiptRecord(
     Guid ObservationUuid,
@@ -50,4 +76,5 @@ public sealed record CaptureReceiptRecord(
     int ScanRedactionCount,
     string SafeSourcePayload,
     DateTimeOffset CapturedAt,
+    CaptureObservationReceipt Observation,
     IReadOnlyList<CaptureEventReceipt> Events);

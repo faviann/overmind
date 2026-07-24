@@ -5,6 +5,11 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Dapper;
+using MemSrv.Core;
+using MemSrv.Server;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 
 namespace MemSrv.Tests;
@@ -12,6 +17,35 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class CaptureTests : HttpSeamTestBase
 {
+    [Fact]
+    public async Task UnknownCredentialIsRejectedBeforeMalformedBodyOrMissingScannerConfiguration()
+    {
+        var options = RuntimeOptions();
+        options.NeverStorePath = Path.Combine(
+            Path.GetTempPath(), $"missing-never-store-{Guid.NewGuid():N}.yaml");
+        await using var app = HttpServerHost.Build(options, AgentKeyStore.Load(_keysPath));
+        app.Urls.Add("http://127.0.0.1:0");
+        await app.StartAsync();
+        try
+        {
+            string baseUrl = app.Services.GetRequiredService<IServer>()
+                .Features.Get<IServerAddressesFeature>()!.Addresses.First();
+            using var client = new HttpClient { BaseAddress = new Uri(baseUrl) };
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+                "Bearer", $"unknown-capture-{Guid.NewGuid():N}");
+
+            var response = await client.PostAsync(
+                "/capture/v1/observations",
+                new StringContent("not-json", Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
     [Fact]
     public async Task OperatorEnrollsRestrictedCodexCaptureAndReadsFallbackReceipt()
     {
@@ -77,18 +111,27 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         var firstReceipt = await first.Content.ReadFromJsonAsync<JsonElement>();
 
+        var second = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(1, "record-second", "second"));
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+
         var retry = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation(0, "record-stable", "original"));
+            "/capture/v1/observations", Observation(1, "record-stable", "original"));
         Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
         var retryReceipt = await retry.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(0, retryReceipt.GetProperty("sourcePosition").GetInt64());
         Assert.Equal(
             firstReceipt.GetProperty("observationUuid").GetGuid(),
             retryReceipt.GetProperty("observationUuid").GetGuid());
 
         var conflict = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation(0, "record-stable", "changed"));
+            "/capture/v1/observations", Observation(9, "record-stable", "changed"));
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+
+        var positionCollision = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(1, "different-locator", "original"));
+        Assert.Equal(HttpStatusCode.Conflict, positionCollision.StatusCode);
 
         var shown = await RunMemCtlAsync(
             "capture", "receipt", firstReceipt.GetProperty("observationUuid").GetGuid().ToString());
@@ -128,12 +171,95 @@ public sealed class CaptureTests : HttpSeamTestBase
             ["message/0", "tool/1", "tool/2"],
             receipts.Select(receipt => Assert.Single(receipt.GetProperty("events").EnumerateArray())
                 .GetProperty("partKey").GetString()));
+        Assert.Equal(
+            "response_item",
+            receipts[0].GetProperty("observation").GetProperty("source")
+                .GetProperty("recordType").GetString());
+        var messageObservation = receipts[0].GetProperty("observation");
+        Assert.Equal(
+            receipts[0].GetProperty("observationUuid").GetGuid(),
+            messageObservation.GetProperty("observationUuid").GetGuid());
+        Assert.NotEqual(Guid.Empty, messageObservation.GetProperty("sourceStreamUuid").GetGuid());
+        Assert.Equal(0, messageObservation.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal(
+            "synthetic-jsonl:1",
+            messageObservation.GetProperty("sourceLocator").GetString());
+        Assert.Equal(
+            "synthetic",
+            messageObservation.GetProperty("source").GetProperty("harnessVersion").GetString());
+        Assert.Equal(
+            "codex-synthetic-jsonl",
+            messageObservation.GetProperty("adapter").GetProperty("name").GetString());
+        Assert.Equal(
+            "Show the working directory.",
+            messageObservation.GetProperty("safeSourcePayload").GetProperty("text").GetString());
+        Assert.Equal(
+            "clean",
+            messageObservation.GetProperty("scan").GetProperty("status").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(
+            messageObservation.GetProperty("scan").GetProperty("ruleSetVersion").GetString()));
+        Assert.Equal(0, messageObservation.GetProperty("scan").GetProperty("redactionCount").GetInt32());
+        Assert.NotEqual(
+            default,
+            messageObservation.GetProperty("capturedAt").GetDateTimeOffset());
+        var messageEvent = Assert.Single(receipts[0].GetProperty("events").EnumerateArray());
+        Assert.NotEqual(Guid.Empty, messageEvent.GetProperty("traceUuid").GetGuid());
+        Assert.StartsWith("capture:", messageEvent.GetProperty("sessionId").GetString());
+        Assert.Equal("capture:codex-tracer", messageEvent.GetProperty("agentId").GetString());
+        Assert.Equal("capture/unscoped", messageEvent.GetProperty("namespace").GetString());
+        Assert.Equal(0, messageEvent.GetProperty("partOrder").GetInt32());
+        Assert.Equal("message", messageEvent.GetProperty("kind").GetString());
+        Assert.Equal("user", messageEvent.GetProperty("actor").GetString());
+        Assert.Equal(JsonValueKind.Null, messageEvent.GetProperty("occurredAt").ValueKind);
+        Assert.Equal(1, messageEvent.GetProperty("payloadVersion").GetInt32());
+        Assert.Equal(
+            "Show the working directory.",
+            messageEvent.GetProperty("payload").GetProperty("text").GetString());
+        Assert.Empty(messageEvent.GetProperty("relationships").EnumerateArray());
         var resultEvent = Assert.Single(receipts[2].GetProperty("events").EnumerateArray());
         var resultRelationship = Assert.Single(
             resultEvent.GetProperty("relationships").EnumerateArray());
         Assert.Equal("result_for", resultRelationship.GetProperty("type").GetString());
         Assert.Equal("call_fixture_1", resultRelationship.GetProperty("targetNativeId").GetString());
         Assert.Equal("tool_call", resultRelationship.GetProperty("targetKind").GetString());
+
+        var messageReceipt = await RunMemCtlAsync(
+            "capture", "receipt", receipts[0].GetProperty("observationUuid").GetGuid().ToString());
+        Assert.Contains("source_stream=", messageReceipt);
+        Assert.Contains("source=codex:synthetic record_type=response_item", messageReceipt);
+        Assert.Contains("adapter=codex-synthetic-jsonl:1", messageReceipt);
+        Assert.Contains("captured_at=", messageReceipt);
+        Assert.Contains("safe_source_payload=", messageReceipt);
+        Assert.Contains("session=capture:", messageReceipt);
+        Assert.Contains("agent=capture:codex-tracer", messageReceipt);
+        Assert.Contains("namespace=capture/unscoped", messageReceipt);
+        Assert.Contains("part=message/0 order=0 kind=message actor=user", messageReceipt);
+        Assert.Contains("occurred_at=<none> payload_version=1", messageReceipt);
+        Assert.Contains("\"text\":\"Show the working directory.\"", messageReceipt);
+
+        var callReceipt = await RunMemCtlAsync(
+            "capture", "receipt", receipts[1].GetProperty("observationUuid").GetGuid().ToString());
+        Assert.Contains("part=tool/1 order=0 kind=tool_call actor=assistant", callReceipt);
+        Assert.Contains("session=capture:", callReceipt);
+        Assert.Contains("agent=capture:codex-tracer", callReceipt);
+        Assert.Contains("namespace=capture/unscoped", callReceipt);
+        Assert.Contains("occurred_at=<none> payload_version=1", callReceipt);
+        Assert.Contains("\"callId\":\"call_fixture_1\"", callReceipt);
+        Assert.Contains("\"tool\":\"shell\"", callReceipt);
+        Assert.Contains("\"command\":\"pwd\"", callReceipt);
+
+        var toolResultReceipt = await RunMemCtlAsync(
+            "capture", "receipt", receipts[2].GetProperty("observationUuid").GetGuid().ToString());
+        Assert.Contains("part=tool/2 order=0 kind=tool_result actor=tool", toolResultReceipt);
+        Assert.Contains("session=capture:", toolResultReceipt);
+        Assert.Contains("agent=capture:codex-tracer", toolResultReceipt);
+        Assert.Contains("namespace=capture/unscoped", toolResultReceipt);
+        Assert.Contains("occurred_at=<none> payload_version=1", toolResultReceipt);
+        Assert.Contains("\"outcome\":\"succeeded\"", toolResultReceipt);
+        Assert.Contains("\"output\":\"/workspace\"", toolResultReceipt);
+        Assert.Contains("relationship=result_for", toolResultReceipt);
+        Assert.Contains("target=call_fixture_1", toolResultReceipt);
+        Assert.Contains("target_kind=tool_call", toolResultReceipt);
         Assert.Contains("LIMITATION:", enabled.Stderr);
     }
 

@@ -46,7 +46,7 @@ var events = new object[]
     new
     {
         partKey = "tool/1",
-        partOrder = 1,
+        partOrder = 0,
         kind = "tool_call",
         actor = "assistant",
         payload = new
@@ -59,7 +59,7 @@ var events = new object[]
     new
     {
         partKey = "tool/2",
-        partOrder = 2,
+        partOrder = 0,
         kind = "tool_result",
         actor = "tool",
         payload = new
@@ -79,28 +79,40 @@ var events = new object[]
         }
     }
 };
-var observation = new
-{
-    contractVersion = 1,
-    sourceSessionId = sessionId,
-    sourceLocator = $"synthetic-jsonl:1-3",
-    source = new { harness = "codex", harnessVersion = "synthetic", recordType = "fixture_exchange" },
-    adapter = new { name = "codex-synthetic-jsonl", version = "1" },
-    sourcePayload = new { records },
-    events
-};
 
 using var client = new HttpClient();
 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", credential);
-var response = await client.PostAsJsonAsync($"{endpoint}/capture/v1/observations", observation);
-string responseText = await response.Content.ReadAsStringAsync();
-if (!response.IsSuccessStatusCode)
+for (var position = 0; position < records.Count; position++)
 {
-    Console.Error.WriteLine($"Synthetic capture failed with HTTP {(int)response.StatusCode}: {responseText}");
-    return 1;
+    var observation = new
+    {
+        contractVersion = 1,
+        sourceSessionId = sessionId,
+        sourcePosition = position,
+        sourceLocator = $"synthetic-jsonl:{position + 1}",
+        source = new
+        {
+            harness = "codex",
+            harnessVersion = "synthetic",
+            recordType = records[position].GetProperty("type").GetString()
+        },
+        adapter = new { name = "codex-synthetic-jsonl", version = "1" },
+        sourcePayload = records[position],
+        events = new[] { events[position] }
+    };
+    var response = await client.PostAsJsonAsync($"{endpoint}/capture/v1/observations", observation);
+    string responseText = await response.Content.ReadAsStringAsync();
+    if (!response.IsSuccessStatusCode)
+    {
+        Console.Error.WriteLine(
+            $"Synthetic capture failed at source position {position} " +
+            $"with HTTP {(int)response.StatusCode}: {responseText}");
+        return 1;
+    }
+
+    Console.WriteLine(responseText);
 }
 
-Console.WriteLine(responseText);
 Console.Error.WriteLine(
     "LIMITATION: disabled non-production synthetic Codex fixture tracer; " +
     "not a live adapter, scheduler, hook, or supported capture product.");

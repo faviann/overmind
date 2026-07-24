@@ -304,14 +304,27 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
             var receipt = await capture.ReadReceiptAsync(Guid.Parse(args[2]));
             Console.WriteLine(
                 $"{receipt.ObservationUuid} status={receipt.Status} " +
-                $"namespace={receipt.EffectiveNamespace} route={receipt.RouteBasis}");
+                $"position={receipt.SourcePosition} namespace={receipt.EffectiveNamespace} " +
+                $"route={receipt.RouteBasis}");
             Console.WriteLine(
                 $"binding={receipt.StableName} harness={receipt.Harness} " +
                 $"session={receipt.SourceSessionId} locator={receipt.SourceLocator}");
             Console.WriteLine($"content={receipt.SafeSourcePayload}");
+            Console.WriteLine(
+                $"scan={receipt.ScanStatus} rule_set={receipt.ScanRuleSetVersion} " +
+                $"rules={string.Join(',', receipt.ScanRuleIds)} " +
+                $"categories={string.Join(',', receipt.ScanCategories)} " +
+                $"redactions={receipt.ScanRedactionCount}");
             foreach (var item in receipt.Events)
             {
                 Console.WriteLine($"event={item.TraceUuid} part={item.PartKey}");
+                foreach (var relationship in item.Relationships)
+                {
+                    Console.WriteLine(
+                        $"relationship={relationship.Type} " +
+                        $"target={relationship.TargetNativeId} " +
+                        $"target_kind={relationship.TargetKind ?? "<none>"}");
+                }
             }
             Console.WriteLine(
                 "LIMITATION: receipt is for the disabled non-production synthetic Codex slice.");

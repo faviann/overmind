@@ -1,7 +1,10 @@
 rules:
   - name: aws-access-key-id
+    category: secret
     pattern: '\bAKIA[0-9A-Z]{16}\b'
   - name: env-assignment-secret
+    category: secret
     pattern: '(?i)\b(password|passwd|secret|token|api[_-]?key)\s*=\s*[^ \r\n]+'
   - name: bearer-token
+    category: secret
     pattern: '(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}'

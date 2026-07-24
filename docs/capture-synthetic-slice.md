@@ -33,9 +33,12 @@ docker run --rm \
   overmind-codex-capture-fixture
 ```
 
-It reads only the baked synthetic three-record JSONL fixture and sends one
-message/tool-call/tool-result observation to
-`POST /capture/v1/observations`. Read the durable operator receipt with:
+It reads only the baked synthetic three-record JSONL fixture and sends three
+ordered observations (message, tool call, tool result) to
+`POST /capture/v1/observations`. Each persisted JSONL source record has its own
+numeric source position, locator, idempotency identity, and receipt. The tool
+result retains its source-native `result_for` relationship to the call.
+Read any durable operator receipt with:
 
 ```sh
 memctl capture receipt <observation_uuid>
@@ -49,6 +52,13 @@ memctl capture receipt <observation_uuid>
 - The existing deterministic never-store gate is applied before append, with a
   one-megabyte observation ceiling. This slice does not claim the complete
   bounded scanner product described by the capture safety research.
+- Source positions begin at zero and must advance exactly one past the
+  server-owned contiguous checkpoint. Stream namespace and route basis are
+  fixed by the binding policy on first import and reused by later catch-up.
+- Retry comparison uses a server-owned random per-binding HMAC key. Receipts
+  expose canonical scan status, rule-set version, applied rule IDs/categories,
+  and aggregate redaction count; raw unsafe input and an unkeyed fingerprint of
+  it are not persisted.
 - The endpoint is versioned and non-MCP. Capture credentials work only there;
   agent bearer keys work only at `/mcp`. There is no captured-content read
   capability.

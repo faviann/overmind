@@ -87,7 +87,8 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             """
             SELECT binding_uuid AS BindingUuid, stable_name AS StableName, harness,
                    agent_id AS AgentId, route_namespace AS RouteNamespace,
-                   allowed_namespaces AS AllowedNamespaces
+                   allowed_namespaces AS AllowedNamespaces,
+                   content_signature_key AS ContentSignatureKey
             FROM capture_source_bindings
             WHERE credential_hash = @credentialHash AND active
             """,
@@ -104,96 +105,151 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             throw new InvalidOperationException("Capture observation exceeds the 1000000-byte non-production limit.");
         }
 
-        string contentHash = Hash(inputJson);
-        neverStore.AssertAllowed(request.SourceSessionId);
-        neverStore.AssertAllowed(request.SourceLocator);
+        string contentSignature = Sign(inputJson, binding.ContentSignatureKey);
+        var scan = new ScanAccumulator(neverStore.RuleSetVersion);
+        AssertSafe(request.SourceSessionId, scan);
+        AssertSafe(request.SourceLocator, scan);
         foreach (var item in request.Events)
         {
-            neverStore.AssertAllowed(item.PartKey);
-            neverStore.AssertAllowed(item.Kind);
-            neverStore.AssertAllowed(item.Actor);
+            AssertSafe(item.PartKey, scan);
+            AssertSafe(item.Kind, scan);
+            AssertSafe(item.Actor, scan);
             foreach (var relationship in item.Relationships ?? [])
             {
-                neverStore.AssertAllowed(relationship.Type);
+                AssertSafe(relationship.Type, scan);
             }
         }
-        string safePayload = neverStore.Redact(request.SourcePayload.GetRawText());
-        string scanStatus = safePayload == request.SourcePayload.GetRawText() ? "clean" : "redacted";
-        string effectiveNamespace = binding.RouteNamespace ?? "capture/unscoped";
-        string routeBasis = binding.RouteNamespace is null ? "fallback" : "configured_binding";
+        string source = Redact(JsonSerializer.Serialize(request.Source, JsonOptions), scan);
+        string adapter = Redact(JsonSerializer.Serialize(request.Adapter, JsonOptions), scan);
+        string safePayload = Redact(request.SourcePayload.GetRawText(), scan);
+        var safeEvents = request.Events.Select(item => new SafeEvent(
+            item,
+            Redact(item.Payload.GetRawText(), scan),
+            (item.Relationships ?? []).Select(relationship => new SafeRelationship(
+                relationship,
+                Redact(relationship.TargetNativeId, scan),
+                relationship.TargetKind is null ? null : Redact(relationship.TargetKind, scan))).ToArray()
+        )).ToArray();
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        var streamUuid = await connection.ExecuteScalarAsync<Guid>(
+        string proposedNamespace = binding.RouteNamespace ?? "capture/unscoped";
+        string proposedRouteBasis = binding.RouteNamespace is null ? "fallback" : "configured_binding";
+        bool streamExists = await connection.ExecuteScalarAsync<bool>(
             """
-            INSERT INTO capture_source_streams (binding_uuid, source_session_id)
-            VALUES (@BindingUuid, @SourceSessionId)
-            ON CONFLICT (binding_uuid, source_session_id)
-            DO UPDATE SET updated_at = capture_source_streams.updated_at
-            RETURNING stream_uuid
+            SELECT EXISTS (
+              SELECT 1 FROM capture_source_streams
+              WHERE binding_uuid = @BindingUuid AND source_session_id = @SourceSessionId
+            )
             """,
             new { binding.BindingUuid, request.SourceSessionId }, transaction);
-
-        var existing = await connection.QuerySingleOrDefaultAsync<ExistingObservation>(
-            """
-            SELECT observation_uuid AS ObservationUuid, content_hash AS ContentHash
-            FROM capture_observations
-            WHERE stream_uuid = @streamUuid AND source_locator = @SourceLocator
-            """,
-            new { streamUuid, request.SourceLocator }, transaction);
-        if (existing is not null)
+        if (!streamExists
+            && !binding.AllowedNamespaces.Contains(proposedNamespace, StringComparer.Ordinal))
         {
-            if (!string.Equals(existing.ContentHash, contentHash, StringComparison.Ordinal))
+            throw new InvalidOperationException("Binding route is outside its allowed namespaces.");
+        }
+        var stream = await connection.QuerySingleAsync<StreamRow>(
+            """
+            INSERT INTO capture_source_streams
+              (binding_uuid, source_session_id, effective_namespace, route_basis)
+            VALUES (@BindingUuid, @SourceSessionId, @proposedNamespace, @proposedRouteBasis)
+            ON CONFLICT (binding_uuid, source_session_id)
+            DO UPDATE SET updated_at = capture_source_streams.updated_at
+            RETURNING stream_uuid AS StreamUuid, effective_namespace AS EffectiveNamespace,
+                      route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition
+            """,
+            new
+            {
+                binding.BindingUuid,
+                request.SourceSessionId,
+                proposedNamespace,
+                proposedRouteBasis
+            }, transaction);
+
+        var existingMatches = (await connection.QueryAsync<ExistingObservation>(
+            """
+            SELECT observation_uuid AS ObservationUuid, source_position AS SourcePosition,
+                   source_locator AS SourceLocator, content_signature AS ContentSignature
+            FROM capture_observations
+            WHERE stream_uuid = @StreamUuid
+              AND (source_position = @SourcePosition OR source_locator = @SourceLocator)
+            """,
+            new { stream.StreamUuid, request.SourcePosition, request.SourceLocator }, transaction)).AsList();
+        if (existingMatches.Count > 0)
+        {
+            var existing = existingMatches.SingleOrDefault(candidate =>
+                candidate.SourcePosition == request.SourcePosition
+                && string.Equals(candidate.SourceLocator, request.SourceLocator, StringComparison.Ordinal));
+            if (existing is null
+                || existing.SourcePosition != request.SourcePosition
+                || !string.Equals(existing.SourceLocator, request.SourceLocator, StringComparison.Ordinal)
+                || !string.Equals(existing.ContentSignature, contentSignature, StringComparison.Ordinal))
             {
                 await transaction.RollbackAsync(cancellationToken);
                 throw new CaptureConflictException(
-                    $"Source locator '{request.SourceLocator}' was already accepted with different content.");
+                    $"Source position {request.SourcePosition} or locator '{request.SourceLocator}' " +
+                    "was already accepted with different identity or content.");
             }
 
-            var oldEvents = (await connection.QueryAsync<CaptureEventReceipt>(
-                """
-                SELECT trace_uuid AS TraceUuid, part_key AS PartKey
-                FROM captured_events WHERE observation_uuid = @ObservationUuid ORDER BY part_order
-                """,
-                new { existing.ObservationUuid }, transaction)).AsList();
+            var oldEvents = await LoadEventReceiptsAsync(
+                connection, existing.ObservationUuid, transaction);
             await transaction.CommitAsync(cancellationToken);
             return new CaptureReceipt(
-                existing.ObservationUuid, "already_accepted", effectiveNamespace, routeBasis, oldEvents);
+                existing.ObservationUuid, "already_accepted", request.SourcePosition,
+                stream.EffectiveNamespace, stream.RouteBasis, oldEvents);
+        }
+
+        long expectedPosition = (stream.CheckpointPosition ?? -1) + 1;
+        if (request.SourcePosition != expectedPosition)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw new CaptureConflictException(
+                $"Capture stream expected sourcePosition {expectedPosition} but received " +
+                $"{request.SourcePosition}; gaps and backtracking are not accepted.");
         }
 
         var observationUuid = await connection.ExecuteScalarAsync<Guid>(
             """
             INSERT INTO capture_observations
-              (stream_uuid, source_locator, content_hash, effective_namespace, route_basis,
-               source, adapter, safe_source_payload, scan_status)
+              (stream_uuid, source_position, source_locator, content_signature,
+               effective_namespace, route_basis, source, adapter, safe_source_payload,
+               scan_status, scan_rule_set_version, scan_rule_ids, scan_categories,
+               scan_redaction_count)
             VALUES
-              (@streamUuid, @SourceLocator, @contentHash, @effectiveNamespace, @routeBasis,
-               CAST(@source AS jsonb), CAST(@adapter AS jsonb), CAST(@safePayload AS jsonb), @scanStatus)
+              (@StreamUuid, @SourcePosition, @SourceLocator, @contentSignature,
+               @EffectiveNamespace, @RouteBasis, CAST(@source AS jsonb), CAST(@adapter AS jsonb),
+               CAST(@safePayload AS jsonb), @ScanStatus, @RuleSetVersion, @RuleIds,
+               @Categories, @RedactionCount)
             RETURNING observation_uuid
             """,
             new
             {
-                streamUuid,
+                stream.StreamUuid,
+                request.SourcePosition,
                 request.SourceLocator,
-                contentHash,
-                effectiveNamespace,
-                routeBasis,
-                source = neverStore.Redact(JsonSerializer.Serialize(request.Source, JsonOptions)),
-                adapter = neverStore.Redact(JsonSerializer.Serialize(request.Adapter, JsonOptions)),
+                contentSignature,
+                stream.EffectiveNamespace,
+                stream.RouteBasis,
+                source,
+                adapter,
                 safePayload,
-                scanStatus
+                ScanStatus = scan.RedactionCount == 0 ? "clean" : "redacted",
+                scan.RuleSetVersion,
+                RuleIds = scan.RuleIds.ToArray(),
+                Categories = scan.Categories.ToArray(),
+                scan.RedactionCount
             }, transaction);
 
         var receipts = new List<CaptureEventReceipt>(request.Events.Count);
-        foreach (var item in request.Events)
+        foreach (var safeEvent in safeEvents)
         {
-            string safeEventPayload = neverStore.Redact(item.Payload.GetRawText());
+            var item = safeEvent.Event;
             var traceUuid = await connection.ExecuteScalarAsync<Guid>(
                 """
                 INSERT INTO captured_events
                   (observation_uuid, session_id, agent_id, namespace, part_key, part_order,
                    kind, actor, occurred_at, payload, payload_version)
                 VALUES
-                  (@observationUuid, @sessionId, @agentId, @effectiveNamespace, @PartKey, @PartOrder,
+                  (@observationUuid, @sessionId, @agentId, @EffectiveNamespace, @PartKey, @PartOrder,
                    @Kind, @Actor, @OccurredAt, CAST(@payload AS jsonb), 1)
                 RETURNING trace_uuid
                 """,
@@ -202,18 +258,17 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                     observationUuid,
                     sessionId = $"capture:{binding.BindingUuid}:{request.SourceSessionId}",
                     agentId = binding.AgentId,
-                    effectiveNamespace,
+                    stream.EffectiveNamespace,
                     item.PartKey,
                     item.PartOrder,
                     item.Kind,
                     item.Actor,
                     item.OccurredAt,
-                    payload = safeEventPayload
+                    payload = safeEvent.Payload
                 }, transaction);
-            receipts.Add(new CaptureEventReceipt(traceUuid, item.PartKey));
-
-            foreach (var relationship in item.Relationships ?? [])
+            foreach (var safeRelationship in safeEvent.Relationships)
             {
+                var relationship = safeRelationship.Relationship;
                 await connection.ExecuteAsync(
                     """
                     INSERT INTO captured_event_relationships
@@ -224,23 +279,30 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
                     {
                         traceUuid,
                         relationship.Type,
-                        TargetNativeId = neverStore.Redact(relationship.TargetNativeId),
-                        TargetKind = relationship.TargetKind is null
-                            ? null
-                            : neverStore.Redact(relationship.TargetKind)
+                        TargetNativeId = safeRelationship.TargetNativeId,
+                        TargetKind = safeRelationship.TargetKind
                     }, transaction);
             }
+            receipts.Add(new CaptureEventReceipt(
+                traceUuid,
+                item.PartKey,
+                safeEvent.Relationships.Select(relationship => new CaptureRelationship(
+                    relationship.Relationship.Type,
+                    relationship.TargetNativeId,
+                    relationship.TargetKind)).ToArray()));
         }
 
         await connection.ExecuteAsync(
             """
             UPDATE capture_source_streams
-            SET checkpoint_locator = @SourceLocator, updated_at = now()
-            WHERE stream_uuid = @streamUuid
+            SET checkpoint_position = @SourcePosition, updated_at = now()
+            WHERE stream_uuid = @StreamUuid
             """,
-            new { request.SourceLocator, streamUuid }, transaction);
+            new { request.SourcePosition, stream.StreamUuid }, transaction);
         await transaction.CommitAsync(cancellationToken);
-        return new CaptureReceipt(observationUuid, "new", effectiveNamespace, routeBasis, receipts);
+        return new CaptureReceipt(
+            observationUuid, "new", request.SourcePosition,
+            stream.EffectiveNamespace, stream.RouteBasis, receipts);
     }
 
     public async Task<CaptureReceiptRecord> ReadReceiptAsync(
@@ -253,8 +315,13 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             """
             SELECT o.observation_uuid AS ObservationUuid, b.stable_name AS StableName,
                    b.harness, s.source_session_id AS SourceSessionId,
-                   o.source_locator AS SourceLocator, o.effective_namespace AS EffectiveNamespace,
+                   o.source_position AS SourcePosition, o.source_locator AS SourceLocator,
+                   o.effective_namespace AS EffectiveNamespace,
                    o.route_basis AS RouteBasis, o.safe_source_payload::text AS SafeSourcePayload,
+                   o.scan_status AS ScanStatus,
+                   o.scan_rule_set_version AS ScanRuleSetVersion,
+                   o.scan_rule_ids AS ScanRuleIds, o.scan_categories AS ScanCategories,
+                   o.scan_redaction_count AS ScanRedactionCount,
                    o.captured_at AS CapturedAt
             FROM capture_observations o
             JOIN capture_source_streams s USING (stream_uuid)
@@ -267,15 +334,12 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
             throw new InvalidOperationException($"Capture observation '{observationUuid}' was not found.");
         }
 
-        var events = (await connection.QueryAsync<CaptureEventReceipt>(
-            """
-            SELECT trace_uuid AS TraceUuid, part_key AS PartKey
-            FROM captured_events WHERE observation_uuid = @observationUuid ORDER BY part_order
-            """,
-            new { observationUuid })).AsList();
+        var events = await LoadEventReceiptsAsync(connection, observationUuid);
         return new CaptureReceiptRecord(
             row.ObservationUuid, row.StableName, row.Harness, row.SourceSessionId,
-            row.SourceLocator, row.EffectiveNamespace, row.RouteBasis, "new",
+            row.SourcePosition, row.SourceLocator, row.EffectiveNamespace, row.RouteBasis, "new",
+            row.ScanStatus, row.ScanRuleSetVersion, row.ScanRuleIds, row.ScanCategories,
+            row.ScanRedactionCount,
             row.SafeSourcePayload, row.CapturedAt, events);
     }
 
@@ -299,10 +363,9 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         {
             throw new InvalidOperationException("Event partKey values must be unique within an observation.");
         }
-        string effective = binding.RouteNamespace ?? "capture/unscoped";
-        if (!binding.AllowedNamespaces.Contains(effective, StringComparer.Ordinal))
+        if (request.SourcePosition < 0)
         {
-            throw new InvalidOperationException("Binding route is outside its allowed namespaces.");
+            throw new InvalidOperationException("sourcePosition must be zero or greater.");
         }
     }
 
@@ -326,6 +389,59 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
     private static string Hash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
+    private static string Sign(string value, byte[] key)
+    {
+        using var hmac = new HMACSHA256(key);
+        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+    }
+
+    private void AssertSafe(string value, ScanAccumulator scan)
+    {
+        var result = neverStore.Scan(value);
+        scan.Add(result);
+        if (result.RedactionCount > 0)
+        {
+            neverStore.AssertAllowed(value);
+        }
+    }
+
+    private string Redact(string value, ScanAccumulator scan)
+    {
+        var result = neverStore.Scan(value);
+        scan.Add(result);
+        return result.Redacted;
+    }
+
+    private static async Task<IReadOnlyList<CaptureEventReceipt>> LoadEventReceiptsAsync(
+        NpgsqlConnection connection,
+        Guid observationUuid,
+        NpgsqlTransaction? transaction = null)
+    {
+        var events = (await connection.QueryAsync<EventReceiptRow>(
+            """
+            SELECT trace_uuid AS TraceUuid, part_key AS PartKey
+            FROM captured_events
+            WHERE observation_uuid = @observationUuid
+            ORDER BY part_order
+            """,
+            new { observationUuid }, transaction)).AsList();
+        var receipts = new List<CaptureEventReceipt>(events.Count);
+        foreach (var item in events)
+        {
+            var relationships = (await connection.QueryAsync<CaptureRelationship>(
+                """
+                SELECT relationship_type AS Type, target_native_id AS TargetNativeId,
+                       target_kind AS TargetKind
+                FROM captured_event_relationships
+                WHERE source_trace_uuid = @TraceUuid
+                ORDER BY relationship_type, target_native_id
+                """,
+                new { item.TraceUuid }, transaction)).AsList();
+            receipts.Add(new CaptureEventReceipt(item.TraceUuid, item.PartKey, relationships));
+        }
+        return receipts;
+    }
+
     private sealed class BindingRow
     {
         public Guid BindingUuid { get; set; }
@@ -334,11 +450,21 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         public string AgentId { get; set; } = "";
         public string? RouteNamespace { get; set; }
         public string[] AllowedNamespaces { get; set; } = [];
+        public byte[] ContentSignatureKey { get; set; } = [];
+    }
+    private sealed class StreamRow
+    {
+        public Guid StreamUuid { get; set; }
+        public string EffectiveNamespace { get; set; } = "";
+        public string RouteBasis { get; set; } = "";
+        public long? CheckpointPosition { get; set; }
     }
     private sealed class ExistingObservation
     {
         public Guid ObservationUuid { get; set; }
-        public string ContentHash { get; set; } = "";
+        public long SourcePosition { get; set; }
+        public string SourceLocator { get; set; } = "";
+        public string ContentSignature { get; set; } = "";
     }
     private sealed class ReceiptRow
     {
@@ -346,10 +472,40 @@ public sealed class CaptureService(string connectionString, NeverStoreGate never
         public string StableName { get; set; } = "";
         public string Harness { get; set; } = "";
         public string SourceSessionId { get; set; } = "";
+        public long SourcePosition { get; set; }
         public string SourceLocator { get; set; } = "";
         public string EffectiveNamespace { get; set; } = "";
         public string RouteBasis { get; set; } = "";
         public string SafeSourcePayload { get; set; } = "";
+        public string ScanStatus { get; set; } = "";
+        public string ScanRuleSetVersion { get; set; } = "";
+        public string[] ScanRuleIds { get; set; } = [];
+        public string[] ScanCategories { get; set; } = [];
+        public int ScanRedactionCount { get; set; }
         public DateTimeOffset CapturedAt { get; set; }
+    }
+    private sealed class EventReceiptRow
+    {
+        public Guid TraceUuid { get; set; }
+        public string PartKey { get; set; } = "";
+    }
+    private sealed record SafeEvent(
+        CaptureEvent Event, string Payload, IReadOnlyList<SafeRelationship> Relationships);
+    private sealed record SafeRelationship(
+        CaptureRelationship Relationship, string TargetNativeId, string? TargetKind);
+
+    private sealed class ScanAccumulator(string ruleSetVersion)
+    {
+        public string RuleSetVersion { get; } = ruleSetVersion;
+        public SortedSet<string> RuleIds { get; } = new(StringComparer.Ordinal);
+        public SortedSet<string> Categories { get; } = new(StringComparer.Ordinal);
+        public int RedactionCount { get; private set; }
+
+        public void Add(NeverStoreScan scan)
+        {
+            RuleIds.UnionWith(scan.RuleIds);
+            Categories.UnionWith(scan.Categories);
+            RedactionCount += scan.RedactionCount;
+        }
     }
 }

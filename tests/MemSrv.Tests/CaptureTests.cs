@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Dapper;
 using Npgsql;
@@ -31,12 +33,18 @@ public sealed class CaptureTests : HttpSeamTestBase
                 new StringContent("not-json", System.Text.Encoding.UTF8, "application/json"));
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedAgent.StatusCode);
 
+            using var unknownCapture = CaptureClient($"unknown-capture-{Guid.NewGuid():N}");
+            var rejectedUnknown = await unknownCapture.PostAsync(
+                "/capture/v1/observations",
+                new StringContent("not-json", Encoding.UTF8, "application/json"));
+            Assert.Equal(HttpStatusCode.Unauthorized, rejectedUnknown.StatusCode);
+
             using var captureOnMcp = CaptureClient(captureKey);
             var rejectedCapture = await captureOnMcp.PostAsync("/mcp", JsonContent.Create(new { }));
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedCapture.StatusCode);
 
             var accepted = await captureOnMcp.PostAsJsonAsync(
-                "/capture/v1/observations", Observation("record-1", "hello"));
+                "/capture/v1/observations", Observation(0, "record-1", "hello"));
             Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
             var receipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
             Assert.Equal("new", receipt.GetProperty("status").GetString());
@@ -65,12 +73,12 @@ public sealed class CaptureTests : HttpSeamTestBase
         using var client = CaptureClient(captureKey);
 
         var first = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation("record-stable", "original"));
+            "/capture/v1/observations", Observation(0, "record-stable", "original"));
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         var firstReceipt = await first.Content.ReadFromJsonAsync<JsonElement>();
 
         var retry = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation("record-stable", "original"));
+            "/capture/v1/observations", Observation(0, "record-stable", "original"));
         Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
         var retryReceipt = await retry.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
@@ -79,7 +87,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             retryReceipt.GetProperty("observationUuid").GetGuid());
 
         var conflict = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation("record-stable", "changed"));
+            "/capture/v1/observations", Observation(0, "record-stable", "changed"));
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
 
         var shown = await RunMemCtlAsync(
@@ -109,10 +117,23 @@ public sealed class CaptureTests : HttpSeamTestBase
                 ["OVERMIND_CODEX_FIXTURE"] = Path.Combine(_root, "fixtures/codex-synthetic.jsonl")
             });
         Assert.Equal(0, enabled.ExitCode);
-        Assert.Contains("\"status\":\"new\"", enabled.Stdout);
-        Assert.Contains("\"partKey\":\"message/0\"", enabled.Stdout);
-        Assert.Contains("\"partKey\":\"tool/1\"", enabled.Stdout);
-        Assert.Contains("\"partKey\":\"tool/2\"", enabled.Stdout);
+        var receipts = enabled.Stdout.Split(
+                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+            .ToArray();
+        Assert.Equal(3, receipts.Length);
+        Assert.All(receipts, receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
+        Assert.Equal([0L, 1L, 2L], receipts.Select(receipt => receipt.GetProperty("sourcePosition").GetInt64()));
+        Assert.Equal(
+            ["message/0", "tool/1", "tool/2"],
+            receipts.Select(receipt => Assert.Single(receipt.GetProperty("events").EnumerateArray())
+                .GetProperty("partKey").GetString()));
+        var resultEvent = Assert.Single(receipts[2].GetProperty("events").EnumerateArray());
+        var resultRelationship = Assert.Single(
+            resultEvent.GetProperty("relationships").EnumerateArray());
+        Assert.Equal("result_for", resultRelationship.GetProperty("type").GetString());
+        Assert.Equal("call_fixture_1", resultRelationship.GetProperty("targetNativeId").GetString());
+        Assert.Equal("tool_call", resultRelationship.GetProperty("targetKind").GetString());
         Assert.Contains("LIMITATION:", enabled.Stderr);
     }
 
@@ -124,24 +145,87 @@ public sealed class CaptureTests : HttpSeamTestBase
         using var client = CaptureClient(captureKey);
 
         var accepted = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation("atomic-1", "accepted"));
+            "/capture/v1/observations", Observation(0, "atomic-1", "accepted"));
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
 
         var rejected = await client.PostAsJsonAsync(
-            "/capture/v1/observations", ObservationWithDuplicatePartOrder("atomic-2"));
+            "/capture/v1/observations", ObservationWithDuplicatePartOrder(1, "atomic-2"));
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
 
         await using var connection = new NpgsqlConnection(AdminConnection);
         await connection.OpenAsync();
         Assert.False(await connection.ExecuteScalarAsync<bool>(
             "SELECT EXISTS (SELECT 1 FROM capture_observations WHERE source_locator = 'atomic-2')"));
-        Assert.Equal("atomic-1", await connection.ExecuteScalarAsync<string>(
+        Assert.Equal(0, await connection.ExecuteScalarAsync<long>(
             """
-            SELECT s.checkpoint_locator
+            SELECT s.checkpoint_position
             FROM capture_source_streams s
             JOIN capture_source_bindings b USING (binding_uuid)
             WHERE s.source_session_id = 'synthetic-session' AND b.stable_name = 'codex-atomic'
             """));
+    }
+
+    [Fact]
+    public async Task StreamRejectsGapsAndBacktrackingWithoutMovingTheAcceptedPrefix()
+    {
+        var captureKey = $"capture-prefix-{Guid.NewGuid():N}";
+        await EnrollAsync("codex-prefix", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var first = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(0, "prefix-0", "zero"));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        var gap = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(2, "prefix-2", "gap"));
+        Assert.Equal(HttpStatusCode.Conflict, gap.StatusCode);
+        Assert.Contains("expected sourcePosition 1", await gap.Content.ReadAsStringAsync());
+
+        var next = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(1, "prefix-1", "one"));
+        Assert.Equal(HttpStatusCode.OK, next.StatusCode);
+        var nextReceipt = await next.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, nextReceipt.GetProperty("sourcePosition").GetInt64());
+
+        var backtrack = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(0, "different-prefix-0", "other"));
+        Assert.Equal(HttpStatusCode.Conflict, backtrack.StatusCode);
+
+        var third = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(2, "prefix-2", "two"));
+        Assert.Equal(HttpStatusCode.OK, third.StatusCode);
+    }
+
+    [Fact]
+    public async Task StreamKeepsItsFirstEffectiveRouteAfterBindingPolicyChanges()
+    {
+        var captureKey = $"capture-route-{Guid.NewGuid():N}";
+        await EnrollAsync("codex-route-fixed", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var first = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(0, "route-0", "zero"));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        // No operator route-update command exists in this disabled slice. Per
+        // docs/testing.md this is narrow mechanical setup; behavior remains
+        // asserted only through the public capture receipts.
+        await using (var connection = new NpgsqlConnection(AdminConnection))
+        {
+            await connection.ExecuteAsync(
+                """
+                UPDATE capture_source_bindings
+                SET route_namespace = 'homelab'
+                WHERE stable_name = 'codex-route-fixed'
+                """);
+        }
+
+        var second = await client.PostAsJsonAsync(
+            "/capture/v1/observations", Observation(1, "route-1", "one"));
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        var receipt = await second.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("capture/unscoped", receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("fallback", receipt.GetProperty("routeBasis").GetString());
     }
 
     [Fact]
@@ -152,26 +236,49 @@ public sealed class CaptureTests : HttpSeamTestBase
         using var client = CaptureClient(captureKey);
         string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
 
-        var response = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation("safety-1", seededSyntheticSecret));
+        var request = SafetyObservation(seededSyntheticSecret);
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        string rawRequest = JsonSerializer.Serialize(request, jsonOptions);
+        var canonicalRequest = JsonSerializer.Deserialize<MemSrv.Core.CaptureObservationRequest>(
+            rawRequest, jsonOptions)!;
+        string canonicalRawRequest = JsonSerializer.Serialize(canonicalRequest, jsonOptions);
+        string unkeyedRawHash = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(canonicalRawRequest))).ToLowerInvariant();
+        var response = await client.PostAsJsonAsync("/capture/v1/observations", request);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
         string shown = await RunMemCtlAsync(
             "capture", "receipt", receipt.GetProperty("observationUuid").GetGuid().ToString());
         Assert.DoesNotContain(seededSyntheticSecret, shown);
         Assert.Contains("[REDACTED:aws-access-key-id]", shown);
+        Assert.Contains("scan=redacted", shown);
+        Assert.Contains("rules=aws-access-key-id", shown);
+        Assert.Contains("categories=secret", shown);
+        Assert.Contains("redactions=8", shown);
 
         await using var connection = new NpgsqlConnection(AdminConnection);
         await connection.OpenAsync();
         Assert.False(await connection.ExecuteScalarAsync<bool>(
             """
             SELECT EXISTS (
-              SELECT 1 FROM capture_observations WHERE safe_source_payload::text LIKE @pattern
+              SELECT 1 FROM capture_observations
+                WHERE safe_source_payload::text LIKE @pattern
+                   OR source::text LIKE @pattern OR adapter::text LIKE @pattern
               UNION ALL
               SELECT 1 FROM captured_events WHERE payload::text LIKE @pattern
+              UNION ALL
+              SELECT 1 FROM captured_event_relationships
+                WHERE target_native_id LIKE @pattern OR target_kind LIKE @pattern
             )
             """,
             new { pattern = $"%{seededSyntheticSecret}%" }));
+        Assert.False(await connection.ExecuteScalarAsync<bool>(
+            """
+            SELECT EXISTS (
+              SELECT 1 FROM capture_observations WHERE content_signature = @unkeyedRawHash
+            )
+            """,
+            new { unkeyedRawHash }));
     }
 
     private HttpClient CaptureClient(string key)
@@ -199,10 +306,11 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
     }
 
-    private static object Observation(string locator, string message) => new
+    private static object Observation(long position, string locator, string message) => new
     {
         contractVersion = 1,
         sourceSessionId = "synthetic-session",
+        sourcePosition = position,
         sourceLocator = locator,
         source = new { harness = "codex", harnessVersion = "synthetic", recordType = "turn" },
         adapter = new { name = "codex-synthetic", version = "1" },
@@ -219,10 +327,11 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
     };
 
-    private static object ObservationWithDuplicatePartOrder(string locator) => new
+    private static object ObservationWithDuplicatePartOrder(long position, string locator) => new
     {
         contractVersion = 1,
         sourceSessionId = "synthetic-session",
+        sourcePosition = position,
         sourceLocator = locator,
         source = new { harness = "codex", harnessVersion = "synthetic", recordType = "turn" },
         adapter = new { name = "codex-synthetic", version = "1" },
@@ -233,6 +342,32 @@ public sealed class CaptureTests : HttpSeamTestBase
                 payload = new { text = "one" } },
             new { partKey = "message/b", partOrder = 0, kind = "message", actor = "assistant",
                 payload = new { text = "two" } }
+        }
+    };
+
+    private static object SafetyObservation(string secret) => new
+    {
+        contractVersion = 1,
+        sourceSessionId = "synthetic-session",
+        sourcePosition = 0,
+        sourceLocator = "safety-1",
+        source = new { harness = "codex", harnessVersion = secret, recordType = secret },
+        adapter = new { name = secret, version = secret },
+        sourcePayload = new { message = secret },
+        events = new object[]
+        {
+            new
+            {
+                partKey = "tool/0",
+                partOrder = 0,
+                kind = "tool_result",
+                actor = "tool",
+                payload = new { output = secret },
+                relationships = new[]
+                {
+                    new { type = "result_for", targetNativeId = secret, targetKind = secret }
+                }
+            }
         }
     };
 }

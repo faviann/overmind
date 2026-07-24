@@ -49,6 +49,11 @@ assert that mechanism directly:
   grants. These are mechanical checks of the narrow disabled capture slice;
   routing, receipts, authorization, and retry behavior stay at the HTTP/memctl
   public seams.
+- The disabled capture slice has no operator command for changing binding route
+  policy. A routing test may therefore update only that binding's route columns
+  as narrow mechanical setup, then must prove stream-fixed routing solely from
+  later public HTTP receipts. Direct inspection of the resulting route is not
+  an assertion seam.
 
 Namespace isolation and private-memory invisibility are binding acceptance
 behaviors, but their seam is keyed MCP agents. Verify them through public

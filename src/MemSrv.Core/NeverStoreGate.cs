@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Security.Cryptography;
+using System.Text;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -13,12 +15,17 @@ public sealed class NeverStoreException(string ruleName) : Exception($"Write rej
 public sealed class NeverStoreGate
 {
     private readonly IReadOnlyList<Rule> _rules;
+    private readonly string _ruleSetVersion;
 
     public bool IsConfigured => _rules.Count > 0;
+    public string RuleSetVersion => _ruleSetVersion;
 
     public NeverStoreGate(string path)
     {
-        _rules = File.Exists(path) ? Load(path) : [];
+        string contents = File.Exists(path) ? File.ReadAllText(path) : "";
+        _rules = string.IsNullOrEmpty(contents) ? [] : Load(contents);
+        _ruleSetVersion = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(contents))).ToLowerInvariant();
     }
 
     public void AssertAllowed(string text)
@@ -36,31 +43,50 @@ public sealed class NeverStoreGate
         AssertAllowed(JsonSerializer.Serialize(value));
 
     public string Redact(string text)
+        => Scan(text).Redacted;
+
+    public NeverStoreScan Scan(string text)
     {
         var redacted = text;
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var categories = new HashSet<string>(StringComparer.Ordinal);
+        int count = 0;
         foreach (var rule in _rules)
         {
-            redacted = rule.Regex.Replace(redacted, $"[REDACTED:{rule.Name}]");
+            redacted = rule.Regex.Replace(redacted, match =>
+            {
+                ids.Add(rule.Name);
+                categories.Add(rule.Category);
+                count++;
+                return $"[REDACTED:{rule.Name}]";
+            });
         }
 
-        return redacted;
+        return new NeverStoreScan(
+            redacted,
+            ids.Order(StringComparer.Ordinal).ToArray(),
+            categories.Order(StringComparer.Ordinal).ToArray(),
+            count);
     }
 
     public string RedactObject(object value) =>
         Redact(JsonSerializer.Serialize(value));
 
-    private static IReadOnlyList<Rule> Load(string path)
+    private static IReadOnlyList<Rule> Load(string contents)
     {
         var deserializer = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .Build();
-        var config = deserializer.Deserialize<NeverStoreConfig>(File.ReadAllText(path)) ?? new NeverStoreConfig();
+        var config = deserializer.Deserialize<NeverStoreConfig>(contents) ?? new NeverStoreConfig();
         return config.Rules
-            .Select(rule => new Rule(rule.Name, new Regex(rule.Pattern, RegexOptions.Compiled | RegexOptions.CultureInvariant)))
+            .Select(rule => new Rule(
+                rule.Name,
+                rule.Category,
+                new Regex(rule.Pattern, RegexOptions.Compiled | RegexOptions.CultureInvariant)))
             .ToArray();
     }
 
-    private sealed record Rule(string Name, Regex Regex);
+    private sealed record Rule(string Name, string Category, Regex Regex);
     private sealed class NeverStoreConfig
     {
         public List<NeverStoreRule> Rules { get; set; } = [];
@@ -69,6 +95,13 @@ public sealed class NeverStoreGate
     private sealed class NeverStoreRule
     {
         public string Name { get; set; } = "";
+        public string Category { get; set; } = "secret";
         public string Pattern { get; set; } = "";
     }
 }
+
+public sealed record NeverStoreScan(
+    string Redacted,
+    IReadOnlyList<string> RuleIds,
+    IReadOnlyList<string> Categories,
+    int RedactionCount);

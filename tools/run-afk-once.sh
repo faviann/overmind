@@ -83,9 +83,7 @@ poll_seconds="${AFK_POLL_SECONDS:-60}"
 # authorized queue is reconsidered once this bounded cooldown elapses. It is a
 # whole number of seconds so a repeatedly empty selection stays token-conscious
 # instead of re-running the model on every poll.
-idle_retry_seconds="${AFK_IDLE_RETRY_SECONDS:-900}"
-[[ "$idle_retry_seconds" =~ ^[0-9]+$ && "$idle_retry_seconds" -gt 0 ]] || \
-  fail "AFK_IDLE_RETRY_SECONDS must be a positive whole number of seconds"
+idle_retry_seconds=900
 
 draining=0
 stop_count=0
@@ -213,11 +211,15 @@ while :; do
   # changing an authorized issue's labels. Include them in the cheap frontier
   # observation so a newly closed blocker wakes selection, while an unchanged
   # blocked queue remains token-free.
+
   # An unchanged frontier stays token-free only until the idle cooldown
   # elapses; after that the same authorized queue is reconsidered once, so one
   # transient empty selection cannot suppress authorized work indefinitely.
   if [[ "$frontier" == "$last_idle_frontier" ]]; then
     idle_elapsed=$(( $(date +%s) - last_idle_at ))
+    # The -ge 0 term keeps a backwards system-clock step from producing a
+    # negative elapsed value, which would otherwise read as "still cooling
+    # down" on every poll and suppress authorized work indefinitely.
     if [[ "$idle_elapsed" -ge 0 && "$idle_elapsed" -lt "$idle_retry_seconds" ]]; then
       sleep_until_poll
       continue
@@ -231,7 +233,7 @@ while :; do
     last_idle_frontier="$frontier"
     last_idle_at="$(date +%s)"
     idle_reason="$(selection_reason <<<"$selection" || true)"
-    printf 'AFK watcher found authorized work but no issue was selected%s; unchanged authorized work is reconsidered in %s seconds\n' \
+    printf 'AFK watcher found authorized work but no issue was selected%s; unchanged authorized work is reconsidered no sooner than %s seconds from now\n' \
       "${idle_reason:+ (selector: $idle_reason)}" "$idle_retry_seconds" >&2
     sleep_until_poll
     continue

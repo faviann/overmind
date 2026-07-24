@@ -81,7 +81,7 @@ case "$AFK_TEST_SCENARIO" in
     ;;
   token-wait) ;;
   idle-retry)
-    if [[ "$count" -ge 2 ]]; then
+    if [[ "$count" -ge 3 ]]; then
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     else
       printf 'Reviewed the authorized queue.\nNo issue is ready to start right now.\a\n\n'
@@ -162,7 +162,16 @@ case "$AFK_TEST_SCENARIO" in
   token-wait)
     if [[ "$count" -ge 3 ]]; then kill -TERM "$PPID"; fi ;;
   idle-retry)
-    if [[ "$count" == 1 ]]; then printf '1000\n' >"$AFK_TEST_CLOCK"; else kill -TERM "$PPID"; fi ;;
+    # Poll 1 and poll 3 land inside a cooldown that started at 0 and at 1000
+    # respectively; poll 2 and poll 4 carry the clock past the 900-second
+    # cooldown so selection may run again.
+    case "$count" in
+      1) printf '100\n' >"$AFK_TEST_CLOCK" ;;
+      2) printf '1000\n' >"$AFK_TEST_CLOCK" ;;
+      3) printf '1100\n' >"$AFK_TEST_CLOCK" ;;
+      4) printf '2000\n' >"$AFK_TEST_CLOCK" ;;
+      *) kill -TERM "$PPID" ;;
+    esac ;;
   reauthorize)
     if ! grep -qx human-reauthorized "$AFK_TEST_STATE"; then
       printf 'human-reauthorized\n' >>"$AFK_TEST_STATE"
@@ -451,23 +460,35 @@ run_foreground token-wait
 ! grep -q '^agent ' "$events"
 [[ "$(grep -c '^sleep 0$' "$events")" == 3 ]]
 
-# A transient empty selection must not suppress an unchanged authorized queue:
-# the first pass mutates nothing and reports the idle reason, and the second
-# pass after the cooldown claims and launches the same issue without a restart.
+# A transient empty selection must not suppress an unchanged authorized queue,
+# and a repeatedly empty one must stay token-conscious. The fixture clock makes
+# polls 1 and 3 land inside a cooldown and polls 2 and 4 land past one, so the
+# selector must run only after polls 2 and 4: the first empty pass mutates
+# nothing and reports the idle reason, the partially elapsed poll invokes
+# nothing, the second empty pass re-arms the full cooldown, and only the third
+# pass claims and launches the same unchanged issue without a restart.
 run_foreground idle-retry
-[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+[[ "$(grep -c '^selector$' "$events")" == 3 ]]
 [[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
 [[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
 mapfile -t idle_retry_selectors < <(grep -n '^selector$' "$events" | cut -d: -f1)
-idle_retry_sleep_line="$(grep -n '^sleep 0$' "$events" | head -n1 | cut -d: -f1)"
+mapfile -t idle_retry_sleeps < <(grep -n '^sleep 0$' "$events" | cut -d: -f1)
 idle_retry_claim_line="$(grep -n '^claim 42$' "$events" | cut -d: -f1)"
 idle_retry_agent_line="$(grep -n '^agent 42$' "$events" | cut -d: -f1)"
-[[ "${idle_retry_selectors[0]}" -lt "$idle_retry_sleep_line" ]]
-[[ "$idle_retry_sleep_line" -lt "${idle_retry_selectors[1]}" ]]
-[[ "${idle_retry_selectors[1]}" -lt "$idle_retry_claim_line" ]]
+[[ "${#idle_retry_sleeps[@]}" -ge 4 ]]
+# Empty pass 1, then a poll at elapsed 0 and a poll at elapsed 100 that both
+# invoke nothing: the second selection may only follow the fourth poll's clock
+# jump past 900.
+[[ "${idle_retry_selectors[0]}" -lt "${idle_retry_sleeps[0]}" ]]
+[[ "${idle_retry_sleeps[1]}" -lt "${idle_retry_selectors[1]}" ]]
+# Empty pass 2 re-arms the cooldown: the poll at elapsed 100 after it invokes
+# nothing, so the claiming pass may only follow the fourth poll.
+[[ "${idle_retry_selectors[1]}" -lt "${idle_retry_sleeps[2]}" ]]
+[[ "${idle_retry_sleeps[3]}" -lt "${idle_retry_selectors[2]}" ]]
+[[ "${idle_retry_selectors[2]}" -lt "$idle_retry_claim_line" ]]
 [[ "$idle_retry_claim_line" -lt "$idle_retry_agent_line" ]]
-grep -q 'no issue was selected' "$fixture/idle-retry.out"
-grep -q 'reconsidered in 900 seconds' "$fixture/idle-retry.out"
+[[ "$(grep -c 'no issue was selected' "$fixture/idle-retry.out")" == 2 ]]
+grep -q 'reconsidered no sooner than 900 seconds from now' "$fixture/idle-retry.out"
 grep -q 'No issue is ready to start right now' "$fixture/idle-retry.out"
 ! grep -q $'\a' "$fixture/idle-retry.out"
 ! grep -q 'Reviewed the authorized queue' "$fixture/idle-retry.out"

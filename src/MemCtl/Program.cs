@@ -1,4 +1,5 @@
 using MemSrv.Core;
+using System.Text.Json;
 
 var root = Directory.GetCurrentDirectory();
 var options = Configuration.Load(root);
@@ -83,6 +84,10 @@ try
             RequireArgs(args, 2);
             await TraceAsync(options, args[1]);
             return 0;
+
+        case "capture":
+            RequireArgs(args, 2);
+            return await CaptureAsync(options, args);
 
         default:
             Usage();
@@ -273,6 +278,59 @@ static async Task TraceAsync(MemSrvOptions options, string sessionId)
     }
 }
 
+static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
+{
+    var capture = new CaptureService(
+        options.ConnectionString, new NeverStoreGate(options.NeverStorePath));
+    switch (args[1])
+    {
+        case "enroll":
+            RequireArgs(args, 3);
+            string credentialPath = RequireOption(args, "--credential-file");
+            string credential = (await File.ReadAllTextAsync(credentialPath)).Trim();
+            var bindingUuid = await capture.EnrollAsync(
+                args[2],
+                RequireOption(args, "--harness"),
+                RequireOption(args, "--agent-id"),
+                credential,
+                FindOption(args, "--namespace"));
+            Console.WriteLine($"enrolled {bindingUuid} stable_name={args[2]}");
+            Console.WriteLine(
+                "LIMITATION: disabled non-production Codex synthetic capture only; " +
+                "no scheduler, hooks, scanner product, or supported capture adapter.");
+            return 0;
+
+        case "receipt":
+            RequireArgs(args, 3);
+            var receipt = await capture.ReadReceiptAsync(Guid.Parse(args[2]));
+            foreach (var item in receipt.Events)
+            {
+                var envelope = new CapturedEventEnvelope(
+                    1,
+                    receipt.Observation,
+                    new CanonicalCapturedEvent(
+                        item.TraceUuid,
+                        item.SessionId,
+                        item.AgentId,
+                        item.Namespace,
+                        item.PartKey,
+                        item.PartOrder,
+                        item.Kind,
+                        item.Actor,
+                        item.OccurredAt,
+                        item.PayloadVersion,
+                        item.Payload),
+                    item.Relationships);
+                Console.WriteLine(JsonSerializer.Serialize(
+                    envelope, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            }
+            return 0;
+
+        default:
+            throw new ArgumentException($"Unknown capture command '{args[1]}'.");
+    }
+}
+
 static string? FindOption(string[] args, string name)
 {
     for (var i = 0; i < args.Length - 1; i++)
@@ -313,4 +371,8 @@ static void Usage()
     Console.Error.WriteLine("memctl why <uuid>");
     Console.Error.WriteLine("memctl consumed <session_id>");
     Console.Error.WriteLine("memctl trace <session_id>");
+    Console.Error.WriteLine(
+        "memctl capture enroll <stable_name> --harness codex --agent-id id " +
+        "--credential-file path [--namespace name]");
+    Console.Error.WriteLine("memctl capture receipt <observation_uuid>");
 }

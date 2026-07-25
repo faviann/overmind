@@ -1,0 +1,15 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY global.json Directory.Build.props Directory.Packages.props ./
+COPY src/CodexCaptureTracer/CodexCaptureTracer.csproj src/CodexCaptureTracer/
+RUN dotnet restore src/CodexCaptureTracer/CodexCaptureTracer.csproj
+COPY src/CodexCaptureTracer/ src/CodexCaptureTracer/
+RUN dotnet publish src/CodexCaptureTracer/CodexCaptureTracer.csproj -c Release -o /out --no-restore
+
+FROM mcr.microsoft.com/dotnet/runtime:10.0
+WORKDIR /app
+COPY --from=build /out/ ./
+COPY fixtures/codex-synthetic.jsonl /app/fixtures/codex-synthetic.jsonl
+ENV OVERMIND_CODEX_FIXTURE=/app/fixtures/codex-synthetic.jsonl
+LABEL org.opencontainers.image.description="DISABLED non-production synthetic Codex capture tracer"
+ENTRYPOINT ["dotnet", "/app/CodexCaptureTracer.dll"]

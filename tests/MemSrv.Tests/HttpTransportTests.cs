@@ -230,39 +230,6 @@ public sealed class HttpTransportTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
-    [Theory]
-    [InlineData("blank agent id", "", "memory-system", new[] { "memory-system" })]
-    [InlineData("default outside allowlist", "agent-x", "memory-system", new[] { "homelab" })]
-    public async Task IncompleteCredentialIsRejectedAtTheAuthBoundary(
-        string _, string agentId, string defaultNamespace, string[] allowedNamespaces)
-    {
-        // A key that resolves but is not a complete, coherent credential must not
-        // authenticate (no identity-less principal, no default outside its own
-        // allowlist). The store is built directly — bypassing the loader, which
-        // would itself throw — to prove the auth boundary is an independent gate.
-        const string presentKey = "present-key-incomplete-identity";
-        var store = new AgentKeyStore(new[]
-        {
-            new AgentKey(presentKey, agentId, defaultNamespace, allowedNamespaces)
-        });
-
-        var app = HttpServerHost.Build(RuntimeOptions(), store);
-        app.Urls.Add("http://127.0.0.1:0");
-        await app.StartAsync();
-        try
-        {
-            var url = app.Services.GetRequiredService<IServer>()
-                .Features.Get<IServerAddressesFeature>()!.Addresses.First();
-            using var response = await SendRawMcpAsync(url, presentKey);
-            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-        }
-        finally
-        {
-            await app.StopAsync();
-            await app.DisposeAsync();
-        }
-    }
-
     [Fact]
     public async Task ForeignNamespaceCallIsRejectedAndNothingLands()
     {

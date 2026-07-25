@@ -9,6 +9,11 @@ Not another chatbot memory feature, and not flat vector RAG: the working
 agent is the extractor, and a human is the quality gate. Nothing enters
 shared memory unreviewed.
 
+The repository also contains a disabled, explicitly non-production synthetic
+Codex capture tracer used to exercise one narrow Phase-2 ledger slice. See
+[docs/capture-synthetic-slice.md](docs/capture-synthetic-slice.md); it is not
+part of the supported server deployment.
+
 ## Core commitments
 
 - **Append-only trace ledger** — the raw record of what happened is

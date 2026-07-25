@@ -102,6 +102,14 @@ BODY
 gh pr create --head "$branch" --body-file "$AFK_TEST_PR_BODY" >/dev/null
 printf '%s\n' '{"type":"item.started","item":{"type":"command_execution","command":"scripted-tracer-command --secret-argument zumbleflux"}}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"scripted commentary line one\nscripted commentary line two\nscripted \u001b[31mcoloured\u001b[0m commentary line three"}}'
+# Hold the turn open after the commentary so the scenario can observe that
+# commentary while this agent is demonstrably still running. `sleep` on PATH is
+# the adapter that kills its parent, so poll with the real binary.
+release_wait=0
+while [[ ! -e "$AFK_TEST_RELEASE" && "$release_wait" -lt 500 ]]; do
+  /usr/bin/sleep 0.02
+  release_wait=$((release_wait + 1))
+done
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"<promise>COMPLETE</promise>"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
 EOF
@@ -185,6 +193,7 @@ run_command() {
       AFK_TEST_PR_BODY="$pr_body" \
       AFK_TEST_REAL_GIT="$real_git" \
       AFK_TEST_TIMER_EVENTS="$timer_events" \
+      AFK_TEST_RELEASE="$fixture/release" \
       NODE_OPTIONS="${NODE_OPTIONS:-} --require=$timer_recorder" \
       AFK_TEST_FAIL_FETCH="${2:-0}" \
       AFK_TEST_FAIL_GH_AUTH="${3:-0}" \
@@ -267,15 +276,44 @@ fi
 : >"$events"
 : >"$timer_events"
 progress="$fixture/progress.out"
-run_command 1 >"$progress" 2>&1
 
-# The operator watching the launch terminal must see the agent working on the
-# active issue, while the durable log keeps the complete record.
 fail_with() {
   echo "$1" >&2
   cat "$2" >&2
   exit 1
 }
+
+# Commentary must reach the launch terminal *as it is produced*, not as a batch
+# flushed when the agent exits. The scripted agent blocks after its first
+# commentary message until this scenario releases it, so observing that
+# commentary in the capture below happens while the agent is provably still
+# running mid-turn. A watcher that buffered the stream to exit would never
+# satisfy this poll, and the bounded loop turns that into a loud failure.
+rm -f "$fixture/release"
+run_command 1 >"$progress" 2>&1 &
+watcher_pid=$!
+
+live_wait=0
+until grep -Fxq '[afk #42] scripted commentary line one' "$progress" 2>/dev/null; do
+  live_wait=$((live_wait + 1))
+  if [[ "$live_wait" -ge 500 ]]; then
+    kill "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    fail_with \
+      "agent commentary never appeared in watcher terminal output while the agent was still running" \
+      "$progress"
+  fi
+  /usr/bin/sleep 0.02
+done
+
+touch "$fixture/release"
+watcher_status=0
+wait "$watcher_pid" || watcher_status=$?
+[[ "$watcher_status" == 0 ]] ||
+  fail_with "watcher exited with status $watcher_status" "$progress"
+
+# The operator watching the launch terminal must see the agent working on the
+# active issue, while the durable log keeps the complete record.
 grep -Fxq '[afk #42] scripted commentary line one' "$progress" ||
   fail_with "agent commentary line one missing from watcher terminal output" "$progress"
 grep -Fxq '[afk #42] scripted commentary line two' "$progress" ||

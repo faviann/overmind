@@ -21,14 +21,28 @@ const emit = (line: string): void => {
   process.stdout.write(`${linePrefix}${line}\n`);
 };
 
-/** Control characters, minus tab, which would garble the operator's terminal. */
-const nonPrintable = /[^\P{C}\t]/gu;
+const ESC = "\u001B";
+const BEL = "\u0007";
+
+/**
+ * Agent output can carry colour and hyperlinks; whole escape sequences (CSI, OSC,
+ * two-char ESC) are dropped here because the durable log keeps the original.
+ */
+const ansiSequences = new RegExp(
+  `${ESC}\\[[0-?]*[ -/]*[@-~]|${ESC}\\][^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)|${ESC}[@-_]`,
+  "gu",
+);
+
+/** Unicode category Other, minus tab, which would garble the operator's terminal. */
+const controlChars = /[^\P{C}\t]/gu;
 
 const onAgentStreamEvent = (event: AgentStreamEvent): void => {
   switch (event.type) {
     case "text":
       for (const chunkLine of event.message.split("\n")) {
-        const printable = chunkLine.replace(nonPrintable, "");
+        const printable = chunkLine
+          .replace(ansiSequences, "")
+          .replace(controlChars, "");
         if (printable.trim() !== "") {
           emit(printable);
         }

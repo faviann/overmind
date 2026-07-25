@@ -101,7 +101,7 @@ Closes #42
 BODY
 gh pr create --head "$branch" --body-file "$AFK_TEST_PR_BODY" >/dev/null
 printf '%s\n' '{"type":"item.started","item":{"type":"command_execution","command":"scripted-tracer-command --secret-argument zumbleflux"}}'
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"scripted commentary line one\nscripted commentary line two\nscripted \u001b[31mcoloured\u001b[0m commentary line three"}}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"scripted commentary line one\nscripted commentary line two\nscripted \u001b[31mcoloured\u001b[0m commentary line three\n"}}'
 # Hold the turn open after the commentary so the scenario can observe that
 # commentary while this agent is demonstrably still running. `sleep` on PATH is
 # the adapter that kills its parent, so poll with the real binary.
@@ -324,12 +324,31 @@ grep -Fxq '[afk #42] scripted coloured commentary line three' "$progress" ||
   fail_with "ANSI colour sequence residue leaked into watcher terminal output" "$progress"
 [[ "$(grep -Fc '[0m' "$progress" || true)" == 0 ]] ||
   fail_with "ANSI reset sequence residue leaked into watcher terminal output" "$progress"
+# Criterion 7 ("long or multiline agent content is rendered without making
+# subsequent lifecycle messages ambiguous"): agent text chunks end with a
+# newline, so splitting them yields a trailing empty segment. That segment must
+# never surface as a bare prefix line with no content behind it.
+[[ "$(grep -Ec '^\[afk #42\] ?$' "$progress" || true)" == 0 ]] ||
+  fail_with "empty agent line emitted as a bare run prefix in watcher terminal output" "$progress"
 grep -Fxq '[afk #42] tool: Bash' "$progress" ||
   fail_with "tool activity missing from watcher terminal output" "$progress"
 [[ "$(grep -Fc 'zumbleflux' "$progress" || true)" == 0 ]] ||
   fail_with "full tool arguments leaked into watcher terminal output" "$progress"
 [[ "$(grep -Fc '"type":"item.' "$progress" || true)" == 0 ]] ||
   fail_with "raw provider JSON leaked into watcher terminal output" "$progress"
+
+# Criterion 7, second half: a lifecycle message emitted *after* the streamed
+# agent commentary must stay unambiguous — it reaches the terminal intact, on
+# its own line, and never wearing the agent run prefix.
+completion_line='AFK issue #42 completed: pull request #7 awaits review'
+grep -Fxq "$completion_line" "$progress" ||
+  fail_with "lifecycle completion message missing or altered after streamed agent commentary" "$progress"
+[[ "$(grep -Fc "[afk #42] $completion_line" "$progress" || true)" == 0 ]] ||
+  fail_with "lifecycle completion message was rendered as agent commentary" "$progress"
+commentary_last="$(grep -Fxn '[afk #42] scripted coloured commentary line three' "$progress" | cut -d: -f1)"
+completion_at="$(grep -Fxn "$completion_line" "$progress" | cut -d: -f1)"
+[[ -n "$commentary_last" && -n "$completion_at" && "$completion_at" -gt "$commentary_last" ]] ||
+  fail_with "lifecycle completion message did not follow the streamed agent commentary" "$progress"
 
 durable_log="$repo/.sandcastle/logs/afk-issue-42.log"
 [[ -s "$durable_log" ]] ||

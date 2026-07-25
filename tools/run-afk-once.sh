@@ -79,6 +79,12 @@ poll_seconds="${AFK_POLL_SECONDS:-60}"
 [[ "$poll_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
   fail "AFK_POLL_SECONDS must be a non-negative number"
 
+# A selection pass that chose nothing is not permanent: the same unchanged
+# authorized queue is reconsidered once this bounded cooldown elapses. It is a
+# whole number of seconds so a repeatedly empty selection stays token-conscious
+# instead of re-running the model on every poll.
+idle_retry_seconds=900
+
 draining=0
 stop_count=0
 active_pid=""
@@ -171,7 +177,14 @@ selected_issue_urls() {
     's|^Selected issue: (https://github.com/[^/]+/[^/]+/issues/[0-9]+)$|\1|p'
 }
 
+# Selector output is free-form model prose. Surface at most one bounded,
+# printable line of it to the operator; never echo the whole transcript.
+selection_reason() {
+  grep -v '^[[:space:]]*$' | tail -n1 | tr -cd '[:print:]' | cut -c1-200
+}
+
 last_idle_frontier=""
+last_idle_at=0
 printf 'AFK watcher started for %s; polling every %s seconds\n' "$repo_name" "$poll_seconds"
 
 while :; do
@@ -198,15 +211,29 @@ while :; do
   # changing an authorized issue's labels. Include them in the cheap frontier
   # observation so a newly closed blocker wakes selection, while an unchanged
   # blocked queue remains token-free.
+
+  # An unchanged frontier stays token-free only until the idle cooldown
+  # elapses; after that the same authorized queue is reconsidered once, so one
+  # transient empty selection cannot suppress authorized work indefinitely.
   if [[ "$frontier" == "$last_idle_frontier" ]]; then
-    sleep_until_poll
-    continue
+    idle_elapsed=$(( $(date +%s) - last_idle_at ))
+    # The -ge 0 term keeps a backwards system-clock step from producing a
+    # negative elapsed value, which would otherwise read as "still cooling
+    # down" on every poll and suppress authorized work indefinitely.
+    if [[ "$idle_elapsed" -ge 0 && "$idle_elapsed" -lt "$idle_retry_seconds" ]]; then
+      sleep_until_poll
+      continue
+    fi
   fi
 
   selection="$($selector afk)" || fail "intelligent AFK selection failed"
   mapfile -t selected_urls < <(selected_issue_urls <<<"$selection")
   if [[ "${#selected_urls[@]}" -eq 0 ]]; then
     last_idle_frontier="$frontier"
+    last_idle_at="$(date +%s)"
+    idle_reason="$(selection_reason <<<"$selection" || true)"
+    printf 'AFK watcher found authorized work but no issue was selected%s; unchanged authorized work is reconsidered no sooner than %s seconds from now\n' \
+      "${idle_reason:+ (selector: $idle_reason)}" "$idle_retry_seconds" >&2
     sleep_until_poll
     continue
   fi

@@ -80,6 +80,23 @@ case "$AFK_TEST_SCENARIO" in
     fi
     ;;
   token-wait) ;;
+  idle-retry)
+    if [[ "$count" -ge 3 ]]; then
+      printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
+    else
+      printf 'Reviewed the authorized queue.\nNo issue is ready to start right now.\a\n\n'
+    fi
+    ;;
+  idle-clock-back)
+    # The first pass moves the clock far ahead while it runs, so its empty
+    # selection is stamped with that large idle timestamp; the sleep adapter
+    # then steps the clock backwards before the next poll.
+    if [[ "$count" -ge 2 ]]; then
+      printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
+    else
+      printf '5000\n' >"$AFK_TEST_CLOCK"
+    fi
+    ;;
   claim-race)
     printf 'authorization-removed\n' >>"$AFK_TEST_STATE"
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
@@ -154,6 +171,25 @@ case "$AFK_TEST_SCENARIO" in
     if [[ "$count" == 1 ]]; then printf 'blocker-closed\n' >>"$AFK_TEST_STATE"; else kill -TERM "$PPID"; fi ;;
   token-wait)
     if [[ "$count" -ge 3 ]]; then kill -TERM "$PPID"; fi ;;
+  idle-retry)
+    # Poll 1 and poll 3 land inside a cooldown that started at 0 and at 1000
+    # respectively; poll 2 and poll 4 carry the clock past the 900-second
+    # cooldown so selection may run again.
+    case "$count" in
+      1) printf '100\n' >"$AFK_TEST_CLOCK" ;;
+      2) printf '1000\n' >"$AFK_TEST_CLOCK" ;;
+      3) printf '1100\n' >"$AFK_TEST_CLOCK" ;;
+      4) printf '2000\n' >"$AFK_TEST_CLOCK" ;;
+      *) kill -TERM "$PPID" ;;
+    esac ;;
+  idle-clock-back)
+    # Step the clock backwards past the stamped idle timestamp, as an NTP
+    # correction would. Elapsed time goes negative, and selection must still
+    # run on the following poll.
+    case "$count" in
+      1) printf '1000\n' >"$AFK_TEST_CLOCK" ;;
+      *) kill -TERM "$PPID" ;;
+    esac ;;
   reauthorize)
     if ! grep -qx human-reauthorized "$AFK_TEST_STATE"; then
       printf 'human-reauthorized\n' >>"$AFK_TEST_STATE"
@@ -441,6 +477,62 @@ run_foreground token-wait
 [[ "$(grep -c '^selector$' "$events")" == 1 ]]
 ! grep -q '^agent ' "$events"
 [[ "$(grep -c '^sleep 0$' "$events")" == 3 ]]
+
+# A transient empty selection must not suppress an unchanged authorized queue,
+# and a repeatedly empty one must stay token-conscious. The fixture clock makes
+# polls 1 and 3 land inside a cooldown and polls 2 and 4 land past one, so the
+# selector must run only after polls 2 and 4: the first empty pass mutates
+# nothing and reports the idle reason, the partially elapsed poll invokes
+# nothing, the second empty pass re-arms the full cooldown, and only the third
+# pass claims and launches the same unchanged issue without a restart.
+run_foreground idle-retry
+[[ "$(grep -c '^selector$' "$events")" == 3 ]]
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
+mapfile -t idle_retry_selectors < <(grep -n '^selector$' "$events" | cut -d: -f1)
+mapfile -t idle_retry_sleeps < <(grep -n '^sleep 0$' "$events" | cut -d: -f1)
+idle_retry_claim_line="$(grep -n '^claim 42$' "$events" | cut -d: -f1)"
+idle_retry_agent_line="$(grep -n '^agent 42$' "$events" | cut -d: -f1)"
+[[ "${#idle_retry_sleeps[@]}" -ge 4 ]]
+# Empty pass 1, then a poll at elapsed 0 and a poll at elapsed 100 that both
+# invoke nothing: the second selection may only follow the fourth poll's clock
+# jump past 900.
+[[ "${idle_retry_selectors[0]}" -lt "${idle_retry_sleeps[0]}" ]]
+[[ "${idle_retry_sleeps[1]}" -lt "${idle_retry_selectors[1]}" ]]
+# Empty pass 2 re-arms the cooldown: the poll at elapsed 100 after it invokes
+# nothing, so the claiming pass may only follow the fourth poll.
+[[ "${idle_retry_selectors[1]}" -lt "${idle_retry_sleeps[2]}" ]]
+[[ "${idle_retry_sleeps[3]}" -lt "${idle_retry_selectors[2]}" ]]
+[[ "${idle_retry_selectors[2]}" -lt "$idle_retry_claim_line" ]]
+[[ "$idle_retry_claim_line" -lt "$idle_retry_agent_line" ]]
+[[ "$(grep -c 'no issue was selected' "$fixture/idle-retry.out")" == 2 ]]
+grep -q 'reconsidered no sooner than 900 seconds from now' "$fixture/idle-retry.out"
+grep -q 'No issue is ready to start right now' "$fixture/idle-retry.out"
+[[ "$(grep -c $'\a' "$fixture/idle-retry.out")" == 0 ]]
+[[ "$(grep -c 'Reviewed the authorized queue' "$fixture/idle-retry.out")" == 0 ]]
+[[ "$(grep -c -- '--add-label Sandcastle' "$events")" == 0 ]]
+
+# A backwards system-clock step (an NTP correction) after an empty selection
+# must not read as a permanent cooldown. The first pass stamps the idle
+# timestamp at 5000, the poll then moves the clock back to 1000, and the
+# unchanged authorized queue must still be reconsidered, claimed, and launched.
+run_foreground idle-clock-back
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
+mapfile -t clock_back_selectors < <(grep -n '^selector$' "$events" | cut -d: -f1)
+clock_back_sleep_line="$(grep -n '^sleep 0$' "$events" | head -n1 | cut -d: -f1)"
+clock_back_claim_line="$(grep -n '^claim 42$' "$events" | cut -d: -f1)"
+clock_back_agent_line="$(grep -n '^agent 42$' "$events" | cut -d: -f1)"
+[[ "${clock_back_selectors[0]}" -lt "$clock_back_sleep_line" ]]
+[[ "$clock_back_sleep_line" -lt "${clock_back_selectors[1]}" ]]
+[[ "${clock_back_selectors[1]}" -lt "$clock_back_claim_line" ]]
+[[ "$clock_back_claim_line" -lt "$clock_back_agent_line" ]]
+grep -q 'no issue was selected' "$fixture/idle-clock-back.out"
+# This selector prints nothing on its empty pass, so the status line must carry
+# no selector-reason suffix at all. A bare `! grep` line cannot fail under
+# `set -e`, so assert the absence through a count.
+[[ "$(grep -c '(selector:' "$fixture/idle-clock-back.out")" == 0 ]]
 
 run_foreground paused-lane
 [[ "$(sed -n 's/^agent //p' "$events" | paste -sd, -)" == 42,43 ]]

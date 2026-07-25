@@ -100,6 +100,8 @@ Closes #42
 | Final workflow outcome | Closes |
 BODY
 gh pr create --head "$branch" --body-file "$AFK_TEST_PR_BODY" >/dev/null
+printf '%s\n' '{"type":"item.started","item":{"type":"command_execution","command":"scripted-tracer-command --secret-argument zumbleflux"}}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"scripted commentary line one\nscripted commentary line two"}}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"<promise>COMPLETE</promise>"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
 EOF
@@ -264,7 +266,37 @@ fi
 
 : >"$events"
 : >"$timer_events"
-run_command 1
+progress="$fixture/progress.out"
+run_command 1 >"$progress" 2>&1
+
+# The operator watching the launch terminal must see the agent working on the
+# active issue, while the durable log keeps the complete record.
+fail_progress() {
+  echo "$1" >&2
+  cat "$progress" >&2
+  exit 1
+}
+grep -Fxq '[afk #42] scripted commentary line one' "$progress" ||
+  fail_progress "agent commentary line one missing from watcher terminal output"
+grep -Fxq '[afk #42] scripted commentary line two' "$progress" ||
+  fail_progress "agent commentary line two missing from watcher terminal output"
+grep -Fxq '[afk #42] tool: Bash' "$progress" ||
+  fail_progress "tool activity missing from watcher terminal output"
+[[ "$(grep -Fc 'zumbleflux' "$progress" || true)" == 0 ]] ||
+  fail_progress "full tool arguments leaked into watcher terminal output"
+[[ "$(grep -Fc '"type":"item.' "$progress" || true)" == 0 ]] ||
+  fail_progress "raw provider JSON leaked into watcher terminal output"
+
+durable_log="$repo/.sandcastle/logs/afk-issue-42.log"
+[[ -s "$durable_log" ]] ||
+  fail_progress "durable per-run log $durable_log is missing or empty"
+grep -Fq 'Bash(scripted-tracer-command --secret-argument zumbleflux)' "$durable_log" || {
+  echo "durable log lost the complete tool invocation" >&2
+  cat "$durable_log" >&2
+  exit 1
+}
+grep -Fq 'tail -f .sandcastle/logs/afk-issue-42.log' "$progress" ||
+  fail_progress "watcher terminal no longer displays the durable log location"
 
 # A watcher must observe the authorized queue before asking the intelligent
 # selector to spend model tokens, and it must return to that live query after

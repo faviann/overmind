@@ -77,6 +77,15 @@ durable queue in this slice, so "scan before durable local persistence" means
 semantics because both construct the gate from the same configuration; there is
 no second scanner implementation.
 
+The two sides do different things with the result. The runtime **scans and
+refuses**: a budget exhaustion, matcher timeout, or value it cannot inspect
+completely means it emits nothing, exits non-zero, and says why on stderr. It
+does **not** rewrite the payload it transmits. If it did, the server would scan
+already-sanitized bytes and record `scan_status = "clean"` with no rule ids for
+content that was in fact redacted. Imported content supplies evidence only and
+cannot assert its own scan provenance, so the server — which sanitizes what it
+appends — remains the sole author of the canonical `scan_*` columns.
+
 ## Source locator representation
 
 `CaptureLocator` is a wire DTO: flat, nullable, and able to express an invalid

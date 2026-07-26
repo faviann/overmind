@@ -11,7 +11,7 @@ namespace MemSrv.Core;
 public sealed record SafetyBudgets
 {
     /// <summary>Bump when any default below changes.</summary>
-    public const string CurrentVersion = "capture-safety-budgets/2026-07-26.1";
+    public const string CurrentVersion = "capture-safety-budgets/2026-07-26.2";
 
     /// <summary>Maximum UTF-8 bytes in one source observation.</summary>
     public required long MaxObservationBytes { get; init; }
@@ -33,9 +33,10 @@ public sealed record SafetyBudgets
 
     /// <summary>
     /// Longest encoded run that qualifies as a decode candidate. This is a
-    /// qualification bound, not a fail-closed budget: an over-long run is still
-    /// scanned in full by every rule in its undecoded form, so nothing is left
-    /// uninspected. See docs/capture-safety-budgets.md.
+    /// qualification bound, not a fail-closed budget: a longer run is simply
+    /// not decoded, so a secret encoded inside it is NOT detected. That is an
+    /// accepted, bounded residual risk whose threat model is accidental
+    /// leakage, not a determined evader. See docs/capture-safety-budgets.md.
     /// </summary>
     public required int MaxDecoderCandidateLength { get; init; }
 
@@ -53,7 +54,9 @@ public sealed record SafetyBudgets
         MaxRuleTime = TimeSpan.FromSeconds(5),
         MaxMatches = 10_000,
         MaxDecoderCandidates = 65_536,
-        MaxDecoderCandidateLength = 4_096,
+        // 64 KiB: large enough that a base64'd credentials file, kubeconfig, or
+        // JWT is always decoded rather than skipped.
+        MaxDecoderCandidateLength = 65_536,
         MaxDecodedBytes = 16L * 1024 * 1024
     };
 }

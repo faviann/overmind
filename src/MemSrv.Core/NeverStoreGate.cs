@@ -98,13 +98,16 @@ public sealed class NeverStoreGate
         var state = new ScanBudgetState(_budgets);
         var outcome = scanner.ScanLeaf(text, null, state);
         return outcome.IsOmitted
-            ? new NeverStoreScan($"[OMITTED:{outcome.OmissionReason}]", [], [], 0, [outcome.OmissionReason!])
+            ? new NeverStoreScan(
+                SafetyMarkers.Omission(outcome.OmissionReason!),
+                [], [], 0, [outcome.OmissionReason!], null)
             : new NeverStoreScan(
                 outcome.Value!,
                 [.. outcome.RuleIds],
                 [.. outcome.Categories],
                 outcome.RedactionCount,
-                []);
+                [],
+                outcome.Primary?.RuleId);
     }
 
     public string Redact(string text) => Scan(text).Redacted;
@@ -121,9 +124,15 @@ public sealed class NeverStoreGate
         RequireInspectable(result);
         if (result.RedactionCount > 0)
         {
-            throw new NeverStoreException(result.RuleIds[0]);
+            throw new NeverStoreException(RefusalRule(result));
         }
     }
+
+    // Spec §5: "return an error naming the rule". The rule that actually
+    // decided the refusal is the highest-priority accepted match, not whichever
+    // id happens to sort first.
+    private static string RefusalRule(NeverStoreScan result) =>
+        result.PrimaryRuleId ?? result.RuleIds[0];
 
     // --- structured ------------------------------------------------------
 
@@ -136,24 +145,20 @@ public sealed class NeverStoreGate
         var scanner = RequireConfigured();
         var state = new ScanBudgetState(_budgets);
         using var document = JsonDocument.Parse(json);
-        var ruleIds = new SortedSet<string>(StringComparer.Ordinal);
-        var categories = new SortedSet<string>(StringComparer.Ordinal);
-        var omissions = new SortedSet<string>(StringComparer.Ordinal);
-        int count = 0;
+        var ledger = new SanitizationLedger();
 
         using var buffer = new MemoryStream();
         using (var writer = new Utf8JsonWriter(buffer))
         {
-            WriteSanitized(
-                document.RootElement, null, scanner, state, writer,
-                ruleIds, categories, omissions, ref count);
+            WriteSanitized(document.RootElement, null, scanner, state, writer, ledger);
         }
 
         return new NeverStoreScan(
             // GetBuffer, not ToArray: a payload may be large and the copy is
             // pure waste.
             Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length),
-            [.. ruleIds], [.. categories], count, [.. omissions]);
+            [.. ledger.RuleIds], [.. ledger.Categories], ledger.RedactionCount,
+            [.. ledger.Omissions], ledger.Primary?.RuleId);
     }
 
     public string RedactJson(string json) => ScanJson(json).Redacted;
@@ -167,7 +172,7 @@ public sealed class NeverStoreGate
         RequireInspectable(result);
         if (result.RedactionCount > 0)
         {
-            throw new NeverStoreException(result.RuleIds[0]);
+            throw new NeverStoreException(RefusalRule(result));
         }
     }
 
@@ -186,10 +191,7 @@ public sealed class NeverStoreGate
         SecretScanner scanner,
         ScanBudgetState state,
         Utf8JsonWriter writer,
-        SortedSet<string> ruleIds,
-        SortedSet<string> categories,
-        SortedSet<string> omissions,
-        ref int count)
+        SanitizationLedger ledger)
     {
         // A sensitive property name carrying a subtree has no exact span to
         // map, so the whole value is omitted rather than partially rewritten.
@@ -197,24 +199,44 @@ public sealed class NeverStoreGate
             && element.ValueKind is JsonValueKind.Object or JsonValueKind.Array
             && scanner.IsSensitiveField(propertyName))
         {
-            omissions.Add(OmissionReasons.SensitiveFieldSubtree);
-            writer.WriteStringValue($"[OMITTED:{OmissionReasons.SensitiveFieldSubtree}]");
+            WriteOmitted(writer, ledger, OmissionReasons.SensitiveFieldSubtree);
             return;
         }
 
         switch (element.ValueKind)
         {
             case JsonValueKind.Object:
-                writer.WriteStartObject();
+            {
+                // Property NAMES cross the same rule set as values: a
+                // credential used as a map key, or an environment dump keyed by
+                // its value, would otherwise persist verbatim forever.
+                var properties = new List<(string SafeName, JsonProperty Property)>();
+                var safeNames = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var property in element.EnumerateObject())
                 {
-                    writer.WritePropertyName(property.Name);
-                    WriteSanitized(
-                        property.Value, property.Name, scanner, state, writer,
-                        ruleIds, categories, omissions, ref count);
+                    string safeName = SanitizeName(property.Name, scanner, state, ledger);
+                    if (!safeNames.Add(safeName))
+                    {
+                        // Two siblings collapsed to one key. Emitting both would
+                        // write a duplicate key and lose a value on re-parse, so
+                        // the object goes as a whole with a stated reason.
+                        WriteOmitted(writer, ledger, OmissionReasons.RedactedNameCollision);
+                        return;
+                    }
+                    properties.Add((safeName, property));
+                }
+
+                writer.WriteStartObject();
+                foreach (var (safeName, property) in properties)
+                {
+                    writer.WritePropertyName(safeName);
+                    // The ORIGINAL name governs sensitive-field recognition:
+                    // redacting the name must not change what the value means.
+                    WriteSanitized(property.Value, property.Name, scanner, state, writer, ledger);
                 }
                 writer.WriteEndObject();
                 return;
+            }
 
             case JsonValueKind.Array:
                 writer.WriteStartArray();
@@ -222,9 +244,7 @@ public sealed class NeverStoreGate
                 {
                     // Elements inherit the array's field name so
                     // "tokens": ["..."] is still recognized as sensitive.
-                    WriteSanitized(
-                        item, propertyName, scanner, state, writer,
-                        ruleIds, categories, omissions, ref count);
+                    WriteSanitized(item, propertyName, scanner, state, writer, ledger);
                 }
                 writer.WriteEndArray();
                 return;
@@ -233,13 +253,10 @@ public sealed class NeverStoreGate
                 var outcome = scanner.ScanLeaf(element.GetString() ?? "", propertyName, state);
                 if (outcome.IsOmitted)
                 {
-                    omissions.Add(outcome.OmissionReason!);
-                    writer.WriteStringValue($"[OMITTED:{outcome.OmissionReason}]");
+                    WriteOmitted(writer, ledger, outcome.OmissionReason!);
                     return;
                 }
-                foreach (string id in outcome.RuleIds) { ruleIds.Add(id); }
-                foreach (string category in outcome.Categories) { categories.Add(category); }
-                count += outcome.RedactionCount;
+                ledger.Record(outcome);
                 writer.WriteStringValue(outcome.Value);
                 return;
 
@@ -250,13 +267,61 @@ public sealed class NeverStoreGate
                     && element.ValueKind is not JsonValueKind.Null
                     && scanner.IsSensitiveField(propertyName))
                 {
-                    omissions.Add(OmissionReasons.SensitiveFieldScalar);
-                    writer.WriteStringValue($"[OMITTED:{OmissionReasons.SensitiveFieldScalar}]");
+                    WriteOmitted(writer, ledger, OmissionReasons.SensitiveFieldScalar);
                     return;
                 }
                 element.WriteTo(writer);
                 return;
         }
+    }
+
+    /// <summary>
+    /// Sanitizes one property name and returns the text that will be written as
+    /// the JSON key. An unscannable name becomes its omission marker, which
+    /// takes part in the same collision check as any other key.
+    /// </summary>
+    private static string SanitizeName(
+        string name, SecretScanner scanner, ScanBudgetState state, SanitizationLedger ledger)
+    {
+        var outcome = scanner.ScanLeaf(name, null, state);
+        if (outcome.IsOmitted)
+        {
+            ledger.Omit(outcome.OmissionReason!);
+            return SafetyMarkers.Omission(outcome.OmissionReason!);
+        }
+        ledger.Record(outcome);
+        return outcome.Value!;
+    }
+
+    private static void WriteOmitted(
+        Utf8JsonWriter writer, SanitizationLedger ledger, string reason)
+    {
+        ledger.Omit(reason);
+        writer.WriteStringValue(SafetyMarkers.Omission(reason));
+    }
+
+    /// <summary>
+    /// Everything one structured sanitization pass accumulates. It exists so
+    /// the function that decides what persists takes one accumulator instead of
+    /// four separate out-parameters threaded through every recursion.
+    /// </summary>
+    private sealed class SanitizationLedger
+    {
+        public SortedSet<string> RuleIds { get; } = new(StringComparer.Ordinal);
+        public SortedSet<string> Categories { get; } = new(StringComparer.Ordinal);
+        public SortedSet<string> Omissions { get; } = new(StringComparer.Ordinal);
+        public int RedactionCount { get; private set; }
+        public PrimaryMatch? Primary { get; private set; }
+
+        public void Record(LeafOutcome outcome)
+        {
+            RuleIds.UnionWith(outcome.RuleIds);
+            Categories.UnionWith(outcome.Categories);
+            RedactionCount += outcome.RedactionCount;
+            Primary = PrimaryMatch.Best(Primary, outcome.Primary);
+        }
+
+        public void Omit(string reason) => Omissions.Add(reason);
     }
 
     private SecretScanner RequireConfigured()
@@ -287,4 +352,9 @@ public sealed record NeverStoreScan(
     IReadOnlyList<string> RuleIds,
     IReadOnlyList<string> Categories,
     int RedactionCount,
-    IReadOnlyList<string> OmissionReasons);
+    IReadOnlyList<string> OmissionReasons,
+    /// <summary>
+    /// The rule a refusal names: the highest-priority accepted match, not the
+    /// ordinal-first id. Null when nothing matched.
+    /// </summary>
+    string? PrimaryRuleId);

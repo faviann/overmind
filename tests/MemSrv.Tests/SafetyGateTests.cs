@@ -376,6 +376,73 @@ public sealed class SafetyGateTests : IDisposable
     }
 
     [Fact]
+    public void SecretsInPropertyNamesCrossTheSameRulesAsValues()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        // An env dump keyed by its value, a credential used as a map key: the
+        // secret is the NAME, and nothing scans the value side.
+        string json = $$"""
+            {"env":{"{{FakeAwsKeyId}}":"harmless","KEEP_ME":"kept"},"safe":"untouched"}
+            """;
+
+        var result = gate.ScanJson(json);
+
+        Assert.DoesNotContain(FakeAwsKeyId, result.Redacted, StringComparison.Ordinal);
+        Assert.Contains("aws-access-key-id", result.RuleIds);
+        // Still parseable JSON, with the surrounding structure intact.
+        using var document = JsonDocument.Parse(result.Redacted);
+        var env = document.RootElement.GetProperty("env");
+        Assert.Equal("harmless", env.GetProperty("[REDACTED:aws-access-key-id]").GetString());
+        Assert.Equal("kept", env.GetProperty("KEEP_ME").GetString());
+        Assert.Equal("untouched", document.RootElement.GetProperty("safe").GetString());
+    }
+
+    [Fact]
+    public void SiblingPropertyNamesThatCollapseToTheSameTextOmitTheWholeObject()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        // Two distinct secrets, one redacted name: emitting both would write a
+        // duplicate key and silently lose a value on re-parse.
+        string json = $$"""
+            {"env":{"{{FakeAwsKeyId}}":"first","AKIAFAKEFAKEFAKEFAK1":"second"},"safe":"untouched"}
+            """;
+
+        var result = gate.ScanJson(json);
+
+        Assert.DoesNotContain(FakeAwsKeyId, result.Redacted, StringComparison.Ordinal);
+        using var document = JsonDocument.Parse(result.Redacted);
+        Assert.Equal(
+            "[OMITTED:redacted_name_collision]",
+            document.RootElement.GetProperty("env").GetString());
+        Assert.Equal("untouched", document.RootElement.GetProperty("safe").GetString());
+        Assert.Contains("redacted_name_collision", result.OmissionReasons);
+    }
+
+    [Fact]
+    public void AShortHighPriorityMatchInsideALongerOneStillRedactsTheWholeOuterSpan()
+    {
+        const string configuredValue = "synthetic-operator-literal-0004";
+        string literals = Path.Combine(_directory, "overlap-literals.txt");
+        File.WriteAllText(literals, configuredValue + "\n");
+        var gate = new NeverStoreGate(_shippedRules, literals);
+
+        // The literal (priority int.MaxValue) sits strictly INSIDE the
+        // private-key block (priority 100). Discarding the key-block match
+        // would leave every byte of the block except the literal in cleartext.
+        string value =
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            + $"c3ludGhldGljZmFrZWtleW1hdGVyaWFs{configuredValue}\n"
+            + "-----END RSA PRIVATE KEY-----";
+
+        var result = gate.Scan(value);
+
+        Assert.Equal("[REDACTED:operator-literal]", result.Redacted);
+        Assert.DoesNotContain("BEGIN RSA PRIVATE KEY", result.Redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("c3ludGhldGlj", result.Redacted, StringComparison.Ordinal);
+        Assert.Equal(1, result.RedactionCount);
+    }
+
+    [Fact]
     public void OversizedLeafIsWhollyOmittedWhileSafeSiblingsRemain()
     {
         var gate = new NeverStoreGate(
@@ -424,6 +491,80 @@ public sealed class SafetyGateTests : IDisposable
             Assert.Equal("value [REDACTED:aws-access-key-id] end", result.Redacted);
             Assert.DoesNotContain(encoded, result.Redacted, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void Base64UrlEncodedCredentialsAreDecodedToo()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        // Chosen so the base64url form genuinely differs from the standard
+        // form: the '_' falls where no standard-alphabet run of the encoding
+        // decodes back to the credential.
+        string encoded = Convert
+            .ToBase64String(Encoding.UTF8.GetBytes("ÿ·" + FakeAwsKeyId))
+            .Replace('+', '-')
+            .Replace('/', '_');
+        Assert.Contains('_', encoded);
+
+        var result = gate.Scan($"value {encoded} end");
+
+        Assert.Contains("aws-access-key-id", result.RuleIds);
+        Assert.Equal("value [REDACTED:aws-access-key-id] end", result.Redacted);
+    }
+
+    [Fact]
+    public void AnEncodedCredentialsFileLongerThanTheOldCapIsStillDecoded()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        // A base64'd credentials file: well past the previous 4,096-character
+        // qualification cap, well inside the published 65,536 one.
+        string credentialsFile =
+            string.Concat(Enumerable.Range(0, 200).Select(index =>
+                $"# synthetic credentials file line {index:0000} of padding text\n"))
+            + $"aws_access_key_id = {FakeAwsKeyId}\n";
+        string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentialsFile));
+        Assert.InRange(encoded.Length, 4_097, SafetyBudgets.Default.MaxDecoderCandidateLength);
+
+        var result = gate.Scan($"blob {encoded} end");
+
+        Assert.Contains("aws-access-key-id", result.RuleIds);
+        Assert.Equal("blob [REDACTED:aws-access-key-id] end", result.Redacted);
+    }
+
+    [Fact]
+    public void AnEncodedRunBeyondTheCandidateLengthCapIsSkippedNotFailedClosed()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        // The accepted residual risk, stated as a test so it cannot drift into
+        // an unnoticed fail-open OR an unnoticed availability loss: a run this
+        // long is not decoded, and the scan still succeeds.
+        string oversized = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(
+                new string('p', 60_000) + $" aws_access_key_id = {FakeAwsKeyId}"));
+        Assert.True(oversized.Length > SafetyBudgets.Default.MaxDecoderCandidateLength);
+
+        var result = gate.Scan(oversized);
+
+        Assert.Equal(oversized, result.Redacted);
+        Assert.Equal(0, result.RedactionCount);
+        Assert.Empty(result.OmissionReasons);
+    }
+
+    [Fact]
+    public void DecoderCandidateExtractionCarriesTheSameMatcherTimeout()
+    {
+        var gate = new NeverStoreGate(
+            _shippedRules,
+            null,
+            SafetyBudgets.Default with { MaxRuleTime = TimeSpan.FromTicks(1) });
+        // No rule prefilter hits this value, so the only matcher that runs is
+        // decoder candidate extraction. Without a timeout it would run to
+        // completion; with one it must fail the scan closed.
+        string pathological = string.Concat(Enumerable.Repeat("0123456789abcdef", 200_000));
+
+        var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(pathological));
+        Assert.Contains("decoder candidate scan", failure.Message);
+        Assert.Contains("matcher timeout", failure.Message);
     }
 
     [Fact]
@@ -559,6 +700,31 @@ public sealed class SafetyGateTests : IDisposable
             () => gate.AssertAllowed($"remember {configuredValue}"));
         Assert.Equal("operator-literal", rejection.RuleName);
         Assert.DoesNotContain(configuredValue, rejection.Message);
+    }
+
+    [Fact]
+    public void ARefusalNamesTheHighestPriorityMatchNotTheOrdinalFirstRuleId()
+    {
+        const string configuredValue = "synthetic-operator-literal-0005";
+        string literals = Path.Combine(_directory, "priority-literals.txt");
+        File.WriteAllText(literals, configuredValue + "\n");
+        var gate = new NeverStoreGate(_shippedRules, literals);
+
+        // Two disjoint matches. "aws-access-key-id" sorts first ordinally, but
+        // the operator literal is the highest-priority rule and is the one that
+        // actually decided the refusal.
+        string value = $"rotate {FakeAwsKeyId} and {configuredValue} tonight";
+        var scan = gate.Scan(value);
+        Assert.Equal(["aws-access-key-id", "operator-literal"], scan.RuleIds);
+        Assert.Equal("operator-literal", scan.PrimaryRuleId);
+
+        Assert.Equal(
+            "operator-literal",
+            Assert.Throws<NeverStoreException>(() => gate.AssertAllowed(value)).RuleName);
+        Assert.Equal(
+            "operator-literal",
+            Assert.Throws<NeverStoreException>(
+                () => gate.AssertAllowedObject(new { note = value })).RuleName);
     }
 
     [Fact]

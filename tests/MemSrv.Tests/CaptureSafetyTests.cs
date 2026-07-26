@@ -332,6 +332,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         var outPump = PumpAsync(server.StandardOutput, serverStdout);
         var errPump = PumpAsync(server.StandardError, serverStderr);
         string responseBody;
+        string keyedResponseBody;
         Guid observationUuid;
         try
         {
@@ -346,6 +347,21 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             responseBody = await response.Content.ReadAsStringAsync();
             observationUuid = JsonDocument.Parse(responseBody).RootElement
                 .GetProperty("observationUuid").GetGuid();
+
+            // The same seeded value as a property NAME, not a value: a
+            // credential used as a map key, or an environment dump keyed by its
+            // value, must not survive into durable state either.
+            var keyed = await client.PostAsJsonAsync(
+                "/capture/v1/observations",
+                ObservationWithPayload(
+                    sourceSessionId, 1, $"absence-key-{Guid.NewGuid():N}",
+                    new Dictionary<string, object>
+                    {
+                        [SeededFakeSecret] = "harmless",
+                        ["keep"] = "kept"
+                    }));
+            Assert.Equal(HttpStatusCode.OK, keyed.StatusCode);
+            keyedResponseBody = await keyed.Content.ReadAsStringAsync();
 
             // A refusal path too: its error text must not quote the candidate.
             var refused = await client.PostAsJsonAsync(
@@ -366,9 +382,12 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             await Task.WhenAll(outPump, errPump);
         }
 
-        // 1. The API response.
+        // 1. The API response, for the seed as a value and as a property name.
         Assert.DoesNotContain(SeededFakeSecret, responseBody, StringComparison.Ordinal);
         Assert.Contains("[REDACTED:aws-access-key-id]", responseBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(SeededFakeSecret, keyedResponseBody, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED:aws-access-key-id]", keyedResponseBody, StringComparison.Ordinal);
+        Assert.Contains("\"keep\":\"kept\"", keyedResponseBody, StringComparison.Ordinal);
 
         // 2. Server logs: nothing on stdout at all (AGENTS.md), and no
         //    candidate value, captured content, credential, or complete import
@@ -424,7 +443,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     [Fact]
-    public async Task DisabledRuntimeRedactsBeforeItEmitsAndKeepsItsDiagnosticsClean()
+    public async Task DisabledRuntimeScansBeforeItEmitsAndKeepsItsDiagnosticsClean()
     {
         string captureKey = CaptureCredential();
         await EnrollAsync($"codex-runtime-{Guid.NewGuid():N}", captureKey);
@@ -452,9 +471,19 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             Assert.Equal(0, tracer.ExitCode);
 
             // The runtime crossed the gate before the observation left the
-            // process: the receipt it prints is already redacted.
+            // process, but it did not rewrite what it sent: the receipt it
+            // prints is the SERVER's, redacted by the server's own independent
+            // scan, which is what makes the persisted scan provenance real.
             Assert.DoesNotContain(SeededFakeSecret, tracer.Stdout, StringComparison.Ordinal);
             Assert.Contains("[REDACTED:aws-access-key-id]", tracer.Stdout, StringComparison.Ordinal);
+            var scan = JsonDocument.Parse(tracer.Stdout.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement
+                .GetProperty("observation").GetProperty("scan");
+            Assert.Equal("redacted", scan.GetProperty("status").GetString());
+            Assert.Contains(
+                "aws-access-key-id",
+                scan.GetProperty("ruleIds").EnumerateArray().Select(item => item.GetString()));
+            Assert.True(scan.GetProperty("redactionCount").GetInt32() > 0);
 
             // Runtime diagnostics stay on stderr and carry no candidate value,
             // no captured content, no credential, and no import request.
@@ -476,6 +505,169 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         finally
         {
             File.Delete(fixturePath);
+        }
+    }
+
+    [Fact]
+    public async Task DisabledRuntimeRefusesToSendWhenItsOwnScanFailsClosed()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"codex-failclosed-{Guid.NewGuid():N}", captureKey);
+        string fixturePath = Path.Combine(
+            Path.GetTempPath(), $"codex-failclosed-{Guid.NewGuid():N}.jsonl");
+        // Past the 10,000-match budget: the runtime's own scan fails closed
+        // before anything is transmitted.
+        string flood = string.Join(
+            ' ', Enumerable.Range(0, 10_001).Select(index => $"AKIA{index:D16}"));
+        string fixture = (await File.ReadAllTextAsync(
+                Path.Combine(_root, "fixtures/codex-synthetic.jsonl")))
+            .Replace("call_fixture_1", $"call_{Guid.NewGuid():N}", StringComparison.Ordinal)
+            .Replace("Show the working directory.", flood, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
+
+        try
+        {
+            var tracer = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                new Dictionary<string, string>
+                {
+                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                    ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath
+                });
+
+            Assert.NotEqual(0, tracer.ExitCode);
+            // Nothing was emitted: no receipt, so nothing was ever sent.
+            Assert.Empty(tracer.Stdout);
+            Assert.Contains("failed closed", tracer.Stderr);
+            Assert.Contains("match-count budget of 10000", tracer.Stderr);
+            // AC10 still holds on the refusal path.
+            Assert.DoesNotContain("AKIA0000", tracer.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain(captureKey, tracer.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("sourcePayload", tracer.Stderr, StringComparison.Ordinal);
+
+            await using var connection = new NpgsqlConnection(AdminConnection);
+            await connection.OpenAsync();
+            Assert.False(await connection.ExecuteScalarAsync<bool>(
+                "SELECT EXISTS (SELECT 1 FROM capture_observations WHERE safe_source_payload::text LIKE '%AKIA0000000000000001%')"));
+        }
+        finally
+        {
+            File.Delete(fixturePath);
+        }
+    }
+
+    // AC2 asks for an end-to-end HTTP redaction proof per rule family. The
+    // provider_token and structured_field families are proven by the receipt
+    // and absence tests above; these cover the rest.
+    [Fact]
+    public async Task EveryRemainingRuleFamilyIsRedactedThroughTheHttpSeam()
+    {
+        const string fakePem =
+            "-----BEGIN RSA PRIVATE KEY-----\nc3ludGhldGljZmFrZWtleW1hdGVyaWFs\n"
+            + "-----END RSA PRIVATE KEY-----";
+        const string fakeHeader = "Authorization: Bearer synthetic.fake.header.value.0123456789";
+        const string fakeUrl = "postgres://svc_user:synthetic-fake-pw@db.internal:5432/memory";
+
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"codex-families-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ObservationWithPayload(
+                sourceSessionId, 0, $"families-{Guid.NewGuid():N}",
+                new { pem = fakePem, header = fakeHeader, dsn = fakeUrl }));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        string shown = await RunMemCtlAsync(
+            "capture", "receipt", receipt.GetProperty("observationUuid").GetGuid().ToString());
+
+        var payload = JsonDocument.Parse(shown).RootElement
+            .GetProperty("event").GetProperty("payload");
+        Assert.Equal("[REDACTED:private-key-block]", payload.GetProperty("pem").GetString());
+        Assert.Equal(
+            "[REDACTED:authorization-header]", payload.GetProperty("header").GetString());
+        // The credential-bearing authority is the span; the trailing path is
+        // not a credential and is deliberately left readable.
+        Assert.Equal(
+            "[REDACTED:credential-bearing-url]/memory", payload.GetProperty("dsn").GetString());
+        foreach (string secret in new[] { fakePem, fakeHeader, fakeUrl, "synthetic-fake-pw" })
+        {
+            Assert.DoesNotContain(secret, shown, StringComparison.Ordinal);
+        }
+        var ruleIds = JsonDocument.Parse(shown).RootElement
+            .GetProperty("observation").GetProperty("scan").GetProperty("ruleIds")
+            .EnumerateArray().Select(item => item.GetString()).ToArray();
+        Assert.Contains("private-key-block", ruleIds);
+        Assert.Contains("authorization-header", ruleIds);
+        Assert.Contains("credential-bearing-url", ruleIds);
+    }
+
+    // NeverStoreLiteralsPath is new deployment configuration; this is the only
+    // test that proves the SERVER honors it, through the HTTP seam.
+    [Fact]
+    public async Task ServerConfiguredWithAnOperatorLiteralsFileRedactsThatLiteral()
+    {
+        const string configuredValue = "synthetic-operator-literal-0006";
+        string literalsPath = Path.Combine(
+            Path.GetTempPath(), $"never-store-literals-{Guid.NewGuid():N}.txt");
+        await File.WriteAllTextAsync(literalsPath, $"# operator-owned\n{configuredValue}\n");
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"codex-literals-{Guid.NewGuid():N}", captureKey);
+
+        try
+        {
+            var options = RuntimeOptions();
+            options.NeverStoreLiteralsPath = literalsPath;
+            await using var app = HttpServerHost.Build(options, AgentKeyStore.Load(_keysPath));
+            app.Urls.Add("http://127.0.0.1:0");
+            await app.StartAsync();
+            string observationUuid;
+            try
+            {
+                string url = app.Services.GetRequiredService<IServer>()
+                    .Features.Get<IServerAddressesFeature>()!.Addresses.First();
+                using var client = Client(url, captureKey);
+                var response = await client.PostAsJsonAsync(
+                    "/capture/v1/observations",
+                    Observation(
+                        sourceSessionId, 0, $"literal-{Guid.NewGuid():N}",
+                        $"the deploy used {configuredValue} last night"));
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                string body = await response.Content.ReadAsStringAsync();
+                Assert.DoesNotContain(configuredValue, body, StringComparison.Ordinal);
+                Assert.Contains("[REDACTED:operator-literal]", body, StringComparison.Ordinal);
+                observationUuid = JsonDocument.Parse(body).RootElement
+                    .GetProperty("observationUuid").GetGuid().ToString();
+            }
+            finally
+            {
+                await app.StopAsync();
+            }
+
+            // Durable state, read back through the operator seam.
+            string shown = await RunMemCtlAsync("capture", "receipt", observationUuid);
+            Assert.DoesNotContain(configuredValue, shown, StringComparison.Ordinal);
+            Assert.Contains("[REDACTED:operator-literal]", shown, StringComparison.Ordinal);
+
+            await using var connection = new NpgsqlConnection(AdminConnection);
+            await connection.OpenAsync();
+            Assert.False(await connection.ExecuteScalarAsync<bool>(
+                """
+                SELECT EXISTS (
+                  SELECT 1 FROM capture_observations WHERE safe_source_payload::text LIKE @pattern
+                  UNION ALL
+                  SELECT 1 FROM captured_events WHERE payload::text LIKE @pattern
+                )
+                """,
+                new { pattern = $"%{configuredValue}%" }));
+        }
+        finally
+        {
+            File.Delete(literalsPath);
         }
     }
 
@@ -551,7 +743,11 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     private static object Observation(
-        string sourceSessionId, long position, string nativeId, string message) => new
+        string sourceSessionId, long position, string nativeId, string message) =>
+        ObservationWithPayload(sourceSessionId, position, nativeId, new { text = message });
+
+    private static object ObservationWithPayload(
+        string sourceSessionId, long position, string nativeId, object payload) => new
         {
             contractVersion = 1,
             sourceSessionId,
@@ -559,7 +755,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             locator = new { kind = "native_id", nativeId },
             source = new { harness = "codex", harnessVersion = "synthetic", recordType = "turn" },
             adapter = new { name = "codex-synthetic", version = "1" },
-            sourcePayload = new { message },
+            sourcePayload = payload,
             events = new object[]
             {
                 new
@@ -568,7 +764,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                     partOrder = 0,
                     kind = "message",
                     actor = "user",
-                    payload = new { text = message }
+                    payload
                 }
             }
         };

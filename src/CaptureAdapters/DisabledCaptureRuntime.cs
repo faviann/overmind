@@ -15,6 +15,14 @@ namespace CaptureAdapters;
 /// emits anything. There is no local durable queue in this slice, so "before
 /// durable local persistence" means "before the observation leaves this
 /// process"; the server then scans independently before canonical append.
+///
+/// It scans but does not REWRITE what it transmits. Pre-redacting the wire
+/// would hand the server already-sanitized bytes and make it record
+/// <c>scan_status = "clean"</c> with no rule ids for content that was in fact
+/// redacted, destroying the provenance parent #73 requires. Imported content
+/// supplies evidence only; the server stays the sole author of canonical scan
+/// provenance. What the runtime owes is a refusal: any scan failure or budget
+/// exhaustion means nothing is emitted at all.
 /// </summary>
 public static class DisabledCaptureRuntime
 {
@@ -45,10 +53,14 @@ public static class DisabledCaptureRuntime
             var terminal = (CaptureSourcePositionOutcome.Terminal)outcome;
             string observationJson = JsonSerializer.Serialize(
                 terminal.Observation, JsonDefaults.Options);
+            // Fail closed before the observation leaves the process: an
+            // exhausted budget or a value that cannot be inspected completely
+            // throws out of here and nothing is sent. The scan result itself is
+            // deliberately discarded — the wire carries the original bytes.
             safetyGate.AssertObservationWithinBudget(observationJson);
-            string safeObservationJson = safetyGate.RedactJson(observationJson);
+            safetyGate.ScanJson(observationJson);
             using var content = new StringContent(
-                safeObservationJson, Encoding.UTF8, "application/json");
+                observationJson, Encoding.UTF8, "application/json");
             using var response = await client.PostAsync(
                 new Uri(captureEndpoint, "/capture/v1/observations"),
                 content,

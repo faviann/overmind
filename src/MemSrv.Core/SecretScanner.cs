@@ -6,11 +6,33 @@ using System.Text.RegularExpressions;
 namespace MemSrv.Core;
 
 /// <summary>
+/// The whole marker vocabulary the sanitizer can write, in one home. Two
+/// deliberately distinct forms so a reader can tell a surgical span redaction
+/// from a dropped value, and so no caller has to reconstruct either shape by
+/// hand. Documented in docs/capture-safety-budgets.md; the redaction form is
+/// fixed by memory-server-phase1-spec §5.
+/// </summary>
+internal static class SafetyMarkers
+{
+    /// <summary>
+    /// An exact span was replaced by the rule that claimed it. Written from the
+    /// parts rather than through a helper, because span redaction composes the
+    /// whole sanitized leaf in one pass with <c>string.Create</c> and must not
+    /// allocate a marker string per match.
+    /// </summary>
+    public const string RedactionPrefix = "[REDACTED:";
+
+    public const string OmissionPrefix = "[OMITTED:";
+    public const char Suffix = ']';
+
+    /// <summary>The whole value was dropped because no exact span could be mapped.</summary>
+    public static string Omission(string reason) => OmissionPrefix + reason + Suffix;
+}
+
+/// <summary>
 /// Why an entire value was dropped instead of span-redacted. This vocabulary is
 /// closed and documented in docs/capture-safety-budgets.md; the marker written
-/// into the sanitized value is <c>[OMITTED:&lt;reason&gt;]</c>, deliberately
-/// distinct from the <c>[REDACTED:&lt;rule-id&gt;]</c> span marker so a reader
-/// can tell a surgical redaction from a dropped value.
+/// into the sanitized value is <see cref="SafetyMarkers.Omission"/>.
 /// </summary>
 internal static class OmissionReasons
 {
@@ -22,6 +44,37 @@ internal static class OmissionReasons
 
     /// <summary>A sensitive property name carried an object or array; a subtree has no exact span.</summary>
     public const string SensitiveFieldSubtree = "sensitive_field_subtree";
+
+    /// <summary>
+    /// Two sibling property names became the same text after redaction. Writing
+    /// both would emit a duplicate JSON key and silently lose one value on
+    /// re-parse, so the whole object is dropped instead.
+    /// </summary>
+    public const string RedactedNameCollision = "redacted_name_collision";
+}
+
+/// <summary>
+/// The single match a refusal names: the highest-priority accepted span in a
+/// scan, resolved with the same deterministic order the overlap sweep uses.
+/// </summary>
+internal readonly record struct PrimaryMatch(string RuleId, int Priority, int Length)
+{
+    public static PrimaryMatch? Best(PrimaryMatch? left, PrimaryMatch? right)
+    {
+        if (left is null) { return right; }
+        if (right is null) { return left; }
+        var first = left.Value;
+        var second = right.Value;
+        if (first.Priority != second.Priority)
+        {
+            return first.Priority > second.Priority ? first : second;
+        }
+        if (first.Length != second.Length)
+        {
+            return first.Length > second.Length ? first : second;
+        }
+        return string.CompareOrdinal(first.RuleId, second.RuleId) <= 0 ? first : second;
+    }
 }
 
 /// <summary>
@@ -31,24 +84,35 @@ internal static class OmissionReasons
 /// <see cref="ScanBudgetState"/> that fails the whole scan closed when a budget
 /// is exhausted.
 /// </summary>
-internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets)
+internal sealed class SecretScanner
 {
     private const string LiteralRuleId = "operator-literal";
-    private const string MarkerPrefix = "[REDACTED:";
+
+    private readonly SecretRuleSet _ruleSet;
+    private readonly SafetyBudgets _budgets;
 
     // One bounded decoding level. Candidate shapes only; the decoded text is
-    // never re-scanned for further candidates.
-    private static readonly Regex PercentCandidates = new(
-        "(?:%[0-9A-Fa-f]{2}){4,}",
-        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
-    private static readonly Regex HexCandidates = new(
-        "[0-9A-Fa-f]{16,}",
-        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
-    private static readonly Regex Base64Candidates = new(
-        "[A-Za-z0-9+/]{16,}={0,2}",
-        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+    // never re-scanned for further candidates. These carry the same per-rule
+    // matcher timeout the governed rules get: research constraint 5 keeps a
+    // timeout as defense in depth even under NonBacktracking, and these three
+    // run over exactly the same untrusted leaf.
+    private readonly Regex _percentCandidates;
+    private readonly Regex _hexCandidates;
+    private readonly Regex _base64Candidates;
 
-    public SafetyBudgets Budgets => budgets;
+    public SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets)
+    {
+        _ruleSet = ruleSet;
+        _budgets = budgets;
+        const RegexOptions options = RegexOptions.NonBacktracking | RegexOptions.CultureInvariant;
+        _percentCandidates = new Regex("(?:%[0-9A-Fa-f]{2}){4,}", options, budgets.MaxRuleTime);
+        _hexCandidates = new Regex("[0-9A-Fa-f]{16,}", options, budgets.MaxRuleTime);
+        // Both Base64 alphabets: standard (`+/`) and base64url (`-_`), which is
+        // what JWTs and most modern tokens use.
+        _base64Candidates = new Regex("[A-Za-z0-9+/_-]{16,}={0,2}", options, budgets.MaxRuleTime);
+    }
+
+    public SafetyBudgets Budgets => _budgets;
 
     /// <summary>
     /// Scans one leaf value. <paramref name="propertyName"/> is the structured
@@ -57,7 +121,7 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
     public LeafOutcome ScanLeaf(string value, string? propertyName, ScanBudgetState state)
     {
         state.CheckDeadline();
-        if (Encoding.UTF8.GetByteCount(value) > budgets.MaxLeafBytes)
+        if (Encoding.UTF8.GetByteCount(value) > _budgets.MaxLeafBytes)
         {
             return LeafOutcome.Omitted(OmissionReasons.LeafExceedsLimit);
         }
@@ -75,18 +139,21 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
 
         if (matches.Count == 0)
         {
-            return LeafOutcome.Scanned(value, [], [], 0);
+            return LeafOutcome.Scanned(value, [], [], 0, null);
         }
 
         var accepted = ResolveOverlaps(matches);
         var ruleIds = new SortedSet<string>(StringComparer.Ordinal);
         var categories = new SortedSet<string>(StringComparer.Ordinal);
+        PrimaryMatch? primary = null;
         int length = value.Length;
         foreach (var span in accepted)
         {
-            length += MarkerPrefix.Length + span.RuleId.Length + 1 - span.Length;
+            length += SafetyMarkers.RedactionPrefix.Length + span.RuleId.Length + 1 - span.Length;
             ruleIds.Add(span.RuleId);
             categories.Add(span.Category);
+            primary = PrimaryMatch.Best(
+                primary, new PrimaryMatch(span.RuleId, span.Priority, span.Length));
         }
 
         // Written straight into the final string: a leaf may be tens of
@@ -101,21 +168,21 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
             {
                 source.AsSpan(read, span.Start - read).CopyTo(destination[write..]);
                 write += span.Start - read;
-                MarkerPrefix.CopyTo(destination[write..]);
-                write += MarkerPrefix.Length;
+                SafetyMarkers.RedactionPrefix.CopyTo(destination[write..]);
+                write += SafetyMarkers.RedactionPrefix.Length;
                 span.RuleId.CopyTo(destination[write..]);
                 write += span.RuleId.Length;
-                destination[write++] = ']';
+                destination[write++] = SafetyMarkers.Suffix;
                 read = span.Start + span.Length;
             }
             source.AsSpan(read).CopyTo(destination[write..]);
         });
-        return LeafOutcome.Scanned(redacted, ruleIds, categories, accepted.Count);
+        return LeafOutcome.Scanned(redacted, ruleIds, categories, accepted.Count, primary);
     }
 
     private void CollectLiteralMatches(string value, List<SpanMatch> matches, ScanBudgetState state)
     {
-        foreach (string literal in ruleSet.Literals)
+        foreach (string literal in _ruleSet.Literals)
         {
             int index = value.IndexOf(literal, StringComparison.Ordinal);
             while (index >= 0)
@@ -132,7 +199,7 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
 
     private void CollectRuleMatches(string value, List<SpanMatch> matches, ScanBudgetState state)
     {
-        foreach (var rule in ruleSet.Rules)
+        foreach (var rule in _ruleSet.Rules)
         {
             if (rule.Matcher != SecretMatcherKind.Regex || !PrefilterHits(value, rule))
             {
@@ -165,7 +232,7 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
     private SecretRule? MatchesSensitiveField(string propertyName)
     {
         SecretRule? best = null;
-        foreach (var rule in ruleSet.Rules)
+        foreach (var rule in _ruleSet.Rules)
         {
             if (rule.Matcher != SecretMatcherKind.SensitiveField
                 || !PrefilterHits(propertyName, rule))
@@ -197,10 +264,12 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
     {
         foreach (var (start, length, kind) in EnumerateCandidates(value))
         {
-            if (length > budgets.MaxDecoderCandidateLength)
+            if (length > _budgets.MaxDecoderCandidateLength)
             {
-                // Qualification bound, not a fail-closed budget: the run was
-                // already scanned in full undecoded by every rule above.
+                // Not decoded, and NOT fail-closed: an accepted, bounded
+                // residual risk documented in docs/capture-safety-budgets.md.
+                // The undecoded bytes were still crossed by every rule, but a
+                // secret encoded inside a run this long is not detected.
                 continue;
             }
             // Charged and deadline-checked per candidate: a leaf can hold tens
@@ -219,7 +288,7 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
                 continue;
             }
 
-            foreach (var rule in ruleSet.Rules)
+            foreach (var rule in _ruleSet.Rules)
             {
                 if (!rule.DecodeEligible || !PrefilterHits(decoded, rule))
                 {
@@ -245,21 +314,47 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
 
     private IEnumerable<(int Start, int Length, DecoderKind Kind)> EnumerateCandidates(string value)
     {
-        if (!ruleSet.Rules.Any(rule => rule.DecodeEligible))
+        if (!_ruleSet.Rules.Any(rule => rule.DecodeEligible))
         {
             yield break;
         }
-        foreach (Match match in PercentCandidates.Matches(value))
+        foreach (Match match in TimedMatches(_percentCandidates, value))
         {
             yield return (match.Index, match.Length, DecoderKind.Percent);
         }
-        foreach (Match match in HexCandidates.Matches(value))
+        foreach (Match match in TimedMatches(_hexCandidates, value))
         {
             yield return (match.Index, match.Length, DecoderKind.Hex);
         }
-        foreach (Match match in Base64Candidates.Matches(value))
+        foreach (Match match in TimedMatches(_base64Candidates, value))
         {
             yield return (match.Index, match.Length, DecoderKind.Base64);
+        }
+    }
+
+    /// <summary>
+    /// Enumerates candidate matches lazily — so the per-candidate budget can
+    /// stop a flood before the whole collection is materialized — while still
+    /// converting a matcher timeout into the fail-closed scan error.
+    /// </summary>
+    private static IEnumerable<Match> TimedMatches(Regex regex, string value)
+    {
+        var matches = regex.Matches(value).GetEnumerator();
+        while (true)
+        {
+            try
+            {
+                if (!matches.MoveNext())
+                {
+                    yield break;
+                }
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                throw new SafetyScanException(
+                    "the decoder candidate scan exceeded its matcher timeout");
+            }
+            yield return (Match)matches.Current;
         }
     }
 
@@ -281,7 +376,9 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
                     decoded = DecodeStrictUtf8(Convert.FromHexString(encoded));
                     return decoded.Length > 0;
                 case DecoderKind.Base64:
-                    string padded = encoded.TrimEnd('=');
+                    // base64url ('-' and '_') folds onto the standard alphabet
+                    // before decoding; JWTs and most modern tokens use it.
+                    string padded = encoded.TrimEnd('=').Replace('-', '+').Replace('_', '/');
                     int remainder = padded.Length % 4;
                     if (remainder == 1)
                     {
@@ -342,42 +439,54 @@ internal sealed class SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets
 
     /// <summary>
     /// Deterministic overlap resolution, documented once here and in
-    /// docs/capture-safety-budgets.md: highest priority wins; ties break by
-    /// longest match, then by rule id ordinal, then by earliest start. A match
-    /// overlapping an already-accepted one is discarded.
+    /// docs/capture-safety-budgets.md. Overlapping matches MERGE into one union
+    /// span attributed to the highest-priority rule among them; ties break by
+    /// longest original match, then by rule id ordinal. Merging, not discarding,
+    /// is what guarantees no byte covered by ANY match survives unredacted: a
+    /// short high-priority literal sitting inside a long private-key block used
+    /// to win and take the block's remaining bytes out of the redaction with it.
     /// </summary>
     private static List<SpanMatch> ResolveOverlaps(List<SpanMatch> matches)
     {
         matches.Sort(static (left, right) =>
         {
-            int byPriority = right.Priority.CompareTo(left.Priority);
-            if (byPriority != 0) { return byPriority; }
-            int byLength = right.Length.CompareTo(left.Length);
-            if (byLength != 0) { return byLength; }
-            int byId = string.CompareOrdinal(left.RuleId, right.RuleId);
-            return byId != 0 ? byId : left.Start.CompareTo(right.Start);
+            int byStart = left.Start.CompareTo(right.Start);
+            return byStart != 0 ? byStart : right.Length.CompareTo(left.Length);
         });
 
         var accepted = new List<SpanMatch>();
-        foreach (var candidate in matches)
+        int index = 0;
+        while (index < matches.Count)
         {
-            bool overlaps = false;
-            foreach (var already in accepted)
+            var winner = matches[index];
+            int start = winner.Start;
+            int end = winner.Start + winner.Length;
+            int next = index + 1;
+            // Transitively connected matches form one span: a chain of
+            // overlaps is one contiguous region of secret-bearing bytes.
+            while (next < matches.Count && matches[next].Start < end)
             {
-                if (candidate.Start < already.Start + already.Length
-                    && already.Start < candidate.Start + candidate.Length)
-                {
-                    overlaps = true;
-                    break;
-                }
+                end = Math.Max(end, matches[next].Start + matches[next].Length);
+                winner = Outrank(winner, matches[next]);
+                next++;
             }
-            if (!overlaps)
-            {
-                accepted.Add(candidate);
-            }
+            accepted.Add(winner with { Start = start, Length = end - start });
+            index = next;
         }
-        accepted.Sort(static (left, right) => left.Start.CompareTo(right.Start));
         return accepted;
+    }
+
+    private static SpanMatch Outrank(SpanMatch left, SpanMatch right)
+    {
+        if (left.Priority != right.Priority)
+        {
+            return left.Priority > right.Priority ? left : right;
+        }
+        if (left.Length != right.Length)
+        {
+            return left.Length > right.Length ? left : right;
+        }
+        return string.CompareOrdinal(left.RuleId, right.RuleId) <= 0 ? left : right;
     }
 
     private enum DecoderKind { Percent, Hex, Base64 }
@@ -392,7 +501,8 @@ internal sealed record LeafOutcome(
     string? OmissionReason,
     IReadOnlyCollection<string> RuleIds,
     IReadOnlyCollection<string> Categories,
-    int RedactionCount)
+    int RedactionCount,
+    PrimaryMatch? Primary)
 {
     public bool IsOmitted => OmissionReason is not null;
 
@@ -400,9 +510,10 @@ internal sealed record LeafOutcome(
         string value,
         IReadOnlyCollection<string> ruleIds,
         IReadOnlyCollection<string> categories,
-        int redactionCount) => new(value, null, ruleIds, categories, redactionCount);
+        int redactionCount,
+        PrimaryMatch? primary) => new(value, null, ruleIds, categories, redactionCount, primary);
 
-    public static LeafOutcome Omitted(string reason) => new(null, reason, [], [], 0);
+    public static LeafOutcome Omitted(string reason) => new(null, reason, [], [], 0, null);
 }
 
 /// <summary>

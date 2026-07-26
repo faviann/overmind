@@ -54,6 +54,7 @@ internal static class CaptureLedger
                    o.source_timestamp_raw AS SourceTimestampRaw,
                    o.source_timestamp_parsed AS SourceTimestampParsed,
                    o.source::text AS SourceJson,
+                   COALESCE(o.route_evidence, 'null'::jsonb)::text AS RouteEvidenceJson,
                    o.adapter::text AS AdapterJson,
                    o.safe_source_payload::text AS SafeSourcePayloadJson,
                    o.scan_status AS ScanStatus,
@@ -80,6 +81,8 @@ internal static class CaptureLedger
             row.SourceTimestampRaw is null
                 ? null
                 : new CaptureSourceTimestamp(row.SourceTimestampRaw, row.SourceTimestampParsed),
+            JsonSerializer.Deserialize<CaptureRouteEvidence?>(
+                row.RouteEvidenceJson, JsonOptions),
             JsonSerializer.Deserialize<CaptureAdapter>(row.AdapterJson, JsonOptions)!,
             JsonDocument.Parse(row.SafeSourcePayloadJson).RootElement.Clone(),
             new CaptureScanReceipt(
@@ -156,6 +159,7 @@ internal static class CaptureLedger
         public string? SourceTimestampRaw { get; set; }
         public DateTimeOffset? SourceTimestampParsed { get; set; }
         public string SourceJson { get; set; } = "";
+        public string RouteEvidenceJson { get; set; } = "null";
         public string AdapterJson { get; set; } = "";
         public string SafeSourcePayloadJson { get; set; } = "";
         public string ScanStatus { get; set; } = "";

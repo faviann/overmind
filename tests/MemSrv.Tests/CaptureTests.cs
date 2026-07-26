@@ -141,7 +141,8 @@ public sealed class CaptureTests : HttpSeamTestBase
                 Assert.Equal(
                     [
                         "observationUuid", "sourceStreamUuid", "source", "locator",
-                        "sourceTimestamp", "adapter", "safeSourcePayload", "scan", "capturedAt"
+                        "sourceTimestamp", "routeEvidence", "adapter",
+                        "safeSourcePayload", "scan", "capturedAt"
                     ],
                     envelope.GetProperty("observation")
                         .EnumerateObject().Select(property => property.Name));
@@ -484,12 +485,15 @@ public sealed class CaptureTests : HttpSeamTestBase
         var second = await client.PostAsJsonAsync(
             "/capture/v1/observations", Observation(sourceSessionId, 1, "record-second", "second"));
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        var secondReceipt = await second.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("established", secondReceipt.GetProperty("routeBasis").GetString());
 
         var retry = await client.PostAsJsonAsync(
             "/capture/v1/observations", Observation(sourceSessionId, 1, "record-stable", "original"));
         Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
         var retryReceipt = await retry.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal("established", retryReceipt.GetProperty("routeBasis").GetString());
         Assert.Equal(0, retryReceipt.GetProperty("sourcePosition").GetInt64());
         Assert.Equal(
             firstReceipt.GetProperty("observationUuid").GetGuid(),
@@ -829,36 +833,530 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
-    public async Task StreamKeepsItsFirstEffectiveRouteAfterBindingPolicyChanges()
+    public async Task EstablishedStreamKeepsItsRouteWhileNewSessionsUseProspectivePolicy()
     {
         var captureKey = CaptureCredential();
         string sourceSessionId = UniqueSession();
-        await EnrollAsync("codex-route-fixed", captureKey);
+        string binding = $"codex-route-fixed-{Guid.NewGuid():N}";
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*");
         using var client = CaptureClient(captureKey);
 
         var first = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation(sourceSessionId, 0, "route-0", "zero"));
+            "/capture/v1/observations",
+            RoutedObservation(
+                sourceSessionId,
+                0,
+                "route-0",
+                "/workspace/project",
+                [new { name = "origin", url = "https://github.com/faviann/overmind.git" }]));
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var firstReceipt = await first.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("repo/faviann/overmind", firstReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("origin", firstReceipt.GetProperty("routeBasis").GetString());
 
-        // No operator route-update command exists in this disabled slice. Per
-        // docs/testing.md this is narrow mechanical setup; behavior remains
-        // asserted only through the public capture receipts.
-        await using (var connection = new NpgsqlConnection(AdminConnection))
-        {
-            await connection.ExecuteAsync(
-                """
-                UPDATE capture_source_bindings
-                SET route_namespace = 'homelab'
-                WHERE stable_name = 'codex-route-fixed'
-                """);
-        }
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--special-namespace", "home=homelab",
+            "--directory-route", "/workspace=special:home");
 
         var second = await client.PostAsJsonAsync(
-            "/capture/v1/observations", Observation(sourceSessionId, 1, "route-1", "one"));
+            "/capture/v1/observations",
+            RoutedObservation(sourceSessionId, 1, "route-1", "/workspace", []));
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
         var receipt = await second.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("repo/faviann/overmind", receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("established", receipt.GetProperty("routeBasis").GetString());
+
+        var newSession = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(UniqueSession(), 0, "prospective-route-0", "/workspace/new", []));
+        Assert.Equal(HttpStatusCode.OK, newSession.StatusCode);
+        var newReceipt = await newSession.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("homelab", newReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("directory_mapping", newReceipt.GetProperty("routeBasis").GetString());
+    }
+
+    [Fact]
+    public async Task OperatorPolicyRoutesNormalizedOriginToAnAllowedRepositoryNamespace()
+    {
+        string binding = $"codex-origin-route-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*");
+        using var client = CaptureClient(captureKey);
+
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                sourceSessionId,
+                0,
+                "origin-route-0",
+                "/workspace/elsewhere",
+                [
+                    new { name = "upstream", url = "https://github.com/other/project.git" },
+                    new { name = "origin", url = "git@github.com:Faviann/Overmind.git" }
+                ]));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("repo/faviann/overmind", receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("origin", receipt.GetProperty("routeBasis").GetString());
+        string shown = await RunMemCtlAsync(
+            "capture", "receipt", receipt.GetProperty("observationUuid").GetGuid().ToString());
+        var envelope = JsonDocument.Parse(shown).RootElement;
+        Assert.Equal(
+            "repo/faviann/overmind",
+            envelope.GetProperty("event").GetProperty("namespace").GetString());
+    }
+
+    [Fact]
+    public async Task RoutePolicyStoreCanonicalizesRoutingInputsForEveryCaller()
+    {
+        string binding = $"codex-store-canonicalization-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        var options = RuntimeOptions();
+        await new CaptureRoutePolicyStore(
+                options.ConnectionString,
+                new NeverStoreGate(
+                    options.NeverStorePath, options.NeverStoreLiteralsPath))
+            .ReplaceAsync(
+                binding,
+                new CaptureRoutingPolicy(
+                    ["FAVIANN/*"],
+                    [
+                        new CaptureRouteOverride(
+                            "git@GitHub.com:FAVIANN/OVERMIND.git",
+                            "repo/FAVIANN/OVERMIND")
+                    ],
+                    [
+                        new CaptureDirectoryRoute(
+                            "/workspace/other/../Overmind/",
+                            "repo/FAVIANN/OVERMIND")
+                    ],
+                    []));
+        using var client = CaptureClient(captureKey);
+
+        var overrideResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "canonical-override-0",
+                "/elsewhere",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = "https://github.com/faviann/overmind"
+                    }
+                ]));
+        Assert.Equal(HttpStatusCode.OK, overrideResponse.StatusCode);
+        var overrideReceipt = await overrideResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            overrideReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("override", overrideReceipt.GetProperty("routeBasis").GetString());
+
+        var directoryResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "canonical-directory-0",
+                "/workspace/Overmind/src",
+                []));
+        Assert.Equal(HttpStatusCode.OK, directoryResponse.StatusCode);
+        var directoryReceipt = await directoryResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            directoryReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("directory_mapping", directoryReceipt.GetProperty("routeBasis").GetString());
+    }
+
+    [Fact]
+    public async Task OperatorPolicyRejectsUnauthorizedRepositoryRouteTargetsAtomically()
+    {
+        string binding = $"codex-unauthorized-target-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*");
+
+        var result = await RunMemCtlForResultAsync(
+            null,
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*",
+            "--remote-override",
+            "https://github.com/faviann/overmind.git=repo/OTHER/PROJECT",
+            "--directory-route",
+            "/workspace/overmind=repo/OTHER/PROJECT");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("outside the binding's allowed repository patterns", result.Stderr);
+
+        using var client = CaptureClient(captureKey);
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "unchanged-policy-0",
+                "/workspace",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = "https://github.com/faviann/overmind.git"
+                    }
+                ]));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("origin", receipt.GetProperty("routeBasis").GetString());
+    }
+
+    [Fact]
+    public async Task ExplicitRemoteOverridePrefersOriginAndPreservesOtherRemotesAsEvidence()
+    {
+        string binding = $"codex-override-route-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "other/*",
+            "--special-namespace", "home=homelab",
+            "--remote-override", "https://github.com/other/project.git=repo/other/project",
+            "--remote-override", "git@github.com:Faviann/Overmind.git=special:home");
+        using var client = CaptureClient(captureKey);
+
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "override-route-0",
+                "/workspace",
+                [
+                    new { name = "upstream", url = "https://github.com/other/project.git" },
+                    new { name = "origin", url = "git@github.com:Faviann/Overmind.git" }
+                ]));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("homelab", receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("override", receipt.GetProperty("routeBasis").GetString());
+        string shown = await RunMemCtlAsync(
+            "capture", "receipt", receipt.GetProperty("observationUuid").GetGuid().ToString());
+        var remotes = JsonDocument.Parse(shown).RootElement
+            .GetProperty("observation").GetProperty("routeEvidence")
+            .GetProperty("remotes");
+        Assert.Equal(["upstream", "origin"], remotes.EnumerateArray()
+            .Select(remote => remote.GetProperty("name").GetString()));
+    }
+
+    [Fact]
+    public async Task ExplicitNonOriginRemoteOverridesUseSourceEvidenceOrder()
+    {
+        string binding = $"codex-non-origin-override-order-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "other/*",
+            "--special-namespace", "home=homelab",
+            "--remote-override", "https://github.com/other/project.git=repo/other/project",
+            "--remote-override", "git@github.com:Faviann/Overmind.git=special:home");
+        using var client = CaptureClient(captureKey);
+
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "non-origin-override-order-0",
+                "/workspace",
+                [
+                    new { name = "z-first", url = "git@github.com:Faviann/Overmind.git" },
+                    new { name = "a-second", url = "https://github.com/other/project.git" }
+                ]));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("homelab", receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("override", receipt.GetProperty("routeBasis").GetString());
+        string shown = await RunMemCtlAsync(
+            "capture", "receipt", receipt.GetProperty("observationUuid").GetGuid().ToString());
+        var remotes = JsonDocument.Parse(shown).RootElement
+            .GetProperty("observation").GetProperty("routeEvidence")
+            .GetProperty("remotes");
+        Assert.Equal(["z-first", "a-second"], remotes.EnumerateArray()
+            .Select(remote => remote.GetProperty("name").GetString()));
+    }
+
+    [Fact]
+    public async Task LongestDirectoryRouteWinsAndUnconfiguredNonOriginRemoteIsProvenanceOnly()
+    {
+        string binding = $"codex-directory-route-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*",
+            "--special-namespace", "home=homelab",
+            "--directory-route", "/workspace=special:home",
+            "--directory-route", "/workspace/overmind=repo/faviann/overmind");
+        using var client = CaptureClient(captureKey);
+
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "directory-route-0",
+                "/workspace/overmind/src",
+                [new { name = "upstream", url = "https://github.com/faviann/ignored.git" }]));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("repo/faviann/overmind", receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("directory_mapping", receipt.GetProperty("routeBasis").GetString());
+    }
+
+    [Fact]
+    public async Task RepositoryRoutingIsBindingScopedAndNamespaceEnsureIsIdempotent()
+    {
+        string allowedBinding = $"codex-repo-allowed-{Guid.NewGuid():N}";
+        string deniedBinding = $"codex-repo-denied-{Guid.NewGuid():N}";
+        var allowedKey = CaptureCredential();
+        var deniedKey = CaptureCredential();
+        await EnrollAsync(allowedBinding, allowedKey);
+        await EnrollAsync(deniedBinding, deniedKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", allowedBinding,
+            "--allow-repository", "faviann/*");
+        await RunMemCtlAsync(
+            "capture", "route-policy", deniedBinding,
+            "--allow-repository", "other/*");
+        object[] remotes =
+            [new { name = "origin", url = "https://github.com/faviann/overmind.git" }];
+
+        using var allowedClient = CaptureClient(allowedKey);
+        foreach (string locator in new[] { "binding-allowed-0", "binding-allowed-1" })
+        {
+            var response = await allowedClient.PostAsJsonAsync(
+                "/capture/v1/observations",
+                RoutedObservation(UniqueSession(), 0, locator, "/workspace", remotes));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(
+                "repo/faviann/overmind",
+                receipt.GetProperty("effectiveNamespace").GetString());
+            Assert.Equal("origin", receipt.GetProperty("routeBasis").GetString());
+        }
+
+        using var deniedClient = CaptureClient(deniedKey);
+        var denied = await deniedClient.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(), 0, "binding-denied-0", "/workspace", remotes));
+        Assert.Equal(HttpStatusCode.OK, denied.StatusCode);
+        var deniedReceipt = await denied.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "capture/unscoped",
+            deniedReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("fallback", deniedReceipt.GetProperty("routeBasis").GetString());
+    }
+
+    [Fact]
+    public async Task UnsafeRouteEvidenceCannotSelectANewRouteOrChangeAnEstablishedRoute()
+    {
+        string binding = $"codex-route-safety-{Guid.NewGuid():N}";
+        string captureKey = CaptureCredential();
+        string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*");
+        using var client = CaptureClient(captureKey);
+
+        var unsafeNewResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "unsafe-new-route-0",
+                "/workspace",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = $"https://github.com/faviann/{seededSyntheticSecret}.git"
+                    }
+                ]));
+
+        Assert.Equal(HttpStatusCode.OK, unsafeNewResponse.StatusCode);
+        var unsafeNewReceipt =
+            await unsafeNewResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "capture/unscoped",
+            unsafeNewReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("fallback", unsafeNewReceipt.GetProperty("routeBasis").GetString());
+        string unsafeNewShown = await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            unsafeNewReceipt.GetProperty("observationUuid").GetGuid().ToString());
+        Assert.DoesNotContain(seededSyntheticSecret, unsafeNewShown);
+        Assert.Contains("[REDACTED:aws-access-key-id]", unsafeNewShown);
+
+        string establishedSession = UniqueSession();
+        var establishedResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                establishedSession,
+                0,
+                "established-route-0",
+                "/workspace",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = "https://github.com/faviann/overmind.git"
+                    }
+                ]));
+        Assert.Equal(HttpStatusCode.OK, establishedResponse.StatusCode);
+        var establishedReceipt =
+            await establishedResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            establishedReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("origin", establishedReceipt.GetProperty("routeBasis").GetString());
+
+        var unsafeEstablishedResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                establishedSession,
+                1,
+                "established-route-1",
+                "/workspace",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = $"https://github.com/faviann/{seededSyntheticSecret}.git"
+                    }
+                ]));
+
+        Assert.Equal(HttpStatusCode.OK, unsafeEstablishedResponse.StatusCode);
+        var unsafeEstablishedReceipt =
+            await unsafeEstablishedResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            unsafeEstablishedReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal(
+            "established",
+            unsafeEstablishedReceipt.GetProperty("routeBasis").GetString());
+        string unsafeEstablishedShown = await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            unsafeEstablishedReceipt.GetProperty("observationUuid").GetGuid().ToString());
+        Assert.DoesNotContain(seededSyntheticSecret, unsafeEstablishedShown);
+        Assert.Contains("[REDACTED:aws-access-key-id]", unsafeEstablishedShown);
+    }
+
+    [Fact]
+    public async Task PayloadNamespaceClaimsCannotExpandCaptureRoutingAuthority()
+    {
+        string binding = $"codex-namespace-claim-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            NamespaceClaimObservation(UniqueSession(), "homelab", "memory-system"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("capture/unscoped", receipt.GetProperty("effectiveNamespace").GetString());
         Assert.Equal("fallback", receipt.GetProperty("routeBasis").GetString());
+    }
+
+    [Fact]
+    public async Task OperatorCannotPersistSyntheticSecretInCaptureRoutePolicy()
+    {
+        string binding = $"codex-policy-safety-{Guid.NewGuid():N}";
+        string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
+        await EnrollAsync(binding, CaptureCredential());
+
+        var result = await RunMemCtlForResultAsync(
+            null,
+            "capture", "route-policy", binding,
+            "--special-namespace", $"{seededSyntheticSecret}=homelab");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("never-store", result.Stderr);
+        Assert.DoesNotContain(seededSyntheticSecret, result.Stderr);
+    }
+
+    [Fact]
+    public async Task CaptureRoutePolicyHonorsOperatorProvisionedLiterals()
+    {
+        string binding = $"codex-policy-literal-safety-{Guid.NewGuid():N}";
+        const string configuredLiteral = "synthetic-route-policy-literal-0001";
+        string literalsPath = Path.Combine(
+            Path.GetTempPath(), $"never-store-route-literals-{Guid.NewGuid():N}.txt");
+        await File.WriteAllTextAsync(literalsPath, configuredLiteral);
+        await EnrollAsync(binding, CaptureCredential());
+
+        try
+        {
+            var result = await RunMemCtlForResultAsync(
+                new Dictionary<string, string>
+                {
+                    ["MEMSRV_NEVER_STORE_LITERALS_PATH"] = literalsPath
+                },
+                "capture", "route-policy", binding,
+                "--special-namespace", $"{configuredLiteral}=homelab");
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains("never-store", result.Stderr);
+            Assert.DoesNotContain(configuredLiteral, result.Stderr);
+        }
+        finally
+        {
+            File.Delete(literalsPath);
+        }
+    }
+
+    [Theory]
+    [InlineData("reserved=memory-system", "Reserved namespace")]
+    [InlineData("reserved-family=capture/private", "Reserved namespace")]
+    [InlineData("missing=does-not-exist", "must already exist")]
+    [InlineData("repository=repo/faviann/overmind", "allowed repository pattern")]
+    public async Task SpecialNamespacePolicyRejectsReservedOrUnprovisionedTargets(
+        string mapping,
+        string expectedError)
+    {
+        string binding = $"codex-special-denied-{Guid.NewGuid():N}";
+        await EnrollAsync(binding, CaptureCredential());
+
+        var result = await RunMemCtlForResultAsync(
+            null,
+            "capture", "route-policy", binding,
+            "--special-namespace", mapping);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(expectedError, result.Stderr);
     }
 
     [Fact]
@@ -988,6 +1486,60 @@ public sealed class CaptureTests : HttpSeamTestBase
                     }
                 } }
         }
+        };
+
+    private static object RoutedObservation(
+        string sourceSessionId,
+        long position,
+        string nativeId,
+        string workingDirectory,
+        object[] remotes) => new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourcePosition = position,
+            locator = new { kind = "native_id", nativeId },
+            routeEvidence = new { workingDirectory, remotes },
+            source = new { harness = "codex", harnessVersion = "synthetic", recordType = "turn" },
+            adapter = new { name = "codex-synthetic", version = "1" },
+            sourcePayload = new { message = "routed" },
+            events = new[]
+            {
+                new
+                {
+                    partKey = "message/0",
+                    partOrder = 0,
+                    kind = "message",
+                    actor = "user",
+                    payload = new { text = "routed" }
+                }
+            }
+        };
+
+    private static object NamespaceClaimObservation(
+        string sourceSessionId,
+        string topLevelNamespace,
+        string payloadNamespace) => new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourcePosition = 0,
+            @namespace = topLevelNamespace,
+            locator = new { kind = "native_id", nativeId = $"namespace-claim-{Guid.NewGuid():N}" },
+            source = new { harness = "codex", harnessVersion = "synthetic", recordType = "turn" },
+            adapter = new { name = "codex-synthetic", version = "1" },
+            sourcePayload = new { @namespace = payloadNamespace },
+            events = new[]
+            {
+                new
+                {
+                    partKey = "message/0",
+                    partOrder = 0,
+                    kind = "message",
+                    actor = "user",
+                    payload = new { text = "claim denied" }
+                }
+            }
         };
 
     private static object InvalidLocatorObservation(string sourceSessionId, object locator) => new

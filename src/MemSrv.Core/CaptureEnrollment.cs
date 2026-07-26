@@ -15,7 +15,6 @@ public sealed class CaptureEnrollment(string connectionString, NeverStoreGate ne
         string harness,
         string agentId,
         string credential,
-        string? routeNamespace,
         CancellationToken cancellationToken = default)
     {
         CaptureLedger.RequireSafetyConfigured(neverStore);
@@ -26,15 +25,8 @@ public sealed class CaptureEnrollment(string connectionString, NeverStoreGate ne
         neverStore.AssertAllowed(harness);
         neverStore.AssertAllowed(agentId);
         CaptureCredential.RequireCaptureForm(credential);
-        string effective = routeNamespace ?? "capture/unscoped";
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        bool exists = await connection.ExecuteScalarAsync<bool>(
-            "SELECT EXISTS (SELECT 1 FROM namespaces WHERE name = @effective)", new { effective });
-        if (!exists)
-        {
-            throw new InvalidOperationException($"Namespace '{effective}' does not exist.");
-        }
 
         return await connection.ExecuteScalarAsync<Guid>(
             """
@@ -49,8 +41,8 @@ public sealed class CaptureEnrollment(string connectionString, NeverStoreGate ne
                 harness,
                 agentId,
                 credentialHash = CaptureCredential.Hash(credential),
-                routeNamespace,
-                allowedNamespaces = new[] { effective }
+                routeNamespace = (string?)null,
+                allowedNamespaces = new[] { "capture/unscoped" }
             });
     }
 }

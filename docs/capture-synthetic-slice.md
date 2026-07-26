@@ -24,10 +24,33 @@ memctl capture enroll my-codex-fixture \
   --credential-file /run/secrets/codex-capture-key
 ```
 
-Without `--namespace`, the server routes the binding to
-`capture/unscoped` and reports `routeBasis: fallback`. An operator may provide
-an existing namespace with `--namespace`; the binding, not the request,
-determines the effective namespace and derived capture agent/session identity.
+With no routing policy, the server routes a new source session to
+`capture/unscoped` and reports `routeBasis: fallback`. Policy is an atomic,
+binding-scoped replacement through the operator CLI:
+
+```sh
+memctl capture route-policy my-codex-fixture \
+  --allow-repository 'faviann/*' \
+  --remote-override 'git@github.com:faviann/overmind.git=repo/faviann/overmind' \
+  --special-namespace 'home=homelab' \
+  --directory-route '/home/operator=special:home'
+```
+
+Options are repeatable. Repository patterns match normalized lowercase
+`owner/name`; repository destinations use `repo/owner/name`. A remote override
+key accepts an absolute URL with a host or scp-style Git syntax and is stored as
+normalized lowercase `host/owner/name`. Directory keys must be absolute and are
+normalized; the longest boundary-respecting match wins. A special destination
+must use `special:alias`, and the alias must map to an existing, non-reserved
+namespace. Whitespace around `=` is ignored.
+
+Routing precedence is an explicit normalized-remote override (origin matches
+first, then source order), automatic normalized `origin` routing when its
+`owner/name` is allowed, longest directory mapping, then fallback. Other
+remotes remain receipt provenance unless an explicit override names them. The
+first accepted observation reports `override`, `origin`, `directory_mapping`,
+or `fallback`; every later receipt for that fixed stream reports `established`.
+Policy changes apply only to new source sessions.
 
 The disabled Codex OCI tracer is built separately from the server image:
 
@@ -83,7 +106,7 @@ writes and checkpoint movement, not reads.
 - Enrollment records a harness identity but does not select an adapter. The
   disposable Claude conformance spike lives only in the test assembly and is
   absent from this image and every release project.
-- No console/OIDC flow, complete router, queue product, or Claude delivery.
+- No console/OIDC flow, queue product, or Claude delivery.
 - The existing deterministic never-store gate is applied before append, with a
   one-megabyte observation ceiling. For known credentials, the HTTP boundary
   rejects an oversized request before full JSON deserialization; unknown

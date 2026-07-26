@@ -52,13 +52,9 @@ assert that mechanism directly:
   grants. These are mechanical checks of the narrow disabled capture slice;
   routing, receipts, authorization, and retry behavior stay at the HTTP/memctl
   public seams.
-- The disabled capture slice has no operator command for changing binding route
-  policy. A routing test may therefore update only that binding's route columns
-  as narrow mechanical setup, then must prove stream-fixed routing solely from
-  later public HTTP receipts. Direct inspection of the resulting route is not
-  an assertion seam.
 
 ### Module-surface tests for the safety boundary
+
 The never-store gate's rule-set validation, deterministic overlap resolution,
 bounded decoding, and numeric scan budgets have no MCP tool and no `memctl`
 command, and the capture HTTP route's deliberate 1 MB transport cap sits far

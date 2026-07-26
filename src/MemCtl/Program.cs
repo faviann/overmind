@@ -292,8 +292,7 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 args[2],
                 RequireOption(args, "--harness"),
                 RequireOption(args, "--agent-id"),
-                credential,
-                FindOption(args, "--namespace"));
+                credential);
             Console.WriteLine($"enrolled {bindingUuid} stable_name={args[2]}");
             Console.WriteLine(
                 "LIMITATION: disabled non-production synthetic capture seam only; " +
@@ -309,6 +308,47 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 Console.WriteLine(JsonSerializer.Serialize(
                     envelope, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
             }
+            return 0;
+
+        case "route-policy":
+            RequireArgs(args, 3);
+            var remoteOverrides = FindOptions(args, "--remote-override")
+                .Select(value =>
+                {
+                    var pair = ParseMapping(value, "--remote-override");
+                    return new CaptureRouteOverride(
+                        pair.Key,
+                        pair.Value);
+                })
+                .ToArray();
+            var directoryRoutes = FindOptions(args, "--directory-route")
+                .Select(value =>
+                {
+                    var pair = ParseMapping(value, "--directory-route");
+                    return new CaptureDirectoryRoute(
+                        pair.Key,
+                        pair.Value);
+                })
+                .ToArray();
+            var specialNamespaces = FindOptions(args, "--special-namespace")
+                .Select(value =>
+                {
+                    var pair = ParseMapping(value, "--special-namespace");
+                    return new CaptureSpecialNamespace(pair.Key, pair.Value);
+                })
+                .ToArray();
+            var policy = new CaptureRoutingPolicy(
+                FindOptions(args, "--allow-repository")
+                    .ToArray(),
+                remoteOverrides,
+                directoryRoutes,
+                specialNamespaces);
+            Guid policyUuid = await new CaptureRoutePolicyStore(
+                    options.ConnectionString,
+                    new NeverStoreGate(
+                        options.NeverStorePath, options.NeverStoreLiteralsPath))
+                .ReplaceAsync(args[2], policy);
+            Console.WriteLine($"capture route policy {policyUuid} binding={args[2]}");
             return 0;
 
         default:
@@ -330,6 +370,28 @@ static string? FindOption(string[] args, string name)
 }
 
 static bool HasOption(string[] args, string name) => args.Contains(name, StringComparer.Ordinal);
+
+static IEnumerable<string> FindOptions(string[] args, string name)
+{
+    for (var i = 0; i < args.Length - 1; i++)
+    {
+        if (args[i] == name && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+        {
+            yield return args[i + 1];
+        }
+    }
+}
+
+static KeyValuePair<string, string> ParseMapping(string value, string option)
+{
+    int separator = value.LastIndexOf('=');
+    if (separator <= 0 || separator == value.Length - 1)
+    {
+        throw new ArgumentException($"{option} requires key=value.");
+    }
+    return new KeyValuePair<string, string>(
+        value[..separator].Trim(), value[(separator + 1)..].Trim());
+}
 
 static string RequireOption(string[] args, string name) =>
     FindOption(args, name) ?? throw new ArgumentException($"{name} is required.");
@@ -358,6 +420,12 @@ static void Usage()
     Console.Error.WriteLine("memctl trace <session_id>");
     Console.Error.WriteLine(
         "memctl capture enroll <stable_name> --harness harness --agent-id id " +
-        "--credential-file path [--namespace name]");
+        "--credential-file path");
     Console.Error.WriteLine("memctl capture receipt <observation_uuid>");
+    Console.Error.WriteLine(
+        "memctl capture route-policy <stable_name> " +
+        "[--allow-repository owner/name-pattern] " +
+        "[--remote-override remote=repo/owner/name|special:alias] " +
+        "[--directory-route /path=repo/owner/name|special:alias] " +
+        "[--special-namespace alias=existing_namespace]");
 }

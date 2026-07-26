@@ -29,6 +29,8 @@ namespace CaptureAdapters;
 /// </summary>
 public static class DisabledCaptureRuntime
 {
+    public static TimeSpan RequestTimeout { get; } = TimeSpan.FromSeconds(5);
+
     public static async Task<IReadOnlyList<string>> RunClaimedFixtureAsync(
         ICaptureSourceAdapter adapter,
         string fixturePath,
@@ -38,15 +40,22 @@ public static class DisabledCaptureRuntime
         string credential,
         NeverStoreGate safetyGate,
         Func<string, CaptureRuntimeQueueItem, CancellationToken, Task> persistReceiptAsync,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool terminalAtEndOfFile = false,
+        string? transcriptIdentity = null)
     {
         var sourceRecords = await JsonlSourceReader.ReadAsync(
-            fixturePath, sourceSessionId, terminalAtEndOfFile: false, cancellationToken);
+            fixturePath, sourceSessionId, terminalAtEndOfFile, cancellationToken);
         var recordsByPosition = sourceRecords.ToDictionary(record => record.SourcePosition);
         byte[] sourceBytes = await File.ReadAllBytesAsync(fixturePath, cancellationToken);
-        string transcriptIdentity = Digest(
+        transcriptIdentity ??= Digest(
             Encoding.UTF8.GetBytes(Path.GetFullPath(fixturePath)));
-        using var client = new HttpClient();
+        using var client = new HttpClient
+        {
+            // The runtime owns timeout classification so scheduler cancellation
+            // remains distinguishable from a request that stopped responding.
+            Timeout = Timeout.InfiniteTimeSpan
+        };
         client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", credential);
         var receipts = new List<string>();
@@ -109,19 +118,33 @@ public static class DisabledCaptureRuntime
             }
             using var content = new StringContent(
                 observationJson, Encoding.UTF8, "application/json");
-            using var response = await client.PostAsync(
-                new Uri(captureEndpoint, "/capture/v1/observations"),
-                content,
-                cancellationToken);
-            string responseText = await response.Content.ReadAsStringAsync(cancellationToken);
-            if (!response.IsSuccessStatusCode)
+            using var requestCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestCancellation.CancelAfter(RequestTimeout);
+            try
             {
-                throw new CaptureDeliveryException(
-                    terminal.SourcePosition, response.StatusCode, responseText);
+                using var response = await client.PostAsync(
+                    new Uri(captureEndpoint, "/capture/v1/observations"),
+                    content,
+                    requestCancellation.Token);
+                string responseText = await response.Content.ReadAsStringAsync(
+                    requestCancellation.Token);
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new CaptureDeliveryException(
+                        terminal.SourcePosition, response.StatusCode, responseText);
+                }
+                await persistReceiptAsync(
+                    responseText, queued, cancellationToken);
+                receipts.Add(responseText);
             }
-            await persistReceiptAsync(
-                responseText, queued, cancellationToken);
-            receipts.Add(responseText);
+            catch (OperationCanceledException ex) when (
+                !cancellationToken.IsCancellationRequested
+                && requestCancellation.IsCancellationRequested)
+            {
+                throw new CaptureDeliveryTimeoutException(
+                    terminal.SourcePosition, RequestTimeout, ex);
+            }
         }
 
         return receipts;
@@ -129,6 +152,19 @@ public static class DisabledCaptureRuntime
 
     private static string Digest(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+}
+
+public sealed class CaptureDeliveryTimeoutException(
+    long sourcePosition,
+    TimeSpan timeout,
+    Exception innerException)
+    : HttpRequestException(
+        $"Capture delivery at source position {sourcePosition} received no response " +
+        $"within {timeout.TotalSeconds:0.###} seconds.",
+        innerException)
+{
+    public long SourcePosition { get; } = sourcePosition;
+    public TimeSpan Timeout { get; } = timeout;
 }
 
 public sealed class CaptureDeliveryException(

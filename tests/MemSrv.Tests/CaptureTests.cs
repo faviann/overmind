@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -690,6 +691,708 @@ public sealed class CaptureTests : HttpSeamTestBase
         {
             File.Delete(fixturePath);
             DeleteRuntimeState(fixturePath);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPackagedTracerStartupDiscoversEveryExistingStreamBeforeFirstWakeup()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-startup-discovery-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-startup-discovery-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        string firstRecord = (await File.ReadAllLinesAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl")))[0] + "\n";
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "first.jsonl"),
+            firstRecord,
+            new UTF8Encoding(false));
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "second.jsonl"),
+            firstRecord,
+            new UTF8Encoding(false));
+
+        using var process = TestProcessRunner.StartCaptureTracer(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                // No scheduled wakeup can occur during the test. Both receipts
+                // therefore prove the immediate startup enumeration.
+                ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+                ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+            });
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            JsonElement first = await ReadTracerReceiptAsync(process);
+            JsonElement second = await ReadTracerReceiptAsync(process);
+            Assert.Equal(0, first.GetProperty("sourcePosition").GetInt64());
+            Assert.Equal(0, second.GetProperty("sourcePosition").GetInt64());
+            Assert.NotEqual(
+                first.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid(),
+                second.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid());
+
+            foreach (JsonElement receipt in new[] { first, second })
+            {
+                string canonical = await RunMemCtlAsync(
+                    "capture",
+                    "receipt",
+                    receipt.GetProperty("observationUuid").GetGuid().ToString());
+                Assert.Contains("\"kind\":\"message\"", canonical);
+            }
+
+            CaptureRuntimeSnapshot startupState =
+                await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+            Assert.Equal(2, startupState.Streams.Count);
+            Assert.All(startupState.Streams, stream => Assert.Empty(stream.Queue));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            await stderr;
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPackagedTracerStartupResumesEachRetainedStreamAtItsNextPosition()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-startup-resume-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-startup-resume-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        string firstTranscript = Path.Combine(transcriptRoot, "first.jsonl");
+        string secondTranscript = Path.Combine(transcriptRoot, "second.jsonl");
+        Directory.CreateDirectory(transcriptRoot);
+        string[] records = await File.ReadAllLinesAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+        await File.WriteAllTextAsync(
+            firstTranscript, records[0] + "\n", new UTF8Encoding(false));
+        await File.WriteAllTextAsync(
+            secondTranscript,
+            records[0] + "\n" + records[1] + "\n",
+            new UTF8Encoding(false));
+
+        Dictionary<string, string> environment = new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+        Guid firstStreamUuid = Guid.Empty;
+        Guid secondStreamUuid = Guid.Empty;
+
+        try
+        {
+            using (var seed = TestProcessRunner.StartCaptureTracer(environment))
+            {
+                Task<string> seedStderr = seed.StandardError.ReadToEndAsync();
+                JsonElement[] seeded =
+                [
+                    await ReadTracerReceiptAsync(seed),
+                    await ReadTracerReceiptAsync(seed),
+                    await ReadTracerReceiptAsync(seed)
+                ];
+                Assert.Equal(
+                    [0L, 0L, 1L],
+                    seeded.Select(receipt =>
+                        receipt.GetProperty("sourcePosition").GetInt64()));
+                firstStreamUuid = seeded[0].GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid();
+                secondStreamUuid = seeded[1].GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid();
+                Assert.NotEqual(firstStreamUuid, secondStreamUuid);
+                Assert.Equal(
+                    secondStreamUuid,
+                    seeded[2].GetProperty("observation")
+                        .GetProperty("sourceStreamUuid").GetGuid());
+                seed.Kill(entireProcessTree: true);
+                await seed.WaitForExitAsync();
+                await seedStderr;
+            }
+
+            CaptureRuntimeSnapshot retained =
+                await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+            Assert.Equal(
+                [0L, 1L],
+                retained.Streams
+                    .OrderBy(stream => stream.SourceStream, StringComparer.Ordinal)
+                    .Select(stream => stream.EnqueuedThrough!.Value)
+                    .OrderBy(position => position));
+            Assert.All(retained.Streams, stream => Assert.Empty(stream.Queue));
+
+            await File.AppendAllTextAsync(
+                firstTranscript, records[1] + "\n", new UTF8Encoding(false));
+            await File.AppendAllTextAsync(
+                secondTranscript, records[2] + "\n", new UTF8Encoding(false));
+
+            using var resumed = TestProcessRunner.StartCaptureTracer(environment);
+            Task<string> resumedStderr = resumed.StandardError.ReadToEndAsync();
+            JsonElement[] resumedReceipts =
+            [
+                await ReadTracerReceiptAsync(resumed),
+                await ReadTracerReceiptAsync(resumed)
+            ];
+            Assert.Equal(
+                [1L, 2L],
+                resumedReceipts.Select(receipt =>
+                    receipt.GetProperty("sourcePosition").GetInt64()));
+            Assert.Equal(
+                firstStreamUuid,
+                resumedReceipts[0].GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid());
+            Assert.Equal(
+                secondStreamUuid,
+                resumedReceipts[1].GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid());
+
+            foreach (JsonElement receipt in resumedReceipts)
+            {
+                string canonical = await RunMemCtlAsync(
+                    "capture",
+                    "receipt",
+                    receipt.GetProperty("observationUuid").GetGuid().ToString());
+                Assert.Contains("\"contractVersion\":1", canonical);
+            }
+
+            CaptureRuntimeSnapshot converged =
+                await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+            Assert.Equal(
+                [1L, 2L],
+                converged.Streams
+                    .Select(stream => stream.EnqueuedThrough!.Value)
+                    .OrderBy(position => position));
+            Assert.All(converged.Streams, stream => Assert.Empty(stream.Queue));
+
+            resumed.Kill(entireProcessTree: true);
+            await resumed.WaitForExitAsync();
+            await resumedStderr;
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPackagedTracerCapturesCompletedAppendsAndNewStreamsAcrossCycles()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        string firstTranscript = Path.Combine(transcriptRoot, "first.jsonl");
+        string startupTranscript = Path.Combine(transcriptRoot, "startup-second.jsonl");
+        string laterTranscript = Path.Combine(transcriptRoot, "later-third.jsonl");
+        Directory.CreateDirectory(transcriptRoot);
+        string[] records = await File.ReadAllLinesAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+        await File.WriteAllTextAsync(
+            firstTranscript,
+            records[0] + "\n" + records[1],
+            new UTF8Encoding(false));
+        await File.WriteAllTextAsync(
+            startupTranscript,
+            records[0] + "\n",
+            new UTF8Encoding(false));
+
+        using var process = TestProcessRunner.StartCaptureTracer(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "50",
+                ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "20"
+            });
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            JsonElement first = await ReadTracerReceiptAsync(process);
+            Assert.Equal(0, first.GetProperty("sourcePosition").GetInt64());
+            JsonElement startupSecond = await ReadTracerReceiptAsync(process);
+            Assert.Equal(0, startupSecond.GetProperty("sourcePosition").GetInt64());
+            Assert.NotEqual(
+                first.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid(),
+                startupSecond.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid());
+
+            await Task.Delay(250);
+            CaptureRuntimeSnapshot startupState =
+                await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+            Assert.Equal(2, startupState.Streams.Count);
+            Assert.All(startupState.Streams, stream =>
+            {
+                Assert.Equal(0, stream.EnqueuedThrough);
+                Assert.Empty(stream.Queue);
+            });
+
+            await File.AppendAllTextAsync(
+                firstTranscript, "\n", new UTF8Encoding(false));
+            JsonElement second = await ReadTracerReceiptAsync(process);
+            Assert.Equal(1, second.GetProperty("sourcePosition").GetInt64());
+
+            int split = records[2].Length / 2;
+            await File.AppendAllTextAsync(
+                firstTranscript,
+                records[2][..split],
+                new UTF8Encoding(false));
+            await Task.Delay(250);
+            CaptureRuntimeStreamState activeStream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams,
+                stream => stream.EnqueuedThrough == 1);
+            Assert.Equal(1, activeStream.EnqueuedThrough);
+            Assert.Empty(activeStream.Queue);
+
+            await File.AppendAllTextAsync(
+                firstTranscript,
+                records[2][split..] + "\n",
+                new UTF8Encoding(false));
+            JsonElement third = await ReadTracerReceiptAsync(process);
+            Assert.Equal(2, third.GetProperty("sourcePosition").GetInt64());
+
+            await File.WriteAllTextAsync(
+                laterTranscript,
+                records[0] + "\n",
+                new UTF8Encoding(false));
+            JsonElement discovered = await ReadTracerReceiptAsync(process);
+            Assert.Equal(0, discovered.GetProperty("sourcePosition").GetInt64());
+            Assert.NotEqual(
+                first.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid(),
+                discovered.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid());
+
+            foreach (JsonElement receipt in
+                new[] { first, startupSecond, second, third, discovered })
+            {
+                string canonical = await RunMemCtlAsync(
+                    "capture",
+                    "receipt",
+                    receipt.GetProperty("observationUuid").GetGuid().ToString());
+                Assert.Contains("\"contractVersion\":1", canonical);
+                Assert.Contains("\"event\":", canonical);
+            }
+
+            CaptureRuntimeSnapshot finalState =
+                await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+            Assert.Equal(3, finalState.Streams.Count);
+            Assert.All(finalState.Streams, stream => Assert.Empty(stream.Queue));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            await stderr;
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPackagedTracerReleasesFinalRecordOnlyAfterStableArchiveEvidence()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-archive-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-archive-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string activeDirectory = Path.Combine(transcriptRoot, "sessions", "2026", "07");
+        string archiveDirectory = Path.Combine(transcriptRoot, "archived_sessions");
+        string stateDirectory = Path.Combine(directory, "state");
+        string activePath = Path.Combine(activeDirectory, "session.jsonl");
+        string archivedPath = Path.Combine(archiveDirectory, "session.jsonl");
+        Directory.CreateDirectory(activeDirectory);
+        Directory.CreateDirectory(archiveDirectory);
+        string[] records = await File.ReadAllLinesAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+        await File.WriteAllTextAsync(
+            activePath,
+            records[0] + "\n" + records[1],
+            new UTF8Encoding(false));
+
+        using var process = TestProcessRunner.StartCaptureTracer(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "50",
+                ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+            });
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            JsonElement completedPrefix = await ReadTracerReceiptAsync(process);
+            Assert.Equal(0, completedPrefix.GetProperty("sourcePosition").GetInt64());
+            Guid sourceStreamUuid = completedPrefix.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid();
+
+            await Task.Delay(250);
+            CaptureRuntimeStreamState active = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(0, active.EnqueuedThrough);
+            Assert.Empty(active.Queue);
+
+            File.Move(activePath, archivedPath);
+            JsonElement terminal = await ReadTracerReceiptAsync(process);
+            Assert.Equal(1, terminal.GetProperty("sourcePosition").GetInt64());
+            Assert.Equal(
+                sourceStreamUuid,
+                terminal.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid());
+
+            CaptureRuntimeStreamState archived = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(1, archived.EnqueuedThrough);
+            Assert.Empty(archived.Queue);
+
+            string canonical = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                terminal.GetProperty("observationUuid").GetGuid().ToString());
+            Assert.Contains("\"kind\":\"tool_call\"", canonical);
+            Assert.Equal(
+                new CaptureLedgerMechanics(2, 2, 0, 1),
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            await stderr;
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPackagedTracerRestartConvergesQueuedOutageWithoutAWakeup()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-restart-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-restart-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        File.Copy(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"),
+            Path.Combine(transcriptRoot, "restart.jsonl"));
+        int unavailablePort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            unavailablePort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+
+        Dictionary<string, string> EnvironmentFor(string captureUrl) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = captureUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "75",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        try
+        {
+            using (var outage = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor($"http://127.0.0.1:{unavailablePort}")))
+            {
+                Task<string> outageStdout = outage.StandardOutput.ReadToEndAsync();
+                Task<string> outageStderr = outage.StandardError.ReadToEndAsync();
+                await WaitUntilAsync(async () =>
+                {
+                    CaptureRuntimeSnapshot snapshot =
+                        await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+                    return snapshot.Streams.SingleOrDefault()?.Queue.Count == 3;
+                });
+                outage.Kill(entireProcessTree: true);
+                await outage.WaitForExitAsync();
+                Assert.Empty(await outageStdout);
+                await outageStderr;
+            }
+
+            CaptureRuntimeStreamState retained = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal([0L, 1L, 2L], retained.Queue.Select(item => item.SourcePosition));
+            Assert.Null(retained.LastServerReceipt);
+
+            using var resumed = TestProcessRunner.StartCaptureTracer(EnvironmentFor(_baseUrl));
+            Task<string> resumedStderr = resumed.StandardError.ReadToEndAsync();
+            JsonElement[] receipts =
+            [
+                await ReadTracerReceiptAsync(resumed),
+                await ReadTracerReceiptAsync(resumed),
+                await ReadTracerReceiptAsync(resumed)
+            ];
+            Assert.Equal(
+                [0L, 1L, 2L],
+                receipts.Select(receipt =>
+                    receipt.GetProperty("sourcePosition").GetInt64()));
+            Assert.All(receipts, receipt =>
+                Assert.Equal("new", receipt.GetProperty("status").GetString()));
+            string canonical = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipts[2].GetProperty("observationUuid").GetGuid().ToString());
+            Assert.Contains("\"kind\":\"tool_result\"", canonical);
+
+            resumed.Kill(entireProcessTree: true);
+            await resumed.WaitForExitAsync();
+            await resumedStderr;
+            Assert.Empty(Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams).Queue);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPackagedTracerRetriesAWithheldResponseWithoutRestart()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-timeout-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-timeout-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        string firstRecord = (await File.ReadAllLinesAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl")))[0] + "\n";
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "timeout.jsonl"),
+            firstRecord,
+            new UTF8Encoding(false));
+        int proxyPort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            proxyPort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+        using var proxy = new HttpListener();
+        proxy.Prefixes.Add($"http://127.0.0.1:{proxyPort}/");
+        proxy.Start();
+        var secondAttemptAccepted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecondAttempt = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<JsonElement> server = WithholdFirstAndForwardSecondAsync(
+            proxy,
+            captureKey,
+            secondAttemptAccepted,
+            releaseSecondAttempt);
+
+        using var process = TestProcessRunner.StartCaptureTracer(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{proxyPort}",
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "50",
+                ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+            });
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            await secondAttemptAccepted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.False(process.HasExited);
+            CaptureRuntimeStreamState retained = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal([0L], retained.Queue.Select(item => item.SourcePosition));
+            Assert.Null(retained.LastServerReceipt);
+
+            releaseSecondAttempt.SetResult();
+            JsonElement retry = await ReadTracerReceiptAsync(process);
+            JsonElement accepted = await server;
+            Assert.Equal("new", retry.GetProperty("status").GetString());
+            Assert.Equal(
+                accepted.GetProperty("observationUuid").GetGuid(),
+                retry.GetProperty("observationUuid").GetGuid());
+            Guid sourceStreamUuid = retry.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid();
+
+            CaptureRuntimeStreamState converged = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(0, converged.EnqueuedThrough);
+            Assert.Empty(converged.Queue);
+            Assert.Equal(
+                "new",
+                converged.LastServerReceipt?.Status);
+            string canonical = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                retry.GetProperty("observationUuid").GetGuid().ToString());
+            Assert.Contains("\"kind\":\"message\"", canonical);
+            Assert.Equal(
+                new CaptureLedgerMechanics(1, 1, 0, 0),
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
+        }
+        finally
+        {
+            releaseSecondAttempt.TrySetResult();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            await stderr;
+            proxy.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPackagedTracerRestartConvergesAfterLostSuccessResponse()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-lost-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-lost-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        File.Copy(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"),
+            Path.Combine(transcriptRoot, "lost-response.jsonl"));
+        int proxyPort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            proxyPort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+        using var proxy = new HttpListener();
+        proxy.Prefixes.Add($"http://127.0.0.1:{proxyPort}/");
+        proxy.Start();
+
+        Dictionary<string, string> EnvironmentFor(string captureUrl) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = captureUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        try
+        {
+            Task<JsonElement[]> committed =
+                CommitToolResultAndLoseResponseAsync(proxy, captureKey);
+            using (var ambiguous = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor($"http://127.0.0.1:{proxyPort}")))
+            {
+                Task<string> ambiguousStderr = ambiguous.StandardError.ReadToEndAsync();
+                JsonElement[] deliveredBeforeLoss =
+                [
+                    await ReadTracerReceiptAsync(ambiguous),
+                    await ReadTracerReceiptAsync(ambiguous)
+                ];
+                Assert.Equal(
+                    [0L, 1L],
+                    deliveredBeforeLoss.Select(receipt =>
+                        receipt.GetProperty("sourcePosition").GetInt64()));
+
+                JsonElement committedResult = (await committed)[2];
+                await WaitUntilAsync(async () =>
+                {
+                    CaptureRuntimeSnapshot snapshot =
+                        await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+                    return snapshot.Streams.SingleOrDefault()?.Queue
+                        .Select(item => item.SourcePosition)
+                        .SequenceEqual([2L]) == true;
+                });
+                CaptureRuntimeStreamState retained = Assert.Single(
+                    (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+                Assert.Equal([2L], retained.Queue.Select(item => item.SourcePosition));
+                Assert.Equal(1, retained.LastServerReceipt?.SourcePosition);
+
+                string canonicalBeforeRestart = await RunMemCtlAsync(
+                    "capture",
+                    "receipt",
+                    committedResult.GetProperty("observationUuid").GetGuid().ToString());
+                Guid sourceStreamUuid = committedResult.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid();
+                CaptureLedgerMechanics mechanicsBeforeRestart =
+                    await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid);
+                Assert.Equal(
+                    new CaptureLedgerMechanics(3, 3, 1, 2),
+                    mechanicsBeforeRestart);
+
+                ambiguous.Kill(entireProcessTree: true);
+                await ambiguous.WaitForExitAsync();
+                await ambiguousStderr;
+
+                using var resumed = TestProcessRunner.StartCaptureTracer(
+                    EnvironmentFor(_baseUrl));
+                Task<string> resumedStderr = resumed.StandardError.ReadToEndAsync();
+                JsonElement retry = await ReadTracerReceiptAsync(resumed);
+                Assert.Equal(
+                    "already_accepted",
+                    retry.GetProperty("status").GetString());
+                Assert.Equal(2, retry.GetProperty("sourcePosition").GetInt64());
+                Assert.Equal(
+                    committedResult.GetProperty("observationUuid").GetGuid(),
+                    retry.GetProperty("observationUuid").GetGuid());
+                Assert.Empty(Assert.Single(
+                    (await new FileCaptureRuntimeState(stateDirectory).ReadAsync())
+                        .Streams).Queue);
+                Assert.Equal(
+                    canonicalBeforeRestart,
+                    await RunMemCtlAsync(
+                        "capture",
+                        "receipt",
+                        committedResult.GetProperty("observationUuid").GetGuid().ToString()));
+                Assert.Equal(
+                    mechanicsBeforeRestart,
+                    await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
+
+                resumed.Kill(entireProcessTree: true);
+                await resumed.WaitForExitAsync();
+                await resumedStderr;
+            }
+        }
+        finally
+        {
+            proxy.Stop();
+            Directory.Delete(directory, recursive: true);
         }
     }
 
@@ -1649,10 +2352,68 @@ public sealed class CaptureTests : HttpSeamTestBase
         return [.. receipts];
     }
 
+    private async Task<JsonElement> WithholdFirstAndForwardSecondAsync(
+        HttpListener listener,
+        string captureKey,
+        TaskCompletionSource secondAttemptAccepted,
+        TaskCompletionSource releaseSecondAttempt)
+    {
+        HttpListenerContext first = await listener.GetContextAsync()
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        using (var reader = new StreamReader(
+            first.Request.InputStream, Encoding.UTF8, leaveOpen: true))
+        {
+            await reader.ReadToEndAsync();
+        }
+
+        HttpListenerContext second = await listener.GetContextAsync()
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        secondAttemptAccepted.SetResult();
+        await releaseSecondAttempt.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        using var content = new StreamContent(second.Request.InputStream);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var client = CaptureClient(captureKey);
+        using HttpResponseMessage response = await client.PostAsync(
+            "/capture/v1/observations", content);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        string responseBody = await response.Content.ReadAsStringAsync();
+        byte[] responseBytes = Encoding.UTF8.GetBytes(responseBody);
+        second.Response.StatusCode = (int)HttpStatusCode.OK;
+        second.Response.ContentType = "application/json";
+        second.Response.ContentLength64 = responseBytes.Length;
+        await second.Response.OutputStream.WriteAsync(responseBytes);
+        second.Response.Close();
+        first.Response.Abort();
+        return JsonDocument.Parse(responseBody).RootElement.Clone();
+    }
+
     private static JsonElement[] ParseReceiptLines(string stdout) =>
         stdout.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
             .Select(line => JsonDocument.Parse(line).RootElement.Clone())
             .ToArray();
+
+    private static async Task<JsonElement> ReadTracerReceiptAsync(Process process)
+    {
+        string? line = await process.StandardOutput.ReadLineAsync()
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Fail(
+                $"Scheduled capture tracer exited before a receipt (exit={process.ExitCode}).");
+        }
+        return JsonDocument.Parse(line).RootElement.Clone();
+    }
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (!await condition())
+        {
+            await Task.Delay(50, timeout.Token);
+        }
+    }
 
     private async Task<CaptureLedgerMechanics> ReadCaptureLedgerMechanicsAsync(
         Guid sourceStreamUuid)

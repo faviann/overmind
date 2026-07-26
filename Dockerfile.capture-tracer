@@ -1,8 +1,12 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Packages.props ./
+COPY src/MemSrv.Core/MemSrv.Core.csproj src/MemSrv.Core/
+COPY src/CaptureAdapters/CaptureAdapters.csproj src/CaptureAdapters/
 COPY src/CodexCaptureTracer/CodexCaptureTracer.csproj src/CodexCaptureTracer/
 RUN dotnet restore src/CodexCaptureTracer/CodexCaptureTracer.csproj
+COPY src/MemSrv.Core/ src/MemSrv.Core/
+COPY src/CaptureAdapters/ src/CaptureAdapters/
 COPY src/CodexCaptureTracer/ src/CodexCaptureTracer/
 RUN dotnet publish src/CodexCaptureTracer/CodexCaptureTracer.csproj -c Release -o /out --no-restore
 

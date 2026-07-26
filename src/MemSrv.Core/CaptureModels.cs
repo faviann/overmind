@@ -36,7 +36,13 @@ public sealed record CaptureObservationRequest(
 // Shared source facts.
 // ---------------------------------------------------------------------------
 
-public sealed record CaptureSource(string Harness, string? HarnessVersion, string? RecordType);
+public sealed record CaptureSource(
+    string Harness,
+    string? HarnessVersion,
+    string? RecordType,
+    string? Model = null,
+    string? Provider = null,
+    string? MaterialKind = null);
 public sealed record CaptureAdapter(string Name, string Version);
 public sealed record CaptureSourceTimestamp(string Raw, DateTimeOffset? Parsed);
 public sealed record CaptureRelationshipTarget(

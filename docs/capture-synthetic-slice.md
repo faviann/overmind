@@ -1,8 +1,12 @@
-# Disabled synthetic Codex capture slice
+# Disabled synthetic capture slice
 
 Issue #74 adds one deliberately narrow Phase-2 tracer bullet. It proves the
 capture ledger and authority boundaries; it is **not a production capture
 product**.
+
+Issue #75 moves its source interpretation and delivery loop behind the
+[harness-neutral adapter contract](capture-adapter-contract.md). The image
+still contains only the Codex synthetic adapter.
 
 ## Operator exercise
 
@@ -25,7 +29,7 @@ Without `--namespace`, the server routes the binding to
 an existing namespace with `--namespace`; the binding, not the request,
 determines the effective namespace and derived capture agent/session identity.
 
-The disabled OCI tracer is built separately from the server image:
+The disabled Codex OCI tracer is built separately from the server image:
 
 ```sh
 docker build -f Dockerfile.capture-tracer -t overmind-codex-capture-fixture .
@@ -76,6 +80,9 @@ writes and checkpoint movement, not reads.
 
 - No live Codex transcript discovery, watch, hook, scheduler, or catch-up.
 - No production adapter compatibility or supported capture installation.
+- Enrollment records a harness identity but does not select an adapter. The
+  disposable Claude conformance spike lives only in the test assembly and is
+  absent from this image and every release project.
 - No console/OIDC flow, complete router, queue product, or Claude delivery.
 - The existing deterministic never-store gate is applied before append, with a
   one-megabyte observation ceiling. For known credentials, the HTTP boundary

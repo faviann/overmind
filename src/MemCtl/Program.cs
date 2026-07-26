@@ -296,8 +296,8 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 FindOption(args, "--namespace"));
             Console.WriteLine($"enrolled {bindingUuid} stable_name={args[2]}");
             Console.WriteLine(
-                "LIMITATION: disabled non-production Codex synthetic capture only; " +
-                "no scheduler, hooks, scanner product, or supported capture adapter.");
+                "LIMITATION: disabled non-production synthetic capture seam only; " +
+                "no supported capture adapter, scheduler, hooks, or scanner product.");
             return 0;
 
         case "receipt":
@@ -357,7 +357,7 @@ static void Usage()
     Console.Error.WriteLine("memctl consumed <session_id>");
     Console.Error.WriteLine("memctl trace <session_id>");
     Console.Error.WriteLine(
-        "memctl capture enroll <stable_name> --harness codex --agent-id id " +
+        "memctl capture enroll <stable_name> --harness harness --agent-id id " +
         "--credential-file path [--namespace name]");
     Console.Error.WriteLine("memctl capture receipt <observation_uuid>");
 }

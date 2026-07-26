@@ -33,6 +33,7 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
 - Tests or refactors → `docs/testing.md`
 - Capture enrollment, ingestion, or operator receipt reads →
   `docs/capture-modules.md`
+- Capture adapters or fixture parsing → `docs/capture-adapter-contract.md`
 - Schema, retrieval, dependencies, or scope → `docs/design-rules.md`
 - Deployment or deployment configuration → `docs/deployment-contract.md`
 - Domain terminology or domain documentation → `CONTEXT.md` and

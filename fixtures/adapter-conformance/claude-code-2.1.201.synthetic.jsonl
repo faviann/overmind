@@ -1,0 +1,9 @@
+{"timestamp":"2026-06-01T10:00:00.000Z","version":"2.1.201.synthetic","type":"user","uuid":"claude_message_synthetic_1","message":{"role":"user","content":"Inspect the synthetic workspace."},"additiveFixtureField":"retained"}
+{"version":{"name":"2.1.201.synthetic"},"type":"assistant","uuid":"claude_message_synthetic_2","message":{"role":"assistant","model":"claude-synthetic-model","content":[{"type":"text","text":"The synthetic workspace is ready."}]}}
+{"version":"2.1.201.synthetic","type":"assistant","uuid":"claude_message_synthetic_3","message":{"role":"assistant","content":[{"type":"tool_use","id":"claude_call_synthetic_1","name":"shell","input":"{\"command\":\"pwd\"}","futureField":{"accepted":true}}]}}
+{"version":"2.1.201.synthetic","type":"user","uuid":"claude_message_synthetic_4","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"claude_call_synthetic_1","is_error":false,"content":[{"type":"text","text":"/synthetic/workspace"}]}]}}
+{"version":"2.1.201.synthetic","type":"user","uuid":"claude_message_synthetic_5","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"claude_call_synthetic_2","is_error":true,"content":"synthetic command failed"}]}}
+{"version":"2.1.201.synthetic","type":"system","subtype":"api_error","error":"synthetic turn failure","outcome":"failed"}
+{"version":"2.1.201.synthetic","type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","outcome":"succeeded","summary":"Synthetic compacted context.","beforeTokens":120,"afterTokens":40}}
+{"version":"2.1.201.synthetic","type":"system","subtype":"subagent_start","agentId":"claude_child_synthetic_1","agentType":"explorer","spawnedBy":"claude_call_synthetic_spawn","parentSessionId":"claude_parent_synthetic_1"}
+{"version":"2.1.201.synthetic","type":"future_transcript_record","uuid":"claude_future_synthetic_1","syntheticValue":"preserve me"}

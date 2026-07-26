@@ -9,7 +9,9 @@ namespace MemSrv.Core;
 /// Append-only operator configuration for one binding's prospective routes.
 /// Replacing policy inserts a new version; established streams are never edited.
 /// </summary>
-public sealed class CaptureRoutePolicyStore(string connectionString)
+public sealed class CaptureRoutePolicyStore(
+    string connectionString,
+    NeverStoreGate neverStore)
 {
     public static string NormalizeRemoteForPolicy(string value) =>
         CaptureRouteResolver.NormalizeRemote(value)
@@ -23,7 +25,9 @@ public sealed class CaptureRoutePolicyStore(string connectionString)
         CaptureRoutingPolicy policy,
         CancellationToken cancellationToken = default)
     {
+        CaptureLedger.RequireSafetyConfigured(neverStore);
         CaptureLedger.Require(stableName, nameof(stableName));
+        AssertPolicySafe(policy);
         ValidatePolicy(policy);
 
         await using var connection = new NpgsqlConnection(connectionString);
@@ -83,6 +87,20 @@ public sealed class CaptureRoutePolicyStore(string connectionString)
             }, transaction);
         await transaction.CommitAsync(cancellationToken);
         return policyUuid;
+    }
+
+    private void AssertPolicySafe(CaptureRoutingPolicy policy)
+    {
+        foreach (string value in policy.AllowedRepositoryPatterns
+                     .Concat(policy.RemoteOverrides.SelectMany(item =>
+                         new[] { item.NormalizedRemote, item.Target }))
+                     .Concat(policy.DirectoryRoutes.SelectMany(item =>
+                         new[] { item.Directory, item.Target }))
+                     .Concat(policy.SpecialNamespaces.SelectMany(item =>
+                         new[] { item.Alias, item.Namespace })))
+        {
+            neverStore.AssertAllowed(value);
+        }
     }
 
     private static void ValidatePolicy(CaptureRoutingPolicy policy)

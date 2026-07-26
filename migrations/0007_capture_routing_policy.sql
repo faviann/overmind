@@ -19,11 +19,8 @@ CREATE TRIGGER capture_route_policies_immutable
 BEFORE UPDATE OR DELETE ON capture_route_policies
 FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 
--- The provisional enrollment-time route is superseded by prospective policy.
--- Existing streams already carry their fixed effective route.
-UPDATE capture_source_bindings
-SET route_namespace = NULL,
-    allowed_namespaces = ARRAY['capture/unscoped'];
+-- Legacy enrollment route columns are preserved for compatibility. Capture
+-- routing authority ignores them in favor of policy and established streams.
 
 ALTER TABLE capture_observations
   ADD COLUMN route_evidence JSONB;

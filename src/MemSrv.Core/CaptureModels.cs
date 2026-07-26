@@ -31,8 +31,7 @@ public sealed record CaptureObservationRequest(
     CaptureAdapter Adapter,
     JsonElement SourcePayload,
     IReadOnlyList<CaptureEvent> Events,
-    CaptureRouteEvidence? RouteEvidence = null,
-    string? Namespace = null);
+    CaptureRouteEvidence? RouteEvidence = null);
 
 // ---------------------------------------------------------------------------
 // Shared source facts.
@@ -223,8 +222,7 @@ public sealed record CaptureObservationCommand(
     CaptureAdapter Adapter,
     JsonElement SourcePayload,
     IReadOnlyList<CaptureEvent> Events,
-    CaptureRouteEvidence? RouteEvidence,
-    string? NamespaceClaim)
+    CaptureRouteEvidence? RouteEvidence)
 {
     public static CaptureObservationCommand FromRequest(CaptureObservationRequest request) =>
         new(
@@ -237,8 +235,7 @@ public sealed record CaptureObservationCommand(
             request.Adapter,
             request.SourcePayload,
             request.Events,
-            request.RouteEvidence,
-            request.Namespace);
+            request.RouteEvidence);
 }
 
 /// <summary>

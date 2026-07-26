@@ -344,7 +344,9 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 remoteOverrides,
                 directoryRoutes,
                 specialNamespaces);
-            Guid policyUuid = await new CaptureRoutePolicyStore(options.ConnectionString)
+            Guid policyUuid = await new CaptureRoutePolicyStore(
+                    options.ConnectionString,
+                    new NeverStoreGate(options.NeverStorePath))
                 .ReplaceAsync(args[2], policy);
             Console.WriteLine($"capture route policy {policyUuid} binding={args[2]}");
             return 0;

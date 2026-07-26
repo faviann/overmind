@@ -1046,6 +1046,23 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal("fallback", receipt.GetProperty("routeBasis").GetString());
     }
 
+    [Fact]
+    public async Task OperatorCannotPersistSyntheticSecretInCaptureRoutePolicy()
+    {
+        string binding = $"codex-policy-safety-{Guid.NewGuid():N}";
+        string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
+        await EnrollAsync(binding, CaptureCredential());
+
+        var result = await RunMemCtlForResultAsync(
+            null,
+            "capture", "route-policy", binding,
+            "--special-namespace", $"{seededSyntheticSecret}=homelab");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("never-store", result.Stderr);
+        Assert.DoesNotContain(seededSyntheticSecret, result.Stderr);
+    }
+
     [Theory]
     [InlineData("reserved=memory-system", "Reserved namespace")]
     [InlineData("missing=does-not-exist", "must already exist")]

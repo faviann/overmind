@@ -40,8 +40,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 command.Adapter,
                 command.SourcePayload,
                 command.Events,
-                command.RouteEvidence,
-                command.NamespaceClaim),
+                command.RouteEvidence),
             CaptureLedger.JsonOptions);
         string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
@@ -414,8 +413,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureAdapter Adapter,
         JsonElement SourcePayload,
         IReadOnlyList<CaptureEvent> Events,
-        CaptureRouteEvidence? RouteEvidence,
-        string? NamespaceClaim);
+        CaptureRouteEvidence? RouteEvidence);
 
     private sealed class ScanAccumulator(string ruleSetVersion)
     {

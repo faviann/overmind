@@ -107,6 +107,11 @@ internal static class TestProcessRunner
             TimeSpan.FromSeconds(60),
             "CodexCaptureTracer");
 
+    public static Process StartCaptureTracer(
+        IReadOnlyDictionary<string, string> environment) =>
+        Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
+        ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
+
     private static ProcessStartInfo CreateStartInfo(
         string apphostPath, IReadOnlyList<string> args, IReadOnlyDictionary<string, string> environment)
     {

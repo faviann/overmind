@@ -18,6 +18,8 @@ Source interpretation before this spine is described by the
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
+| `ICaptureRuntimeState` | `ReadAsync`, `ClaimAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
+| `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
 
 `CaptureLedger` is internal: the single reader over the durable capture ledger
 rows — observations, events, relationships — that ingestion and operator reads
@@ -76,15 +78,33 @@ canonical event, that event's relationships). `memctl` serializes them and does
 nothing else. Reads use already-sanitized durable rows and do not require
 scanner configuration.
 
+**`ICaptureRuntimeState`** — one durable local progress boundary. A claim
+atomically records the verified transcript prefix, advances `enqueuedThrough`,
+and adds one retryable queue item. The item contains the capture source stream,
+deterministic transcript/position/byte-range/prefix locator evidence, source
+position, and the redacted-safe candidate observation. It never stores the raw
+transcript record. Last known server receipt is separate stream state rather
+than queue or locator identity; request and delivery-batch IDs do not appear.
+`FileCaptureRuntimeState` implements the transaction as a flushed complete
+snapshot followed by an atomic rename, under a process-shared lock file.
+
+**`CodexCaptureClaimer`** — verifies the previously recorded append-only prefix
+against the read-only transcript, defers an unterminated final JSONL record,
+adapts a completed record, runs the local safety boundary, and only then calls
+the durable claim transaction. Its locator identity binds transcript identity,
+source position, byte range and record digest, plus the new verified-prefix
+evidence.
+
 ## Where the gate runs
 
-The disabled runtime (`CaptureAdapters.DisabledCaptureRuntime`) crosses the same
-`NeverStoreGate` before an observation leaves the tracer process, and the server
-crosses it again independently before canonical append. There is no local
-durable queue in this slice, so "scan before durable local persistence" means
-"scan before the observation is emitted". Both sides use the same governed rule
-semantics because both construct the gate from the same configuration; there is
-no second scanner implementation.
+The Codex claimer crosses the same `NeverStoreGate` before a candidate enters
+the local durable queue. The existing disabled delivery runtime scans the
+original observation again before it leaves the tracer process, and the server
+crosses the gate independently before canonical append. All three use the same
+governed rule semantics because they construct the same gate implementation;
+there is no second scanner implementation. Local candidate sanitization
+evidence is not canonical server scan provenance: the server remains the sole
+author of the canonical `scan_*` columns when delivery occurs.
 
 The two sides do different things with the result. The runtime calls exactly two
 gate methods — `AssertObservationWithinBudget` and `ScanJson` — and **refuses on

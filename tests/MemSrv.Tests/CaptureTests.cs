@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CaptureAdapters;
 using Dapper;
 using MemSrv.Core;
 using MemSrv.Server;
@@ -541,7 +542,8 @@ public sealed class CaptureTests : HttpSeamTestBase
                     ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                     ["OVERMIND_CAPTURE_URL"] = _baseUrl,
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath
+                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                    ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
                 });
             Assert.Equal(0, enabled.ExitCode);
             var receipts = enabled.Stdout.Split(
@@ -671,16 +673,27 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Equal(
                 JsonValueKind.Null,
                 canonicalRelationship.GetProperty("target").GetProperty("sourceStreamUuid").ValueKind);
+            CaptureRuntimeStreamState localStream = Assert.Single(
+                (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
+                    .ReadAsync()).Streams);
+            Assert.Equal(2, localStream.EnqueuedThrough);
+            Assert.Equal(3, localStream.Queue.Count);
+            Assert.Equal(2, localStream.LastServerReceipt?.SourcePosition);
+            Assert.Equal("new", localStream.LastServerReceipt?.Status);
+            Assert.Equal(
+                receipts[2].GetProperty("observationUuid").GetGuid(),
+                localStream.LastServerReceipt?.ObservationUuid);
             Assert.Contains("LIMITATION:", enabled.Stderr);
         }
         finally
         {
             File.Delete(fixturePath);
+            DeleteRuntimeState(fixturePath);
         }
     }
 
     [Fact]
-    public async Task ByteRangeRetryConflictsWhenExactFixtureBytesChangeWithoutChangingJson()
+    public async Task RuntimeStopsWhenVerifiedFixtureBytesChangeWithoutChangingJson()
     {
         var captureKey = CaptureCredential();
         await EnrollAsync($"codex-byte-identity-{Guid.NewGuid():N}", captureKey);
@@ -716,9 +729,9 @@ public sealed class CaptureTests : HttpSeamTestBase
 
             await File.WriteAllTextAsync(fixturePath, changedBytes, new UTF8Encoding(false));
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(1, conflict.ExitCode);
+            Assert.Equal(4, conflict.ExitCode);
             Assert.Empty(conflict.Stdout);
-            Assert.Contains("HTTP 409", conflict.Stderr);
+            Assert.Contains("previously verified prefix changed", conflict.Stderr);
 
             string afterConflict = await RunMemCtlAsync(
                 "capture", "receipt", observationUuid.ToString());
@@ -727,11 +740,12 @@ public sealed class CaptureTests : HttpSeamTestBase
         finally
         {
             File.Delete(fixturePath);
+            DeleteRuntimeState(fixturePath);
         }
     }
 
     [Fact]
-    public async Task ByteRangeRetryConflictsWhenOnlyJsonlSeparatorsChange()
+    public async Task RuntimeStopsWhenOnlyVerifiedJsonlSeparatorsChange()
     {
         var captureKey = CaptureCredential();
         await EnrollAsync($"codex-separator-identity-{Guid.NewGuid():N}", captureKey);
@@ -756,9 +770,9 @@ public sealed class CaptureTests : HttpSeamTestBase
             string crlfFixture = fixture.Replace("\n", "\r\n", StringComparison.Ordinal);
             await File.WriteAllTextAsync(fixturePath, crlfFixture, new UTF8Encoding(false));
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(1, conflict.ExitCode);
+            Assert.Equal(4, conflict.ExitCode);
             Assert.Empty(conflict.Stdout);
-            Assert.Contains("HTTP 409", conflict.Stderr);
+            Assert.Contains("previously verified prefix changed", conflict.Stderr);
             Assert.Equal(
                 beforeConflict,
                 await RunMemCtlAsync("capture", "receipt", observationUuid.ToString()));
@@ -766,6 +780,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         finally
         {
             File.Delete(fixturePath);
+            DeleteRuntimeState(fixturePath);
         }
     }
 
@@ -1456,8 +1471,21 @@ public sealed class CaptureTests : HttpSeamTestBase
                 ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                 ["OVERMIND_CAPTURE_URL"] = _baseUrl,
                 ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                ["OVERMIND_CODEX_FIXTURE"] = fixturePath
+                ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
             });
+
+    private static string RuntimeStateDirectory(string fixturePath) =>
+        fixturePath + ".overmind-state";
+
+    private static void DeleteRuntimeState(string fixturePath)
+    {
+        string directory = RuntimeStateDirectory(fixturePath);
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
 
     private static object Observation(
         string sourceSessionId, long position, string nativeId, string message) => new

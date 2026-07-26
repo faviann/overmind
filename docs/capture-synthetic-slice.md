@@ -57,6 +57,7 @@ The disabled Codex OCI tracer is built separately from the server image:
 ```sh
 docker build -f Dockerfile.capture-tracer -t overmind-codex-capture-fixture .
 docker run --rm \
+  -v overmind-codex-capture-state:/state \
   -e OVERMIND_CODEX_CAPTURE_ENABLE=synthetic-non-production \
   -e OVERMIND_CAPTURE_URL=http://overmind:8080 \
   -e OVERMIND_CAPTURE_CREDENTIAL \
@@ -67,6 +68,17 @@ It defaults to the baked synthetic three-record JSONL fixture.
 `OVERMIND_CODEX_FIXTURE` may explicitly select another synthetic fixture for
 non-production tests. The exact-value enable gate and strict three-record
 rollout-schema validation still apply.
+
+Before delivery, each completed record is locally scanned and claimed in the
+single writable directory selected by `OVERMIND_CAPTURE_STATE_DIR` (the image
+default is `/state`). Mount that path as a durable volume. The flushed,
+atomically replaced state distinguishes verified-prefix evidence,
+`enqueuedThrough`, retryable queued responsibility, and the last server receipt
+known locally. A queue item retains only its capture source stream,
+deterministic transcript/position/byte-range/prefix locator evidence, source
+position, and redacted-safe candidate observation; the source JSONL remains the
+only raw transcript archive. An unterminated final line remains wholly
+unclaimed.
 
 The fixture uses representative persisted Codex rollout records shaped as
 `{timestamp,type,payload}`: a nested `message`/`input_text`, a
@@ -106,7 +118,8 @@ writes and checkpoint movement, not reads.
 - Enrollment records a harness identity but does not select an adapter. The
   disposable Claude conformance spike lives only in the test assembly and is
   absent from this image and every release project.
-- No console/OIDC flow, queue product, or Claude delivery.
+- No console/OIDC flow, queue service, or Claude delivery. The local durable
+  claim file is runtime state, not a second queue product or transcript archive.
 - The existing deterministic never-store gate is applied before append, with a
   one-megabyte observation ceiling. For known credentials, the HTTP boundary
   rejects an oversized request before full JSON deserialization; unknown

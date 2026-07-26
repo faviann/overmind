@@ -17,6 +17,9 @@ if (!string.Equals(
 string endpoint = Required("OVERMIND_CAPTURE_URL").TrimEnd('/');
 string credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
 string fixturePath = Required("OVERMIND_CODEX_FIXTURE");
+string stateDirectory =
+    Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_STATE_DIR")
+    ?? fixturePath + ".overmind-state";
 const string sessionId = "codex-synthetic-rollout-v1";
 
 // Fail closed before any source material is read: a tracer whose rule set is
@@ -78,17 +81,59 @@ if (!string.Equals(
 
 try
 {
-    var receipts = await DisabledCaptureRuntime.RunFixtureAsync(
+    var runtimeState = new FileCaptureRuntimeState(stateDirectory);
+    await CodexCaptureClaimer.ClaimCompletedAsync(
         new CodexJsonlAdapter(),
         fixturePath,
         sessionId,
+        runtimeState,
+        safetyGate);
+
+    CaptureRuntimeStreamState stream = (await runtimeState.ReadAsync()).Streams.Single(value =>
+        string.Equals(value.SourceStream, sessionId, StringComparison.Ordinal));
+    await DisabledCaptureRuntime.RunClaimedFixtureAsync(
+        new CodexJsonlAdapter(),
+        fixturePath,
+        sessionId,
+        stream.Queue,
         new Uri(endpoint, UriKind.Absolute),
         credential,
-        safetyGate);
-    foreach (string receipt in receipts)
-    {
-        Console.WriteLine(receipt);
-    }
+        safetyGate,
+        async (receipt, queued, cancellationToken) =>
+        {
+            using JsonDocument document = JsonDocument.Parse(receipt);
+            JsonElement root = document.RootElement;
+            long receiptSourcePosition = root.GetProperty("sourcePosition").GetInt64();
+            if (receiptSourcePosition != queued.SourcePosition)
+            {
+                throw new InvalidDataException(
+                    $"Capture server receipt sourcePosition {receiptSourcePosition} " +
+                    $"does not match queued sourcePosition {queued.SourcePosition}.");
+            }
+            if (!root.TryGetProperty("status", out JsonElement statusElement)
+                || statusElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(statusElement.GetString()))
+            {
+                throw new InvalidDataException(
+                    "Capture server receipt status must be a nonblank string.");
+            }
+            if (!root.TryGetProperty(
+                    "observationUuid", out JsonElement observationUuidElement)
+                || !observationUuidElement.TryGetGuid(out Guid observationUuid))
+            {
+                throw new InvalidDataException(
+                    "Capture server receipt observationUuid must be a valid UUID.");
+            }
+            await runtimeState.RecordServerReceiptAsync(
+                sessionId,
+                new CaptureServerReceiptState(
+                    receiptSourcePosition,
+                    queued.DeterministicLocatorEvidence.Identity,
+                    statusElement.GetString()!,
+                    observationUuid),
+                cancellationToken);
+            Console.WriteLine(receipt);
+        });
 }
 catch (CaptureDeliveryException ex)
 {
@@ -104,6 +149,16 @@ catch (SafetyConfigurationException ex)
 {
     Console.Error.WriteLine(ex.Message);
     return 3;
+}
+catch (CapturePrefixChangedException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    return 4;
+}
+catch (HttpRequestException ex)
+{
+    Console.Error.WriteLine($"Capture delivery failed: {ex.Message}");
+    return 1;
 }
 
 Console.Error.WriteLine(

@@ -1013,6 +1013,88 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ScheduledPackagedTracerReleasesFinalRecordOnlyAfterStableArchiveEvidence()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-archive-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-archive-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string activeDirectory = Path.Combine(transcriptRoot, "sessions", "2026", "07");
+        string archiveDirectory = Path.Combine(transcriptRoot, "archived_sessions");
+        string stateDirectory = Path.Combine(directory, "state");
+        string activePath = Path.Combine(activeDirectory, "session.jsonl");
+        string archivedPath = Path.Combine(archiveDirectory, "session.jsonl");
+        Directory.CreateDirectory(activeDirectory);
+        Directory.CreateDirectory(archiveDirectory);
+        string[] records = await File.ReadAllLinesAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+        await File.WriteAllTextAsync(
+            activePath,
+            records[0] + "\n" + records[1],
+            new UTF8Encoding(false));
+
+        using var process = TestProcessRunner.StartCaptureTracer(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "50",
+                ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+            });
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            JsonElement completedPrefix = await ReadTracerReceiptAsync(process);
+            Assert.Equal(0, completedPrefix.GetProperty("sourcePosition").GetInt64());
+            Guid sourceStreamUuid = completedPrefix.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid();
+
+            await Task.Delay(250);
+            CaptureRuntimeStreamState active = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(0, active.EnqueuedThrough);
+            Assert.Empty(active.Queue);
+
+            File.Move(activePath, archivedPath);
+            JsonElement terminal = await ReadTracerReceiptAsync(process);
+            Assert.Equal(1, terminal.GetProperty("sourcePosition").GetInt64());
+            Assert.Equal(
+                sourceStreamUuid,
+                terminal.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid());
+
+            CaptureRuntimeStreamState archived = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(1, archived.EnqueuedThrough);
+            Assert.Empty(archived.Queue);
+
+            string canonical = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                terminal.GetProperty("observationUuid").GetGuid().ToString());
+            Assert.Contains("\"kind\":\"tool_call\"", canonical);
+            Assert.Equal(
+                new CaptureLedgerMechanics(2, 2, 0, 1),
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            await stderr;
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ScheduledPackagedTracerRestartConvergesQueuedOutageWithoutAWakeup()
     {
         var captureKey = CaptureCredential();

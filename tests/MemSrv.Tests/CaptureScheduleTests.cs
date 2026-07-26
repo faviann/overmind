@@ -168,6 +168,69 @@ public sealed class CaptureScheduleTests
         }
     }
 
+    [Fact]
+    public void MovingAConfiguredSessionIntoTheArchivePreservesIdentityAndProvesTerminality()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-archive-discovery-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "07");
+        string archive = Path.Combine(root, "archived_sessions");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string activePath = Path.Combine(sessions, "session.jsonl");
+        string archivedPath = Path.Combine(archive, "session.jsonl");
+        File.WriteAllText(activePath, "{}");
+
+        try
+        {
+            CodexTranscriptStream active =
+                Assert.Single(CodexTranscriptDiscovery.Enumerate(root));
+            Assert.False(active.TerminalAtEndOfFile);
+
+            File.Move(activePath, archivedPath);
+            CodexTranscriptStream archived =
+                Assert.Single(CodexTranscriptDiscovery.Enumerate(root));
+
+            Assert.True(archived.TerminalAtEndOfFile);
+            Assert.Equal(active.SourceStream, archived.SourceStream);
+            Assert.Equal(active.TranscriptIdentity, archived.TranscriptIdentity);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DiscoveryRejectsAmbiguousOrSimultaneousSessionBasenames()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-archive-ambiguity-{Guid.NewGuid():N}");
+        string firstActive = Path.Combine(root, "sessions", "2026", "07", "session.jsonl");
+        string secondActive = Path.Combine(root, "sessions", "2026", "08", "session.jsonl");
+        string archived = Path.Combine(root, "archived_sessions", "session.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(firstActive)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(secondActive)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(archived)!);
+        File.WriteAllText(firstActive, "{}");
+        File.WriteAllText(secondActive, "{}");
+
+        try
+        {
+            Assert.Throws<InvalidDataException>(() =>
+                CodexTranscriptDiscovery.Enumerate(root));
+
+            File.Delete(secondActive);
+            File.WriteAllText(archived, "{}");
+            Assert.Throws<InvalidDataException>(() =>
+                CodexTranscriptDiscovery.Enumerate(root));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(80, 40, 0.25, 90)]
     [InlineData(150, 60, 0.75, 195)]

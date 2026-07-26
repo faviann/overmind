@@ -100,16 +100,25 @@ snapshot followed by an atomic rename, under a process-shared lock file.
 
 **`CodexCaptureClaimer`** — verifies the previously recorded append-only prefix
 against the read-only transcript, defers an unterminated final JSONL record,
-adapts a completed record, runs the local safety boundary, and only then calls
-the durable claim transaction. Its locator identity binds transcript identity,
-source position, byte range and record digest, plus the new verified-prefix
-evidence.
+and accepts that record only after newline completion or an explicit terminal
+flag from configured discovery. It adapts a terminal record, runs the local
+safety boundary, and only then calls the durable claim transaction. Its locator
+identity binds transcript identity, source position, byte range and record
+digest, plus the new verified-prefix evidence.
 
 **`CodexTranscriptDiscovery`, `CodexTranscriptScanCycle`,
 `CaptureRescanConfiguration`, and `CaptureRescanScheduler`** — enumerate every
 synthetic JSONL stream under the configured location at startup and afresh on
-each later cycle. A stream identity is stable for its absolute path and
-independent of enumeration order. The scan cycle isolates a stream that
+each later cycle. Ordinary configured files use their absolute path identity.
+Under the Codex-shaped `sessions/` and `archived_sessions/` subtrees, discovery
+uses the rollout's unique filename to retain one logical identity when a nested
+`sessions/YYYY/MM/DD/<filename>` rollout moves to the flat
+`archived_sessions/<filename>` location, and marks only that flat archived
+location terminal at EOF. Simultaneous active/archive copies or two active
+rollouts with the same filename are rejected as ambiguous rather than silently
+conflated. The directory move is stable filesystem evidence; elapsed time and
+inactivity never establish terminality. Stream identity remains independent of
+enumeration order. The scan cycle isolates a stream that
 disappears or becomes unreadable after enumeration: that attempt advances
 nothing, later enumerated streams still run, and the next scheduled enumeration
 gets another chance. It does not catch cancellation. Configuration binds the

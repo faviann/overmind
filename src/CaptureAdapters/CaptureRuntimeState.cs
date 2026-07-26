@@ -361,7 +361,9 @@ public static class CodexCaptureClaimer
         string sourceStream,
         ICaptureRuntimeState state,
         NeverStoreGate safetyGate,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool terminalAtEndOfFile = false,
+        string? transcriptIdentity = null)
     {
         CaptureRuntimeSnapshot snapshot = await state.ReadAsync(cancellationToken);
         CaptureRuntimeStreamState? stream = snapshot.Streams.SingleOrDefault(value =>
@@ -370,8 +372,8 @@ public static class CodexCaptureClaimer
         VerifyKnownPrefix(sourceBytes, stream?.VerifiedPrefix, sourceStream);
 
         var records = await JsonlSourceReader.ReadAsync(
-            transcriptPath, sourceStream, terminalAtEndOfFile: false, cancellationToken);
-        string transcriptIdentity = Digest(
+            transcriptPath, sourceStream, terminalAtEndOfFile, cancellationToken);
+        transcriptIdentity ??= Digest(
             Encoding.UTF8.GetBytes(Path.GetFullPath(transcriptPath)));
         if (stream is not null
             && !string.Equals(

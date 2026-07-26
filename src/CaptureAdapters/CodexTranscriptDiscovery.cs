@@ -3,7 +3,11 @@ using System.Text;
 
 namespace CaptureAdapters;
 
-public sealed record CodexTranscriptStream(string Path, string SourceStream);
+public sealed record CodexTranscriptStream(
+    string Path,
+    string SourceStream,
+    bool TerminalAtEndOfFile = false,
+    string? TranscriptIdentity = null);
 
 /// <summary>
 /// Enumerates the configured synthetic Codex transcript location afresh for
@@ -32,20 +36,60 @@ public static class CodexTranscriptDiscovery
                 $"Configured Codex transcript location '{fullLocation}' does not exist.");
         }
 
-        return paths
+        CodexTranscriptStream[] streams = paths
             .Select(Path.GetFullPath)
             .OrderBy(path => path, StringComparer.Ordinal)
-            .Select(path => new CodexTranscriptStream(path, SourceStreamFor(path)))
+            .Select(path => Describe(fullLocation, path))
             .ToArray();
+        if (streams
+            .GroupBy(stream => stream.TranscriptIdentity, StringComparer.Ordinal)
+            .Any(group => group.Count() > 1))
+        {
+            throw new InvalidDataException(
+                "Configured Codex transcript discovery contains ambiguous duplicate " +
+                "logical identities.");
+        }
+        return streams;
     }
 
-    private static string SourceStreamFor(string path)
+    private static CodexTranscriptStream Describe(string configuredLocation, string path)
     {
-        string digest = Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(path)))
-            .ToLowerInvariant();
-        return $"codex-synthetic-{digest[..24]}";
+        bool terminalAtEndOfFile = false;
+        string identityPath = path;
+        if (Directory.Exists(configuredLocation))
+        {
+            string relative = Path.GetRelativePath(configuredLocation, path);
+            string[] parts = relative.Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+            bool activeSession = parts.Length > 1
+                && string.Equals(parts[0], "sessions", StringComparison.Ordinal);
+            bool archivedSession = parts.Length == 2
+                && string.Equals(
+                    parts[0], "archived_sessions", StringComparison.Ordinal);
+            if (activeSession || archivedSession)
+            {
+                terminalAtEndOfFile = archivedSession;
+                identityPath = string.Join(
+                    "\n",
+                    "codex-session-basename/v1",
+                    configuredLocation,
+                    Path.GetFileName(path));
+            }
+        }
+
+        string digest = Digest(identityPath);
+        return new CodexTranscriptStream(
+            path,
+            $"codex-synthetic-{digest[..24]}",
+            terminalAtEndOfFile,
+            digest);
     }
+
+    private static string Digest(string identityPath)
+        => Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(identityPath)))
+            .ToLowerInvariant();
 }
 
 /// <summary>

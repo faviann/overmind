@@ -79,6 +79,17 @@ before the next delay begins, so cycles never overlap. New files and completed
 appends are discovered without a hook; endpoint failures stay durably queued
 and are retried by later cycles or process restart.
 
+The configured root may model Codex's filesystem lifecycle with nested active
+rollouts at `sessions/YYYY/MM/DD/<filename>.jsonl` and flat archived rollouts
+at `archived_sessions/<filename>.jsonl`. While a file is under `sessions/`, a
+valid final record without a newline remains active and unclaimed across any
+number of scans. Moving that same uniquely named file to the flat archive is
+explicit stable terminality evidence: discovery preserves its logical
+stream/transcript identity and permits the ordinary claimer and delivery path
+to process the final record. A simultaneous active/archive copy or ambiguous
+duplicate filename is rejected. No elapsed-time or inactivity heuristic is
+used.
+
 Before delivery, each completed record is locally scanned and claimed in the
 single writable directory selected by `OVERMIND_CAPTURE_STATE_DIR` (the image
 default is `/state`). Mount that path as a durable volume. The flushed,
@@ -90,15 +101,15 @@ match it. A queue item retains only its capture source stream,
 deterministic transcript/position/byte-range/prefix locator evidence, source
 position, and redacted-safe candidate observation; the source JSONL remains the
 only raw transcript archive. An unterminated final line remains wholly
-unclaimed.
+unclaimed unless configured archive placement proves the stream terminal.
 
 The fixture uses representative persisted Codex rollout records shaped as
 `{timestamp,type,payload}`: a nested `message`/`input_text`, a
 `function_call` with JSON-string arguments, and a `function_call_output`.
 Rollout records do not invent a per-record session ID; this disabled adapter
 uses one stable synthetic source session in one-shot mode and a stable
-path-derived source stream per scheduled file, while capture bindings isolate
-installations. It sends ordered observations to
+logical-path-derived source stream per scheduled file, while capture bindings
+isolate installations. It sends ordered observations to
 `POST /capture/v1/observations`.
 
 Delivery always chooses the earliest unresolved durable responsibility. A

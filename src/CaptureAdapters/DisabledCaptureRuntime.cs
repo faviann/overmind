@@ -38,13 +38,15 @@ public static class DisabledCaptureRuntime
         string credential,
         NeverStoreGate safetyGate,
         Func<string, CaptureRuntimeQueueItem, CancellationToken, Task> persistReceiptAsync,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool terminalAtEndOfFile = false,
+        string? transcriptIdentity = null)
     {
         var sourceRecords = await JsonlSourceReader.ReadAsync(
-            fixturePath, sourceSessionId, terminalAtEndOfFile: false, cancellationToken);
+            fixturePath, sourceSessionId, terminalAtEndOfFile, cancellationToken);
         var recordsByPosition = sourceRecords.ToDictionary(record => record.SourcePosition);
         byte[] sourceBytes = await File.ReadAllBytesAsync(fixturePath, cancellationToken);
-        string transcriptIdentity = Digest(
+        transcriptIdentity ??= Digest(
             Encoding.UTF8.GetBytes(Path.GetFullPath(fixturePath)));
         using var client = new HttpClient();
         client.DefaultRequestHeaders.Authorization =

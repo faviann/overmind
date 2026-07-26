@@ -59,7 +59,9 @@ async Task ScanAndDeliverAsync(
         transcript.SourceStream,
         runtimeState,
         safetyGate,
-        cancellationToken);
+        cancellationToken,
+        transcript.TerminalAtEndOfFile,
+        transcript.TranscriptIdentity);
 
     CaptureRuntimeStreamState? stream = (await runtimeState.ReadAsync(cancellationToken))
         .Streams.SingleOrDefault(value =>
@@ -86,7 +88,9 @@ async Task ScanAndDeliverAsync(
                 transcript.SourceStream, receiptState, token);
             Console.WriteLine(receipt);
         },
-        cancellationToken);
+        cancellationToken,
+        transcript.TerminalAtEndOfFile,
+        transcript.TranscriptIdentity);
 }
 
 if (scheduled)

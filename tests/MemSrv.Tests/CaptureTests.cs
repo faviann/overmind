@@ -924,7 +924,8 @@ public sealed class CaptureTests : HttpSeamTestBase
         var options = RuntimeOptions();
         await new CaptureRoutePolicyStore(
                 options.ConnectionString,
-                new NeverStoreGate(options.NeverStorePath))
+                new NeverStoreGate(
+                    options.NeverStorePath, options.NeverStoreLiteralsPath))
             .ReplaceAsync(
                 binding,
                 new CaptureRoutingPolicy(
@@ -1307,6 +1308,36 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.DoesNotContain(seededSyntheticSecret, result.Stderr);
     }
 
+    [Fact]
+    public async Task CaptureRoutePolicyHonorsOperatorProvisionedLiterals()
+    {
+        string binding = $"codex-policy-literal-safety-{Guid.NewGuid():N}";
+        const string configuredLiteral = "synthetic-route-policy-literal-0001";
+        string literalsPath = Path.Combine(
+            Path.GetTempPath(), $"never-store-route-literals-{Guid.NewGuid():N}.txt");
+        await File.WriteAllTextAsync(literalsPath, configuredLiteral);
+        await EnrollAsync(binding, CaptureCredential());
+
+        try
+        {
+            var result = await RunMemCtlForResultAsync(
+                new Dictionary<string, string>
+                {
+                    ["MEMSRV_NEVER_STORE_LITERALS_PATH"] = literalsPath
+                },
+                "capture", "route-policy", binding,
+                "--special-namespace", $"{configuredLiteral}=homelab");
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains("never-store", result.Stderr);
+            Assert.DoesNotContain(configuredLiteral, result.Stderr);
+        }
+        finally
+        {
+            File.Delete(literalsPath);
+        }
+    }
+
     [Theory]
     [InlineData("reserved=memory-system", "Reserved namespace")]
     [InlineData("reserved-family=capture/private", "Reserved namespace")]
@@ -1359,7 +1390,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             "aws-access-key-id",
             scan.GetProperty("ruleIds").EnumerateArray().Select(item => item.GetString()));
         Assert.Contains(
-            "secret",
+            "provider_token",
             scan.GetProperty("categories").EnumerateArray().Select(item => item.GetString()));
         Assert.Equal(8, scan.GetProperty("redactionCount").GetInt32());
 

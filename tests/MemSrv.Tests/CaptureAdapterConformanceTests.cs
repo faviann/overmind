@@ -201,7 +201,8 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                     _root, "fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl"),
                 $"claude-spike-session-{Guid.NewGuid():N}",
                 new Uri(_baseUrl),
-                credential);
+                credential,
+                SafetyGate());
             Assert.Equal(9, receipts.Count);
 
             var canonical = receipts.Select(receipt =>

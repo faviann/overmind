@@ -1,4 +1,5 @@
 using CaptureAdapters;
+using MemSrv.Core;
 using System.Text.Json;
 
 const string EnableValue = "synthetic-non-production";
@@ -17,6 +18,20 @@ string endpoint = Required("OVERMIND_CAPTURE_URL").TrimEnd('/');
 string credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
 string fixturePath = Required("OVERMIND_CODEX_FIXTURE");
 const string sessionId = "codex-synthetic-rollout-v1";
+
+// Fail closed before any source material is read: a tracer whose rule set is
+// missing, empty, invalid, duplicated, unsupported, or un-loadable refuses to
+// run and says why on stderr. Diagnostics never reach stdout.
+var captureOptions = Configuration.Load(Directory.GetCurrentDirectory());
+var safetyGate = new NeverStoreGate(
+    captureOptions.NeverStorePath, captureOptions.NeverStoreLiteralsPath);
+if (!safetyGate.IsConfigured)
+{
+    Console.Error.WriteLine(
+        $"Codex capture tracer refuses to run: {safetyGate.FailureReason}. " +
+        "Capture is unhealthy until the never-store rule set loads.");
+    return 3;
+}
 
 var sourceRecords = await JsonlSourceReader.ReadAsync(
     fixturePath, sessionId, terminalAtEndOfFile: true);
@@ -68,7 +83,8 @@ try
         fixturePath,
         sessionId,
         new Uri(endpoint, UriKind.Absolute),
-        credential);
+        credential,
+        safetyGate);
     foreach (string receipt in receipts)
     {
         Console.WriteLine(receipt);
@@ -78,6 +94,16 @@ catch (CaptureDeliveryException ex)
 {
     Console.Error.WriteLine(ex.Message);
     return 1;
+}
+catch (SafetyScanException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    return 3;
+}
+catch (SafetyConfigurationException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    return 3;
 }
 
 Console.Error.WriteLine(

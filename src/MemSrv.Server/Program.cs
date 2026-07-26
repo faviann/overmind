@@ -27,7 +27,7 @@ static async Task RunStdioAsync(MemSrvOptions options)
 
     builder.Services.AddSingleton(options);
     builder.Services.AddSingleton(MemoryContext.FromOptions(options));
-    builder.Services.AddSingleton(_ => new NeverStoreGate(options.NeverStorePath));
+    builder.Services.AddSingleton(_ => new NeverStoreGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
     builder.Services.AddSingleton(provider =>
         new MemoryService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
 

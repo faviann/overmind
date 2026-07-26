@@ -14,6 +14,11 @@ public sealed class MemSrvOptions
     public string[] AllowedNamespaces { get; set; } = [];
     public string NeverStorePath { get; set; } = "config/never_store.yaml";
 
+    // Operator-owned exact credential values, one per line, outside the
+    // tracked rule file so a real value never enters git. Absent or empty is
+    // valid and is NOT a fail-closed condition; only the rule file must load.
+    public string NeverStoreLiteralsPath { get; set; } = "";
+
     // HTTP transport (default mode). AgentKeysPath points at the
     // Ansible-provisioned bearer-key YAML; HttpUrl is the Kestrel bind address.
     public string AgentKeysPath { get; set; } = "";

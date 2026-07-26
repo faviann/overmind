@@ -982,7 +982,7 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         NpgsqlConnection? existingConnection = null,
         NpgsqlTransaction? transaction = null)
     {
-        var contentJson = neverStore.Redact(JsonSerializer.Serialize(content, _jsonOptions));
+        var contentJson = neverStore.RedactJson(JsonSerializer.Serialize(content, _jsonOptions));
         if (existingConnection is not null)
         {
             return await existingConnection.QuerySingleAsync<Guid>(

@@ -30,6 +30,11 @@ public static class Configuration
         options.AgentKeysPath = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_AGENT_KEYS_PATH"), options.AgentKeysPath);
         options.HttpUrl = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_HTTP_URL"), options.HttpUrl);
         options.Transport = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_TRANSPORT"), options.Transport);
+        options.NeverStorePath = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("MEMSRV_NEVER_STORE_PATH"), options.NeverStorePath);
+        options.NeverStoreLiteralsPath = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("MEMSRV_NEVER_STORE_LITERALS_PATH"),
+            options.NeverStoreLiteralsPath);
         return options;
     }
 

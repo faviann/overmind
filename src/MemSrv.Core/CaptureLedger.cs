@@ -14,13 +14,18 @@ internal static class CaptureLedger
 {
     internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    /// <summary>Capture refuses to run at all without a loaded never-store rule set.</summary>
+    /// <summary>
+    /// Capture refuses to run at all without a loaded never-store rule set.
+    /// Missing, empty, invalid, duplicated, unsupported, or un-loadable rule
+    /// configuration all arrive here, and all fail closed with the safe reason
+    /// the gate reported at load.
+    /// </summary>
     internal static void RequireSafetyConfigured(NeverStoreGate neverStore)
     {
         if (!neverStore.IsConfigured)
         {
-            throw new InvalidOperationException(
-                "Capture safety rules are missing or empty; capture fails closed.");
+            throw new SafetyConfigurationException(
+                neverStore.FailureReason ?? "the rule set could not be loaded");
         }
     }
 

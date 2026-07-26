@@ -14,6 +14,9 @@ FROM mcr.microsoft.com/dotnet/runtime:10.0
 WORKDIR /app
 COPY --from=build /out/ ./
 COPY fixtures/codex-synthetic.jsonl /app/fixtures/codex-synthetic.jsonl
+# The runtime crosses the same never-store gate the server does, before it
+# emits anything, and refuses to run without a loadable rule set.
+COPY config/ /app/config/
 ENV OVERMIND_CODEX_FIXTURE=/app/fixtures/codex-synthetic.jsonl
 LABEL org.opencontainers.image.description="DISABLED non-production synthetic Codex capture tracer"
 ENTRYPOINT ["dotnet", "/app/CodexCaptureTracer.dll"]

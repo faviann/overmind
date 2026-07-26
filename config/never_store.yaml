@@ -1,10 +1,167 @@
+# Governed never-store rule set (issue #76).
+#
+# Every rule is validated and compiled once at load with
+# RegexOptions.NonBacktracking and the versioned per-rule matcher timeout. A
+# rule needs a unique nonempty `id`, a `category` from the closed vocabulary
+# (private_key, auth_header, credential_url, provider_token, structured_field,
+# configured_credential), an integer `priority`, at least one literal
+# `prefilter` (comma-separated any-of, matched case-insensitively before the
+# matcher runs), a supported `matcher` (`regex` or `sensitive_field`), and a
+# `pattern`. Anything else fails closed at load.
+#
+# A prefilter is an OPTIMISATION, never a filter: it gates whether the matcher
+# runs at all, so every alternative a pattern can match must contain one of its
+# prefilter literals — including the separator-less forms a `[_-]?` group
+# allows. Prefer a short covering stem ("key") over one literal per spelling
+# ("api_key,apikey,api-key"): each prefilter costs a full case-insensitive
+# scan of the leaf, so fewer, broader stems are both safer and cheaper.
+# SafetyGateTests.EveryPatternAlternativeIsReachableThroughItsPrefilter sweeps
+# every alternation path in this file and fails if one is unreachable.
+#
+# Overlap resolution: overlapping matches merge into one union span; the span
+# is attributed to the highest-priority rule among them, with ties broken by
+# the longest original match and then by rule id ordinal.
+#
+# Operator-provisioned exact credential values do NOT live here. They live in
+# the separate operator-owned file named by MEMSRV_NEVER_STORE_LITERALS_PATH,
+# one value per line, matched at the highest priority under the rule id
+# `operator-literal`. This file is tracked in git and must never contain a real
+# credential.
+#
+# Numeric scan budgets are versioned runtime constants, not configuration; see
+# docs/capture-safety-budgets.md.
+version: "never-store/2026-07-26.2"
+
 rules:
-  - name: aws-access-key-id
-    category: secret
-    pattern: '\bAKIA[0-9A-Z]{16}\b'
-  - name: env-assignment-secret
-    category: secret
-    pattern: '(?i)\b(password|passwd|secret|token|api[_-]?key)\s*=\s*[^ \r\n]+'
-  - name: bearer-token
-    category: secret
+  # --- private keys ----------------------------------------------------------
+  # An unterminated BEGIN marker redacts to the end of the leaf: a truncated
+  # key block is still key material.
+  - id: private-key-block
+    category: private_key
+    priority: 100
+    prefilter: "-----BEGIN"
+    matcher: regex
+    pattern: '-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----[\s\S]*?(-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----|$)'
+
+  # --- authentication headers and credential-bearing URLs --------------------
+  # Two forms. With a scheme keyword, eight credential characters are enough to
+  # be conclusive. Scheme-less headers are what opaque-token APIs emit, so they
+  # are covered too, but only for a run of at least sixteen credential-shaped
+  # characters — short status words ("pending", "not-granted") stay out.
+  - id: authorization-header
+    category: auth_header
+    priority: 96
+    prefilter: "authorization"
+    matcher: regex
+    pattern: '(?i)(proxy-)?authorization\s*[:=]\s*"?(?:(bearer|basic|token|apikey)\s+[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9._~+/=-]{16,})'
+
+  - id: credential-bearing-url
+    category: credential_url
+    priority: 94
+    prefilter: "://"
+    matcher: regex
+    pattern: '[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@"]+:[^\s/@"]+@[^\s/"]+'
+
+  - id: basic-auth-header
+    category: auth_header
+    priority: 92
+    prefilter: "basic "
+    matcher: regex
+    pattern: '(?i)\bbasic [A-Za-z0-9+/]{16,}={0,2}'
+
+  - id: bearer-token
+    category: auth_header
+    priority: 90
+    prefilter: "bearer"
+    matcher: regex
     pattern: '(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}'
+
+  # --- observed provider formats --------------------------------------------
+  # A small, versioned set chosen from tooling this installation actually sees.
+  # Review on upgrade; provider token formats drift.
+  - id: anthropic-api-key
+    category: provider_token
+    priority: 89
+    prefilter: "sk-ant-"
+    matcher: regex
+    pattern: '\bsk-ant-[A-Za-z0-9_-]{24,}'
+
+  - id: aws-access-key-id
+    category: provider_token
+    priority: 88
+    prefilter: "AKIA,ASIA"
+    matcher: regex
+    pattern: '\b(AKIA|ASIA)[0-9A-Z]{16}\b'
+
+  - id: github-token
+    category: provider_token
+    priority: 88
+    prefilter: "ghp_,gho_,ghu_,ghs_,ghr_"
+    matcher: regex
+    pattern: '\bgh[pousr]_[A-Za-z0-9]{36,}'
+
+  - id: github-fine-grained-token
+    category: provider_token
+    priority: 88
+    prefilter: "github_pat_"
+    matcher: regex
+    pattern: '\bgithub_pat_[A-Za-z0-9_]{20,}'
+
+  - id: gitlab-access-token
+    category: provider_token
+    priority: 88
+    prefilter: "glpat-"
+    matcher: regex
+    pattern: '\bglpat-[A-Za-z0-9_-]{20,}'
+
+  - id: openai-api-key
+    category: provider_token
+    priority: 87
+    prefilter: "sk-"
+    matcher: regex
+    pattern: '\bsk-(proj-)?[A-Za-z0-9_-]{24,}'
+
+  - id: slack-token
+    category: provider_token
+    priority: 88
+    prefilter: "xox"
+    matcher: regex
+    pattern: '\bxox[baprs]-[A-Za-z0-9-]{10,}'
+
+  - id: npm-access-token
+    category: provider_token
+    priority: 88
+    prefilter: "npm_"
+    matcher: regex
+    pattern: '\bnpm_[A-Za-z0-9]{36}'
+
+  - id: google-api-key
+    category: provider_token
+    priority: 88
+    prefilter: "AIza"
+    matcher: regex
+    pattern: '\bAIza[0-9A-Za-z_-]{35}'
+
+  # --- structured sensitive fields ------------------------------------------
+  # Applied to a structured property NAME; the whole leaf value is the span.
+  # Deliberately lower priority than every rule above, so a value that also
+  # matches a high-confidence rule reports that rule instead.
+  - id: sensitive-field-value
+    category: structured_field
+    priority: 50
+    prefilter: "pass,secret,key,token,authorization,credential,connection"
+    matcher: sensitive_field
+    pattern: '(?i)^([a-z0-9.-]*[_.-])?(password|passwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|authorization|private[_-]?key|secret[_-]?key|secret[_-]?access[_-]?key|credential|credentials|connection[_-]?string|session[_-]?key)$'
+
+  # Free-text assignment form for dotenv, CLI flags, and shell output, where
+  # there is no structure to walk. Requires a separator, so ordinary prose
+  # containing "token" or "secret" does not match. The optional closing quote
+  # before the separator covers serialized JSON/YAML/TOML that a tool PRINTED
+  # into the transcript — `{"password": "…"}` arrives as free text, with no
+  # structure for the sensitive_field matcher to walk.
+  - id: sensitive-assignment
+    category: structured_field
+    priority: 45
+    prefilter: "pass,secret,key,token,credential,connection"
+    matcher: regex
+    pattern: '(?i)(^|[^A-Za-z0-9_])([a-z0-9.-]*[_.-])?(secret[_-]?access[_-]?key|client[_-]?secret|connection[_-]?string|passphrase|password|passwd|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|session[_-]?key|credentials|credential|secret|token)["'']?\s*[:=]\s*("[^"\r\n]+"|''[^''\r\n]+''|[^\s,;)\]}"'']+)'

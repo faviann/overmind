@@ -38,7 +38,10 @@ assert that mechanism directly:
   UPDATE/DELETE, expect permission denied)
 - no DELETE granted on any table
 - never-store persistence absence for a seeded synthetic secret (fake
-  `AKIA...` pattern)
+  `AKIA...` pattern). The absence sweep is not satisfied by the canonical
+  table alone: it also covers the capture ledger tables, `traces`, `memories`,
+  the HTTP response body, `memctl` stdout/stderr, the out-of-process server's
+  stdout/stderr, and thrown exception messages
 - every memory row's `content_hash` is the valid server-computed SHA-256 of its
   content
 - migration-keyed test-template lifecycle: changing the migration fingerprint
@@ -49,6 +52,22 @@ assert that mechanism directly:
   grants. These are mechanical checks of the narrow disabled capture slice;
   routing, receipts, authorization, and retry behavior stay at the HTTP/memctl
   public seams.
+
+### Module-surface tests for the safety boundary
+
+The never-store gate's rule-set validation, deterministic overlap resolution,
+bounded decoding, and numeric scan budgets have no MCP tool and no `memctl`
+command, and the capture HTTP route's deliberate 1 MB transport cap sits far
+below every scanner budget except match count. `NeverStoreGate` and
+`CaptureIngestion` are therefore legitimate assertion seams for those
+mechanisms — they are public module surfaces documented in
+`docs/capture-modules.md`, not internals. Keep the end-to-end proof that the
+same gate governs real writes at the HTTP/`memctl`/tracer seams. Exercise the
+real 128 MiB and 64 MiB documented numbers, but inject a smaller
+`SafetyBudgets` where the mechanism rather than the number is under test, and
+keep the large cases in one class so only one is live at a time under the
+concurrent shards.
+
 Namespace isolation and private-memory invisibility are binding acceptance
 behaviors, but their seam is keyed MCP agents. Verify them through public
 searches and reads, not direct table assertions.

@@ -17,6 +17,12 @@ namespace MemSrv.Server;
 /// </summary>
 public static class HttpServerHost
 {
+    // A denial-of-service guard for the disabled tracer route, deliberately
+    // three orders of magnitude below the versioned 128 MiB scanner
+    // observation budget: an unauthenticated client must not be able to make
+    // the server allocate a scanner-sized buffer. See
+    // docs/capture-safety-budgets.md, "Why the transport cap is below the
+    // scanner limit".
     private const int CaptureRequestLimitBytes = 1_000_000;
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
@@ -33,7 +39,7 @@ public static class HttpServerHost
 
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(keyStore);
-        builder.Services.AddSingleton(_ => new NeverStoreGate(options.NeverStorePath));
+        builder.Services.AddSingleton(_ => new NeverStoreGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
         builder.Services.AddSingleton(provider =>
             new MemoryService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
         builder.Services.AddSingleton(_ => new CaptureAuthority(options.ConnectionString));

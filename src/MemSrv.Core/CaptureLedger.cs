@@ -49,7 +49,7 @@ internal static class CaptureLedger
                    o.source_timestamp_raw AS SourceTimestampRaw,
                    o.source_timestamp_parsed AS SourceTimestampParsed,
                    o.source::text AS SourceJson,
-                   o.route_evidence::text AS RouteEvidenceJson,
+                   COALESCE(o.route_evidence, 'null'::jsonb)::text AS RouteEvidenceJson,
                    o.adapter::text AS AdapterJson,
                    o.safe_source_payload::text AS SafeSourcePayloadJson,
                    o.scan_status AS ScanStatus,

@@ -31,9 +31,11 @@ Callers pass strings and get a binding uuid. Enrollment records a harness
 identity but does not select or ship an adapter.
 
 **`CaptureRoutePolicyStore`** — atomic, binding-scoped prospective policy
-replacement through an append-only version row. It normalizes route evidence,
-requires special aliases to resolve to existing non-reserved namespaces, and
-never edits an established stream.
+replacement through an append-only version row. It canonicalizes raw repository
+patterns, remote keys, directory paths, and repository targets for every caller,
+requires repository targets to match the binding's allowed patterns, requires
+special aliases to resolve to existing non-reserved namespaces, and never edits
+an established stream.
 
 **`CaptureAuthority`** — the only place a raw capture credential is compared.
 It applies the structural `mcap_` pre-check (a non-capture-form credential is

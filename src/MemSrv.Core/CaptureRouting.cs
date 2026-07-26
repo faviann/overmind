@@ -13,13 +13,6 @@ public sealed class CaptureRoutePolicyStore(
     string connectionString,
     NeverStoreGate neverStore)
 {
-    public static string NormalizeRemoteForPolicy(string value) =>
-        CaptureRouteResolver.NormalizeRemote(value)
-        ?? throw new ArgumentException($"Remote '{value}' is not a supported repository remote.");
-
-    public static string NormalizeDirectoryForPolicy(string value) =>
-        CaptureRouteResolver.NormalizeDirectoryForPolicy(value);
-
     public async Task<Guid> ReplaceAsync(
         string stableName,
         CaptureRoutingPolicy policy,
@@ -27,8 +20,10 @@ public sealed class CaptureRoutePolicyStore(
     {
         CaptureLedger.RequireSafetyConfigured(neverStore);
         CaptureLedger.Require(stableName, nameof(stableName));
+        var canonicalPolicy = CanonicalizePolicy(policy);
         AssertPolicySafe(policy);
-        ValidatePolicy(policy);
+        AssertPolicySafe(canonicalPolicy);
+        ValidatePolicy(canonicalPolicy);
 
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
@@ -41,7 +36,7 @@ public sealed class CaptureRoutePolicyStore(
             throw new InvalidOperationException($"Capture binding '{stableName}' does not exist.");
         }
 
-        foreach (var mapping in policy.SpecialNamespaces)
+        foreach (var mapping in canonicalPolicy.SpecialNamespaces)
         {
             if (mapping.Namespace.StartsWith("repo/", StringComparison.Ordinal))
             {
@@ -77,13 +72,13 @@ public sealed class CaptureRoutePolicyStore(
             new
             {
                 bindingUuid,
-                AllowedRepositoryPatterns = policy.AllowedRepositoryPatterns.ToArray(),
+                AllowedRepositoryPatterns = canonicalPolicy.AllowedRepositoryPatterns.ToArray(),
                 RemoteOverrides = JsonSerializer.Serialize(
-                    policy.RemoteOverrides, CaptureLedger.JsonOptions),
+                    canonicalPolicy.RemoteOverrides, CaptureLedger.JsonOptions),
                 DirectoryRoutes = JsonSerializer.Serialize(
-                    policy.DirectoryRoutes, CaptureLedger.JsonOptions),
+                    canonicalPolicy.DirectoryRoutes, CaptureLedger.JsonOptions),
                 SpecialNamespaces = JsonSerializer.Serialize(
-                    policy.SpecialNamespaces, CaptureLedger.JsonOptions)
+                    canonicalPolicy.SpecialNamespaces, CaptureLedger.JsonOptions)
             }, transaction);
         await transaction.CommitAsync(cancellationToken);
         return policyUuid;
@@ -93,7 +88,7 @@ public sealed class CaptureRoutePolicyStore(
     {
         foreach (string value in policy.AllowedRepositoryPatterns
                      .Concat(policy.RemoteOverrides.SelectMany(item =>
-                         new[] { item.NormalizedRemote, item.Target }))
+                         new[] { item.Remote, item.Target }))
                      .Concat(policy.DirectoryRoutes.SelectMany(item =>
                          new[] { item.Directory, item.Target }))
                      .Concat(policy.SpecialNamespaces.SelectMany(item =>
@@ -115,7 +110,7 @@ public sealed class CaptureRoutePolicyStore(
             policy.SpecialNamespaces.Select(item => item.Alias),
             "special namespace aliases");
         RequireUnique(
-            policy.RemoteOverrides.Select(item => item.NormalizedRemote),
+            policy.RemoteOverrides.Select(item => item.Remote),
             "remote override keys");
         RequireUnique(
             policy.DirectoryRoutes.Select(item => item.Directory),
@@ -135,13 +130,42 @@ public sealed class CaptureRoutePolicyStore(
                         $"Route target '{target}' does not name a configured special alias.");
                 }
             }
-            else if (!CaptureRouteResolver.TryRepositoryTarget(target, out _))
+            else if (!CaptureRouteResolver.TryRepositoryTarget(target, out string repository))
             {
                 throw new ArgumentException(
                     $"Route target '{target}' must be repo/owner/name or special:alias.");
             }
+            else if (!CaptureRouteResolver.IsRepositoryAllowed(policy, repository))
+            {
+                throw new ArgumentException(
+                    $"Repository route '{target}' is outside the binding's allowed repository patterns.");
+            }
         }
     }
+
+    private static CaptureRoutingPolicy CanonicalizePolicy(CaptureRoutingPolicy policy) =>
+        new(
+            policy.AllowedRepositoryPatterns
+                .Select(pattern => pattern.Trim().ToLowerInvariant())
+                .ToArray(),
+            policy.RemoteOverrides
+                .Select(item => new CaptureRouteOverride(
+                    CaptureRouteResolver.NormalizeRemote(item.Remote)
+                    ?? throw new ArgumentException(
+                        $"Remote '{item.Remote}' is not a supported repository remote."),
+                    CanonicalizeTarget(item.Target)))
+                .ToArray(),
+            policy.DirectoryRoutes
+                .Select(item => new CaptureDirectoryRoute(
+                    CaptureRouteResolver.NormalizeDirectoryForPolicy(item.Directory),
+                    CanonicalizeTarget(item.Target)))
+                .ToArray(),
+            policy.SpecialNamespaces.ToArray());
+
+    private static string CanonicalizeTarget(string target) =>
+        target.StartsWith("repo/", StringComparison.OrdinalIgnoreCase)
+            ? target.ToLowerInvariant()
+            : target;
 
     private static void RequireUnique(IEnumerable<string> values, string label)
     {
@@ -182,7 +206,7 @@ internal static class CaptureRouteResolver
             foreach (var rule in binding.RoutingPolicy.RemoteOverrides)
             {
                 if (string.Equals(
-                    remote.Value, rule.NormalizedRemote, StringComparison.Ordinal))
+                    remote.Value, rule.Remote, StringComparison.Ordinal))
                 {
                     return await ResolveTargetAsync(
                         connection, transaction, binding.RoutingPolicy, rule.Target, "override");
@@ -317,7 +341,7 @@ internal static class CaptureRouteResolver
         return parts.Length == 3;
     }
 
-    private static bool IsRepositoryAllowed(CaptureRoutingPolicy policy, string repository) =>
+    internal static bool IsRepositoryAllowed(CaptureRoutingPolicy policy, string repository) =>
         policy.AllowedRepositoryPatterns.Any(pattern =>
             Regex.IsMatch(
                 repository,

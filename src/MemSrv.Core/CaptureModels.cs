@@ -249,7 +249,7 @@ public sealed record CaptureBindingContext(
     byte[] ContentSignatureKey,
     CaptureRoutingPolicy RoutingPolicy);
 
-public sealed record CaptureRouteOverride(string NormalizedRemote, string Target);
+public sealed record CaptureRouteOverride(string Remote, string Target);
 public sealed record CaptureDirectoryRoute(string Directory, string Target);
 public sealed record CaptureSpecialNamespace(string Alias, string Namespace);
 public sealed record CaptureRoutingPolicy(

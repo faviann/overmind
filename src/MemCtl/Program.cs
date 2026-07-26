@@ -317,8 +317,8 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 {
                     var pair = ParseMapping(value, "--remote-override");
                     return new CaptureRouteOverride(
-                        CaptureRoutePolicyStore.NormalizeRemoteForPolicy(pair.Key),
-                        NormalizeRouteTarget(pair.Value));
+                        pair.Key,
+                        pair.Value);
                 })
                 .ToArray();
             var directoryRoutes = FindOptions(args, "--directory-route")
@@ -326,8 +326,8 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 {
                     var pair = ParseMapping(value, "--directory-route");
                     return new CaptureDirectoryRoute(
-                        CaptureRoutePolicyStore.NormalizeDirectoryForPolicy(pair.Key),
-                        NormalizeRouteTarget(pair.Value));
+                        pair.Key,
+                        pair.Value);
                 })
                 .ToArray();
             var specialNamespaces = FindOptions(args, "--special-namespace")
@@ -339,7 +339,6 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 .ToArray();
             var policy = new CaptureRoutingPolicy(
                 FindOptions(args, "--allow-repository")
-                    .Select(value => value.ToLowerInvariant())
                     .ToArray(),
                 remoteOverrides,
                 directoryRoutes,
@@ -392,11 +391,6 @@ static KeyValuePair<string, string> ParseMapping(string value, string option)
     return new KeyValuePair<string, string>(
         value[..separator].Trim(), value[(separator + 1)..].Trim());
 }
-
-static string NormalizeRouteTarget(string value) =>
-    value.StartsWith("repo/", StringComparison.OrdinalIgnoreCase)
-        ? value.ToLowerInvariant()
-        : value;
 
 static string RequireOption(string[] args, string name) =>
     FindOption(args, name) ?? throw new ArgumentException($"{name} is required.");

@@ -25,18 +25,6 @@ FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 ALTER TABLE capture_observations
   ADD COLUMN route_evidence JSONB;
 
-ALTER TABLE capture_observations
-  DISABLE TRIGGER capture_observations_immutable;
-
-UPDATE capture_observations
-SET route_evidence = 'null'::jsonb;
-
-ALTER TABLE capture_observations
-  ENABLE TRIGGER capture_observations_immutable;
-
-ALTER TABLE capture_observations
-  ALTER COLUMN route_evidence SET NOT NULL;
-
 ALTER TABLE capture_source_streams
   DROP CONSTRAINT capture_source_streams_route_basis_check,
   ADD CONSTRAINT capture_source_streams_route_basis_check

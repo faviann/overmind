@@ -916,6 +916,115 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task RoutePolicyStoreCanonicalizesRoutingInputsForEveryCaller()
+    {
+        string binding = $"codex-store-canonicalization-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        var options = RuntimeOptions();
+        await new CaptureRoutePolicyStore(
+                options.ConnectionString,
+                new NeverStoreGate(options.NeverStorePath))
+            .ReplaceAsync(
+                binding,
+                new CaptureRoutingPolicy(
+                    ["FAVIANN/*"],
+                    [
+                        new CaptureRouteOverride(
+                            "git@GitHub.com:FAVIANN/OVERMIND.git",
+                            "repo/FAVIANN/OVERMIND")
+                    ],
+                    [
+                        new CaptureDirectoryRoute(
+                            "/workspace/other/../Overmind/",
+                            "repo/FAVIANN/OVERMIND")
+                    ],
+                    []));
+        using var client = CaptureClient(captureKey);
+
+        var overrideResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "canonical-override-0",
+                "/elsewhere",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = "https://github.com/faviann/overmind"
+                    }
+                ]));
+        Assert.Equal(HttpStatusCode.OK, overrideResponse.StatusCode);
+        var overrideReceipt = await overrideResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            overrideReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("override", overrideReceipt.GetProperty("routeBasis").GetString());
+
+        var directoryResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "canonical-directory-0",
+                "/workspace/Overmind/src",
+                []));
+        Assert.Equal(HttpStatusCode.OK, directoryResponse.StatusCode);
+        var directoryReceipt = await directoryResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            directoryReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("directory_mapping", directoryReceipt.GetProperty("routeBasis").GetString());
+    }
+
+    [Fact]
+    public async Task OperatorPolicyRejectsUnauthorizedRepositoryRouteTargetsAtomically()
+    {
+        string binding = $"codex-unauthorized-target-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*");
+
+        var result = await RunMemCtlForResultAsync(
+            null,
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*",
+            "--remote-override",
+            "https://github.com/faviann/overmind.git=repo/OTHER/PROJECT",
+            "--directory-route",
+            "/workspace/overmind=repo/OTHER/PROJECT");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("outside the binding's allowed repository patterns", result.Stderr);
+
+        using var client = CaptureClient(captureKey);
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "unchanged-policy-0",
+                "/workspace",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = "https://github.com/faviann/overmind.git"
+                    }
+                ]));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("origin", receipt.GetProperty("routeBasis").GetString());
+    }
+
+    [Fact]
     public async Task ExplicitRemoteOverridePrefersOriginAndPreservesOtherRemotesAsEvidence()
     {
         string binding = $"codex-override-route-{Guid.NewGuid():N}";

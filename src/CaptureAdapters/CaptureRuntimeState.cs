@@ -128,7 +128,8 @@ public sealed record CaptureServerReceiptState(
     long SourcePosition,
     string LocatorIdentity,
     string Status,
-    Guid ObservationUuid);
+    Guid ObservationUuid,
+    Guid SourceStreamUuid);
 
 public sealed record CaptureRuntimeStreamState(
     string SourceStream,
@@ -136,7 +137,8 @@ public sealed record CaptureRuntimeStreamState(
     CapturePrefixEvidence? VerifiedPrefix,
     long? EnqueuedThrough,
     IReadOnlyList<CaptureRuntimeQueueItem> Queue,
-    CaptureServerReceiptState? LastServerReceipt);
+    CaptureServerReceiptState? LastServerReceipt,
+    Guid? CanonicalSourceStreamUuid);
 
 public sealed record CaptureRuntimeSnapshot(
     int ContractVersion,
@@ -226,7 +228,8 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
             claim.DeterministicLocatorEvidence.PrefixEvidence,
             claim.SourcePosition,
             queue,
-            stream?.LastServerReceipt);
+            stream?.LastServerReceipt,
+            stream?.CanonicalSourceStreamUuid);
         if (streamIndex >= 0)
         {
             streams[streamIndex] = nextStream;
@@ -258,17 +261,42 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         }
 
         CaptureRuntimeStreamState stream = streams[streamIndex];
-        if (!stream.Queue.Any(item =>
-                string.Equals(
-                    item.DeterministicLocatorEvidence.Identity,
-                    receipt.LocatorIdentity,
-                    StringComparison.Ordinal)
-                && item.SourcePosition == receipt.SourcePosition))
+        CaptureRuntimeQueueItem? earliest = stream.Queue
+            .OrderBy(item => item.SourcePosition)
+            .FirstOrDefault();
+        if (earliest is null
+            || earliest.SourcePosition != receipt.SourcePosition
+            || !string.Equals(
+                earliest.DeterministicLocatorEvidence.Identity,
+                receipt.LocatorIdentity,
+                StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                $"Server receipt does not match a queued claim for '{sourceStream}'.");
+                $"Server receipt does not match the earliest queued claim for '{sourceStream}'.");
         }
-        streams[streamIndex] = stream with { LastServerReceipt = receipt };
+        if (!string.Equals(receipt.Status, "new", StringComparison.Ordinal)
+            && !string.Equals(receipt.Status, "already_accepted", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Capture server receipt status '{receipt.Status}' is not conclusive.");
+        }
+        if (stream.CanonicalSourceStreamUuid is Guid canonicalSourceStreamUuid
+            && canonicalSourceStreamUuid != receipt.SourceStreamUuid)
+        {
+            throw new InvalidDataException(
+                $"Capture server receipt sourceStreamUuid does not match the canonical " +
+                $"stream UUID for '{sourceStream}'.");
+        }
+
+        var remainingQueue = stream.Queue.ToList();
+        remainingQueue.Remove(earliest);
+        streams[streamIndex] = stream with
+        {
+            Queue = remainingQueue,
+            LastServerReceipt = receipt,
+            CanonicalSourceStreamUuid =
+                stream.CanonicalSourceStreamUuid ?? receipt.SourceStreamUuid
+        };
         await WriteAtomicallyAsync(new CaptureRuntimeSnapshot(1, streams), cancellationToken);
     }
 

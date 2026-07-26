@@ -83,8 +83,14 @@ atomically records the verified transcript prefix, advances `enqueuedThrough`,
 and adds one retryable queue item. The item contains the capture source stream,
 deterministic transcript/position/byte-range/prefix locator evidence, source
 position, and the redacted-safe candidate observation. It never stores the raw
-transcript record. Last known server receipt is separate stream state rather
-than queue or locator identity; request and delivery-batch IDs do not appear.
+transcript record. Recording a server receipt atomically removes exactly the
+earliest matching responsibility only when the status is `new` or
+`already_accepted`; every other response leaves it queued. Last known server
+receipt is separate stream state rather than queue or locator identity; request
+and delivery-batch IDs do not appear. The first conclusive server receipt also
+establishes the server-derived canonical source-stream UUID in stream state.
+Every later conclusive receipt must return that same UUID, and its top-level and
+nested observation UUIDs must agree, before local responsibility can retire.
 `FileCaptureRuntimeState` implements the transaction as a flushed complete
 snapshot followed by an atomic rename, under a process-shared lock file.
 
@@ -94,6 +100,17 @@ adapts a completed record, runs the local safety boundary, and only then calls
 the durable claim transaction. Its locator identity binds transcript identity,
 source position, byte range and record digest, plus the new verified-prefix
 evidence.
+
+**`DisabledCaptureRuntime`** — orders durable responsibility by source
+position, revalidates each queued candidate against the source fixture, and
+sends it through the ordinary authenticated capture endpoint. It advances to a
+later item only after the receipt callback has durably retired the earlier one.
+The packaged tracer accepts only `new` and `already_accepted` receipts whose
+position and returned byte-range locator match the queued responsibility, whose
+top-level and nested observation UUIDs agree, and whose server-derived source
+stream UUID matches the durable binding established by the first conclusive
+receipt. Outages, malformed or unknown responses, identity mismatches, and lost
+success responses therefore leave the item queued for restart.
 
 ## Where the gate runs
 

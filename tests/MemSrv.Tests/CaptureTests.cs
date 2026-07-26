@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -677,7 +678,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
                     .ReadAsync()).Streams);
             Assert.Equal(2, localStream.EnqueuedThrough);
-            Assert.Equal(3, localStream.Queue.Count);
+            Assert.Empty(localStream.Queue);
             Assert.Equal(2, localStream.LastServerReceipt?.SourcePosition);
             Assert.Equal("new", localStream.LastServerReceipt?.Status);
             Assert.Equal(
@@ -687,6 +688,143 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
         finally
         {
+            File.Delete(fixturePath);
+            DeleteRuntimeState(fixturePath);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerRestartResumesEarliestResponsibilityAfterEndpointOutage()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-outage-{Guid.NewGuid():N}", captureKey);
+        string fixturePath = Path.Combine(
+            Path.GetTempPath(), $"codex-outage-{Guid.NewGuid():N}.jsonl");
+        File.Copy(Path.Combine(_root, "fixtures/codex-synthetic.jsonl"), fixturePath);
+        int unavailablePort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            unavailablePort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+
+        try
+        {
+            var outage = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                new Dictionary<string, string>
+                {
+                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                    ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{unavailablePort}",
+                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                    ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
+                });
+            Assert.Equal(1, outage.ExitCode);
+            Assert.Empty(outage.Stdout);
+            CaptureRuntimeStreamState retained = Assert.Single(
+                (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
+                    .ReadAsync()).Streams);
+            Assert.Equal([0L, 1L, 2L], retained.Queue.Select(item => item.SourcePosition));
+            Assert.Null(retained.LastServerReceipt);
+
+            var resumed = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(0, resumed.ExitCode);
+            JsonElement[] receipts = ParseReceiptLines(resumed.Stdout);
+            Assert.Equal([0L, 1L, 2L], receipts.Select(
+                receipt => receipt.GetProperty("sourcePosition").GetInt64()));
+            Assert.All(receipts, receipt =>
+                Assert.Equal("new", receipt.GetProperty("status").GetString()));
+            Assert.Empty(Assert.Single(
+                (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
+                    .ReadAsync()).Streams).Queue);
+        }
+        finally
+        {
+            File.Delete(fixturePath);
+            DeleteRuntimeState(fixturePath);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerConvergesAfterToolResultCommitResponseIsLost()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-ambiguous-{Guid.NewGuid():N}", captureKey);
+        string fixturePath = Path.Combine(
+            Path.GetTempPath(), $"codex-ambiguous-{Guid.NewGuid():N}.jsonl");
+        File.Copy(Path.Combine(_root, "fixtures/codex-synthetic.jsonl"), fixturePath);
+        int proxyPort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            proxyPort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+        using var proxy = new HttpListener();
+        proxy.Prefixes.Add($"http://127.0.0.1:{proxyPort}/");
+        proxy.Start();
+
+        try
+        {
+            Task<JsonElement[]> committed = CommitToolResultAndLoseResponseAsync(
+                proxy, captureKey);
+            var ambiguous = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                new Dictionary<string, string>
+                {
+                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                    ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{proxyPort}",
+                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                    ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
+                });
+            JsonElement[] committedReceipts = await committed;
+            JsonElement committedResult = committedReceipts[2];
+
+            Assert.NotEqual(0, ambiguous.ExitCode);
+            JsonElement[] deliveredBeforeLoss = ParseReceiptLines(ambiguous.Stdout);
+            Assert.Equal([0L, 1L], deliveredBeforeLoss.Select(
+                receipt => receipt.GetProperty("sourcePosition").GetInt64()));
+            CaptureRuntimeStreamState retained = Assert.Single(
+                (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
+                    .ReadAsync()).Streams);
+            Assert.Equal([2L], retained.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(1, retained.LastServerReceipt?.SourcePosition);
+
+            string canonicalBeforeRetry = await RunMemCtlAsync(
+                "capture", "receipt",
+                committedResult.GetProperty("observationUuid").GetGuid().ToString());
+            JsonElement resultEnvelope = JsonDocument.Parse(canonicalBeforeRetry).RootElement;
+            Assert.Equal(
+                "tool_result",
+                resultEnvelope.GetProperty("event").GetProperty("kind").GetString());
+            Assert.Single(resultEnvelope.GetProperty("relationships").EnumerateArray());
+            Guid sourceStreamUuid = committedResult.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid();
+            CaptureLedgerMechanics beforeRetry =
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid);
+            Assert.Equal(new CaptureLedgerMechanics(3, 3, 1, 2), beforeRetry);
+
+            var retry = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(0, retry.ExitCode);
+            JsonElement retryReceipt = Assert.Single(ParseReceiptLines(retry.Stdout));
+            Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+            Assert.Equal(2, retryReceipt.GetProperty("sourcePosition").GetInt64());
+            Assert.Equal(
+                committedResult.GetProperty("observationUuid").GetGuid(),
+                retryReceipt.GetProperty("observationUuid").GetGuid());
+            Assert.Empty(Assert.Single(
+                (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
+                    .ReadAsync()).Streams).Queue);
+            string canonicalAfterRetry = await RunMemCtlAsync(
+                "capture", "receipt",
+                committedResult.GetProperty("observationUuid").GetGuid().ToString());
+            Assert.Equal(canonicalBeforeRetry, canonicalAfterRetry);
+            Assert.Equal(
+                beforeRetry,
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
+        }
+        finally
+        {
+            proxy.Stop();
             File.Delete(fixturePath);
             DeleteRuntimeState(fixturePath);
         }
@@ -1474,6 +1612,89 @@ public sealed class CaptureTests : HttpSeamTestBase
                 ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
                 ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
             });
+
+    private async Task<JsonElement[]> CommitToolResultAndLoseResponseAsync(
+        HttpListener listener, string captureKey)
+    {
+        var receipts = new List<JsonElement>();
+        for (int position = 0; position < 3; position++)
+        {
+            HttpListenerContext context = await listener.GetContextAsync()
+                .WaitAsync(TimeSpan.FromSeconds(15));
+            using var content = new StreamContent(context.Request.InputStream);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            using var client = CaptureClient(captureKey);
+            using HttpResponseMessage response = await client.PostAsync(
+                "/capture/v1/observations", content);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            string responseBody = await response.Content.ReadAsStringAsync();
+            receipts.Add(JsonDocument.Parse(responseBody).RootElement.Clone());
+
+            context.Response.StatusCode = (int)HttpStatusCode.OK;
+            if (position < 2)
+            {
+                byte[] responseBytes = Encoding.UTF8.GetBytes(responseBody);
+                context.Response.ContentType = "application/json";
+                context.Response.ContentLength64 = responseBytes.Length;
+                await context.Response.OutputStream.WriteAsync(responseBytes);
+            }
+            else
+            {
+                // The relationship-bearing tool result committed, but the
+                // proxy returns no usable receipt.
+                context.Response.ContentLength64 = 0;
+            }
+            context.Response.Close();
+        }
+        return [.. receipts];
+    }
+
+    private static JsonElement[] ParseReceiptLines(string stdout) =>
+        stdout.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+            .ToArray();
+
+    private async Task<CaptureLedgerMechanics> ReadCaptureLedgerMechanicsAsync(
+        Guid sourceStreamUuid)
+    {
+        await using var connection = new NpgsqlConnection(AdminConnection);
+        await connection.OpenAsync();
+        long observations = await connection.ExecuteScalarAsync<long>(
+            "SELECT count(*) FROM capture_observations WHERE stream_uuid = @sourceStreamUuid",
+            new { sourceStreamUuid });
+        long events = await connection.ExecuteScalarAsync<long>(
+            """
+            SELECT count(*)
+            FROM captured_events e
+            JOIN capture_observations o USING (observation_uuid)
+            WHERE o.stream_uuid = @sourceStreamUuid
+            """,
+            new { sourceStreamUuid });
+        long relationships = await connection.ExecuteScalarAsync<long>(
+            """
+            SELECT count(*)
+            FROM captured_event_relationships r
+            JOIN captured_events e ON e.trace_uuid = r.source_trace_uuid
+            JOIN capture_observations o USING (observation_uuid)
+            WHERE o.stream_uuid = @sourceStreamUuid
+            """,
+            new { sourceStreamUuid });
+        long checkpoint = await connection.ExecuteScalarAsync<long>(
+            """
+            SELECT checkpoint_position
+            FROM capture_source_streams
+            WHERE stream_uuid = @sourceStreamUuid
+            """,
+            new { sourceStreamUuid });
+        return new CaptureLedgerMechanics(
+            observations, events, relationships, checkpoint);
+    }
+
+    private sealed record CaptureLedgerMechanics(
+        long Observations,
+        long Events,
+        long Relationships,
+        long Checkpoint);
 
     private static string RuntimeStateDirectory(string fixturePath) =>
         fixturePath + ".overmind-state";

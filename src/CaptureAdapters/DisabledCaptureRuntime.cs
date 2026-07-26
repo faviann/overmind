@@ -51,7 +51,7 @@ public static class DisabledCaptureRuntime
             new AuthenticationHeaderValue("Bearer", credential);
         var receipts = new List<string>();
 
-        foreach (CaptureRuntimeQueueItem queued in queue)
+        foreach (CaptureRuntimeQueueItem queued in queue.OrderBy(item => item.SourcePosition))
         {
             CaptureRuntimeLocatorEvidence evidence = queued.DeterministicLocatorEvidence;
             if (!string.Equals(queued.SourceStream, sourceSessionId, StringComparison.Ordinal)

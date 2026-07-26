@@ -17,6 +17,9 @@ if (!string.Equals(
 string endpoint = Required("OVERMIND_CAPTURE_URL").TrimEnd('/');
 string credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
 string fixturePath = Required("OVERMIND_CODEX_FIXTURE");
+string stateDirectory =
+    Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_STATE_DIR")
+    ?? fixturePath + ".overmind-state";
 const string sessionId = "codex-synthetic-rollout-v1";
 
 // Fail closed before any source material is read: a tracer whose rule set is
@@ -78,6 +81,14 @@ if (!string.Equals(
 
 try
 {
+    var runtimeState = new FileCaptureRuntimeState(stateDirectory);
+    await CodexCaptureClaimer.ClaimCompletedAsync(
+        new CodexJsonlAdapter(),
+        fixturePath,
+        sessionId,
+        runtimeState,
+        safetyGate);
+
     var receipts = await DisabledCaptureRuntime.RunFixtureAsync(
         new CodexJsonlAdapter(),
         fixturePath,
@@ -85,8 +96,21 @@ try
         new Uri(endpoint, UriKind.Absolute),
         credential,
         safetyGate);
-    foreach (string receipt in receipts)
+    CaptureRuntimeStreamState stream = (await runtimeState.ReadAsync()).Streams.Single(value =>
+        string.Equals(value.SourceStream, sessionId, StringComparison.Ordinal));
+    foreach ((string receipt, CaptureRuntimeQueueItem queued) in receipts.Zip(stream.Queue))
     {
+        using JsonDocument document = JsonDocument.Parse(receipt);
+        JsonElement root = document.RootElement;
+        await runtimeState.RecordServerReceiptAsync(
+            sessionId,
+            new CaptureServerReceiptState(
+                queued.SourcePosition,
+                queued.LocatorIdentity,
+                root.GetProperty("status").GetString() ?? "unknown",
+                root.TryGetProperty("observationUuid", out JsonElement observationUuid)
+                    ? observationUuid.GetGuid()
+                    : null));
         Console.WriteLine(receipt);
     }
 }
@@ -104,6 +128,16 @@ catch (SafetyConfigurationException ex)
 {
     Console.Error.WriteLine(ex.Message);
     return 3;
+}
+catch (CapturePrefixChangedException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    return 4;
+}
+catch (HttpRequestException ex)
+{
+    Console.Error.WriteLine($"Capture delivery failed: {ex.Message}");
+    return 1;
 }
 
 Console.Error.WriteLine(

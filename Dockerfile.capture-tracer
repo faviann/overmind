@@ -18,5 +18,6 @@ COPY fixtures/codex-synthetic.jsonl /app/fixtures/codex-synthetic.jsonl
 # emits anything, and refuses to run without a loadable rule set.
 COPY config/ /app/config/
 ENV OVERMIND_CODEX_FIXTURE=/app/fixtures/codex-synthetic.jsonl
+ENV OVERMIND_CAPTURE_STATE_DIR=/state
 LABEL org.opencontainers.image.description="DISABLED non-production synthetic Codex capture tracer"
 ENTRYPOINT ["dotnet", "/app/CodexCaptureTracer.dll"]

@@ -1064,6 +1064,45 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ExplicitNonOriginRemoteOverridesUseSourceEvidenceOrder()
+    {
+        string binding = $"codex-non-origin-override-order-{Guid.NewGuid():N}";
+        var captureKey = CaptureCredential();
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "other/*",
+            "--special-namespace", "home=homelab",
+            "--remote-override", "https://github.com/other/project.git=repo/other/project",
+            "--remote-override", "git@github.com:Faviann/Overmind.git=special:home");
+        using var client = CaptureClient(captureKey);
+
+        var response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "non-origin-override-order-0",
+                "/workspace",
+                [
+                    new { name = "z-first", url = "git@github.com:Faviann/Overmind.git" },
+                    new { name = "a-second", url = "https://github.com/other/project.git" }
+                ]));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("homelab", receipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("override", receipt.GetProperty("routeBasis").GetString());
+        string shown = await RunMemCtlAsync(
+            "capture", "receipt", receipt.GetProperty("observationUuid").GetGuid().ToString());
+        var remotes = JsonDocument.Parse(shown).RootElement
+            .GetProperty("observation").GetProperty("routeEvidence")
+            .GetProperty("remotes");
+        Assert.Equal(["z-first", "a-second"], remotes.EnumerateArray()
+            .Select(remote => remote.GetProperty("name").GetString()));
+    }
+
+    [Fact]
     public async Task LongestDirectoryRouteWinsAndUnconfiguredNonOriginRemoteIsProvenanceOnly()
     {
         string binding = $"codex-directory-route-{Guid.NewGuid():N}";
@@ -1270,6 +1309,7 @@ public sealed class CaptureTests : HttpSeamTestBase
 
     [Theory]
     [InlineData("reserved=memory-system", "Reserved namespace")]
+    [InlineData("reserved-family=capture/private", "Reserved namespace")]
     [InlineData("missing=does-not-exist", "must already exist")]
     [InlineData("repository=repo/faviann/overmind", "allowed repository pattern")]
     public async Task SpecialNamespacePolicyRejectsReservedOrUnprovisionedTargets(

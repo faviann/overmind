@@ -31,6 +31,8 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
   `reference/csharp-sdk/`. Trust that evidence over memory. Remote transport
   uses Streamable HTTP, never legacy SSE.
 - Tests or refactors → `docs/testing.md`
+- Capture enrollment, ingestion, or operator receipt reads →
+  `docs/capture-modules.md`
 - Schema, retrieval, dependencies, or scope → `docs/design-rules.md`
 - Deployment or deployment configuration → `docs/deployment-contract.md`
 - Domain terminology or domain documentation → `CONTEXT.md` and

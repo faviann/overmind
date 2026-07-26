@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -174,4 +176,11 @@ public static class CaptureCredential
                 "Capture credential must use mcap_ followed by at least 32 URL-safe random characters.");
         }
     }
+
+    /// <summary>
+    /// The stored form of a capture credential: lowercase hex SHA-256. Enrollment
+    /// writes it and authority looks it up, so the raw credential is never stored.
+    /// </summary>
+    public static string Hash(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 }

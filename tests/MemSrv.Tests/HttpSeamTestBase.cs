@@ -65,6 +65,11 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
         NeverStorePath = Path.Combine(_root, "config/never_store.yaml"),
     };
 
+    // The same governed gate the server builds, for callers that run the
+    // disabled capture runtime in-process.
+    protected NeverStoreGate SafetyGate() =>
+        new(Path.Combine(_root, "config/never_store.yaml"));
+
     protected async Task<McpClient> ConnectAsync(string bearerKey)
     {
         var transport = new HttpClientTransport(new HttpClientTransportOptions

@@ -892,7 +892,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             "aws-access-key-id",
             scan.GetProperty("ruleIds").EnumerateArray().Select(item => item.GetString()));
         Assert.Contains(
-            "secret",
+            "provider_token",
             scan.GetProperty("categories").EnumerateArray().Select(item => item.GetString()));
         Assert.Equal(8, scan.GetProperty("redactionCount").GetInt32());
 

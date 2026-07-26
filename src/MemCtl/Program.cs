@@ -125,7 +125,7 @@ static async Task<int> VerifySchemaAsync(MemSrvOptions options)
 }
 
 static MemoryService Service(MemSrvOptions options) =>
-    new(options.ConnectionString, new NeverStoreGate(options.NeverStorePath));
+    new(options.ConnectionString, new NeverStoreGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
 
 static async Task PendingAsync(MemSrvOptions options, string? @namespace)
 {
@@ -285,7 +285,7 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
         case "enroll":
             RequireArgs(args, 3);
             var enrollment = new CaptureEnrollment(
-                options.ConnectionString, new NeverStoreGate(options.NeverStorePath));
+                options.ConnectionString, new NeverStoreGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
             string credentialPath = RequireOption(args, "--credential-file");
             string credential = (await File.ReadAllTextAsync(credentialPath)).Trim();
             var bindingUuid = await enrollment.EnrollAsync(

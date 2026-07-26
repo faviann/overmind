@@ -1,8 +1,9 @@
 # Capture modules
 
 The capture spine (issue #74, stabilized by #120) is four public modules in
-`MemSrv.Core`. No module requires a caller to understand another's rules. This
-note records the shape that exists; it decides nothing new.
+`MemSrv.Core`, plus the never-store gate (#76) that all of them cross. No module
+requires a caller to understand another's rules. This note records the shape
+that exists; it decides nothing new.
 
 Source interpretation before this spine is described by the
 [harness-neutral capture adapter contract](capture-adapter-contract.md).
@@ -15,12 +16,28 @@ Source interpretation before this spine is described by the
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
+| `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 
 `CaptureLedger` is internal: the single reader over the durable capture ledger
 rows — observations, events, relationships — that ingestion and operator reads
 both project into canonical facts.
 
 ## Invariants each interface hides
+
+**`NeverStoreGate`** — the single governed policy point every write path
+crosses, and the only type that knows rules exist. It hides the rule-set schema
+and its load-time validation, compile-once `NonBacktracking` matchers with
+per-rule timeouts, literal prefilters, deterministic overlap resolution, exact
+span redaction, whole-leaf omission, one bounded percent/hex/Base64 decoding
+level around high-confidence rules, operator-provisioned exact literals, and
+every numeric scan budget. Callers pass a value and get back a sanitized value
+or a refusal. Construction never throws — a broken rule file must not stop the
+server from starting and rejecting an unknown credential first — so an unusable
+gate is constructible, reports `IsConfigured == false` plus a safe
+`FailureReason`, and throws `SafetyConfigurationException` from every governed
+call. Free text and structured documents are separate entry points on purpose:
+serialized JSON is never regex-rewritten. See
+[capture safety budgets](capture-safety-budgets.md).
 
 **`CaptureEnrollment`** — fail-closed safety configuration; never-store
 clearance of the stable name, harness, and derived agent id; the `mcap_`
@@ -37,8 +54,8 @@ allowed namespaces, and the per-binding content-signature key.
 `null` means "reject before reading the body".
 
 **`CaptureIngestion`** — contract version, binding/harness agreement, unique
-part keys, relationship shape, the observation size ceiling, the never-store
-gate, the binding-keyed retry signature (which covers the `byte_range` source
+part keys, relationship shape, the versioned 128 MiB observation ceiling, the
+never-store gate, the binding-keyed retry signature (which covers the `byte_range` source
 content digest that is signed but never persisted), route fixation on first
 import, contiguous checkpoint advance, locator idempotency and conflict, and
 the single transaction over observation + events + relationships + checkpoint.
@@ -49,6 +66,16 @@ It never resolves a credential; authorization arrives already decided.
 canonical event, that event's relationships). `memctl` serializes them and does
 nothing else. Reads use already-sanitized durable rows and do not require
 scanner configuration.
+
+## Where the gate runs
+
+The disabled runtime (`CaptureAdapters.DisabledCaptureRuntime`) crosses the same
+`NeverStoreGate` before an observation leaves the tracer process, and the server
+crosses it again independently before canonical append. There is no local
+durable queue in this slice, so "scan before durable local persistence" means
+"scan before the observation is emitted". Both sides use the same governed rule
+semantics because both construct the gate from the same configuration; there is
+no second scanner implementation.
 
 ## Source locator representation
 

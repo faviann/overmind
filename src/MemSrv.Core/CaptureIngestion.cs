@@ -25,10 +25,9 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureLedger.RequireSafetyConfigured(neverStore);
         Validate(binding, command);
         string inputJson = JsonSerializer.Serialize(command, CaptureLedger.JsonOptions);
-        if (Encoding.UTF8.GetByteCount(inputJson) > 1_000_000)
-        {
-            throw new InvalidOperationException("Capture observation exceeds the 1000000-byte non-production limit.");
-        }
+        // The versioned observation ceiling. The Kestrel transport cap on this
+        // route is deliberately far below it (see docs/capture-safety-budgets.md).
+        neverStore.AssertObservationWithinBudget(inputJson);
 
         string signatureContent = JsonSerializer.Serialize(
             new CaptureSignatureContent(
@@ -68,14 +67,14 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 AssertSafe(relationship.Type, scan);
             }
         }
-        string source = Redact(
+        string source = RedactJson(
             JsonSerializer.Serialize(command.Source, CaptureLedger.JsonOptions), scan);
-        string adapter = Redact(
+        string adapter = RedactJson(
             JsonSerializer.Serialize(command.Adapter, CaptureLedger.JsonOptions), scan);
-        string safePayload = Redact(command.SourcePayload.GetRawText(), scan);
+        string safePayload = RedactJson(command.SourcePayload.GetRawText(), scan);
         var safeEvents = command.Events.Select(item => new SafeEvent(
             item,
-            Redact(item.Payload.GetRawText(), scan),
+            RedactJson(item.Payload.GetRawText(), scan),
             (item.Relationships ?? []).Select(relationship => new SafeRelationship(
                 relationship,
                 Redact(relationship.Target.NativeId, scan),
@@ -218,7 +217,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 source,
                 adapter,
                 safePayload,
-                ScanStatus = scan.RedactionCount == 0 ? "clean" : "redacted",
+                ScanStatus = scan.Status,
                 scan.RuleSetVersion,
                 RuleIds = scan.RuleIds.ToArray(),
                 Categories = scan.Categories.ToArray(),
@@ -339,11 +338,14 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 
+    // A required identity value is not payload: it cannot be redacted or
+    // omitted and still mean what it claims, so a match rejects and an
+    // un-inspectable value fails the whole import closed.
     private void AssertSafe(string value, ScanAccumulator scan)
     {
         var result = neverStore.Scan(value);
         scan.Add(result);
-        if (result.RedactionCount > 0)
+        if (result.OmissionReasons.Count > 0 || result.RedactionCount > 0)
         {
             neverStore.AssertAllowed(value);
         }
@@ -352,6 +354,15 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     private string Redact(string value, ScanAccumulator scan)
     {
         var result = neverStore.Scan(value);
+        scan.Add(result);
+        return result.Redacted;
+    }
+
+    // Structured payloads are scanned leaf by leaf and rebuilt; the serialized
+    // JSON is never regex-rewritten.
+    private string RedactJson(string json, ScanAccumulator scan)
+    {
+        var result = neverStore.ScanJson(json);
         scan.Add(result);
         return result.Redacted;
     }
@@ -404,12 +415,24 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         public SortedSet<string> RuleIds { get; } = new(StringComparer.Ordinal);
         public SortedSet<string> Categories { get; } = new(StringComparer.Ordinal);
         public int RedactionCount { get; private set; }
+        public SortedSet<string> Omissions { get; } = new(StringComparer.Ordinal);
+
+        // Provenance only: rule ids, categories, counts, and omission reasons.
+        // Never the matched value, an unsafe excerpt, or a content digest.
+        public string Status => Omissions.Count > 0
+            ? "omitted"
+            : RedactionCount == 0 ? "clean" : "redacted";
 
         public void Add(NeverStoreScan scan)
         {
             RuleIds.UnionWith(scan.RuleIds);
             Categories.UnionWith(scan.Categories);
             RedactionCount += scan.RedactionCount;
+            foreach (string reason in scan.OmissionReasons)
+            {
+                Omissions.Add(reason);
+                RuleIds.Add($"omission:{reason}");
+            }
         }
     }
 }

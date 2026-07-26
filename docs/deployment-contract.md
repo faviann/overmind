@@ -166,9 +166,12 @@ Optional:
 | `MEMSRV_HTTP_URL` | Kestrel bind address; defaults to `http://0.0.0.0:8080`. |
 | `MEMSRV_AGENT_ID`, `MEMSRV_NAMESPACE`, `MEMSRV_SESSION_ID` | stdio-mode identity/session (defaults are sensible for a single-agent local setup). Ignored in HTTP mode, where identity comes from the bearer key and the session is transport-derived. |
 | `MEMSRV_ALLOWED_NAMESPACES` | Comma-separated stdio-mode namespace allowlist. Unset confines the process to its default `MEMSRV_NAMESPACE`. Ignored in HTTP mode. |
+| `MEMSRV_NEVER_STORE_PATH` | Never-store rule file. Defaults to `config/never_store.yaml`, which ships in the image. A missing, empty, or invalid file makes capture unhealthy: enrollment and ingestion refuse, and the tracer exits non-zero. |
+| `MEMSRV_NEVER_STORE_LITERALS_PATH` | **Operator-owned** file of exact credential values the installation already knows, one per line, mounted read-only. Unset or absent is valid and is not a fail-closed condition. Never commit this file; the tracked rule file must never contain a real credential. |
 
 No other configuration is required; `config/never_store.yaml` ships in the
-image.
+image. The numeric scan budgets are versioned runtime constants, not
+configuration — see [capture safety budgets](capture-safety-budgets.md).
 
 ## Postgres — FINAL
 

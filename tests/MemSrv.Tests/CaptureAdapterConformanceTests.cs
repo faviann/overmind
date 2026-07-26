@@ -185,6 +185,8 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         string stableName = $"claude-spike-{Guid.NewGuid():N}";
         string credentialPath = Path.Combine(
             Path.GetTempPath(), $"claude-spike-key-{Guid.NewGuid():N}");
+        string stateDirectory = Path.Combine(
+            Path.GetTempPath(), $"claude-spike-state-{Guid.NewGuid():N}");
         await File.WriteAllTextAsync(credentialPath, credential);
         try
         {
@@ -195,14 +197,27 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                 "--credential-file", credentialPath);
             Assert.Contains("no supported capture adapter", enrollment);
 
-            var receipts = await DisabledCaptureRuntime.RunFixtureAsync(
-                new DisposableClaudeJsonlAdapter(),
-                Path.Combine(
-                    _root, "fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl"),
-                $"claude-spike-session-{Guid.NewGuid():N}",
+            var adapter = new DisposableClaudeJsonlAdapter();
+            string fixturePath = Path.Combine(
+                _root, "fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl");
+            string sourceStream = $"claude-spike-session-{Guid.NewGuid():N}";
+            var state = new FileCaptureRuntimeState(stateDirectory);
+            await CodexCaptureClaimer.ClaimCompletedAsync(
+                adapter,
+                fixturePath,
+                sourceStream,
+                state,
+                SafetyGate());
+            CaptureRuntimeStreamState stream = Assert.Single((await state.ReadAsync()).Streams);
+            var receipts = await DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                adapter,
+                fixturePath,
+                sourceStream,
+                stream.Queue,
                 new Uri(_baseUrl),
                 credential,
-                SafetyGate());
+                SafetyGate(),
+                (_, _, _) => Task.CompletedTask);
             Assert.Equal(9, receipts.Count);
 
             var canonical = receipts.Select(receipt =>
@@ -255,6 +270,10 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         finally
         {
             File.Delete(credentialPath);
+            if (Directory.Exists(stateDirectory))
+            {
+                Directory.Delete(stateDirectory, recursive: true);
+            }
         }
     }
 

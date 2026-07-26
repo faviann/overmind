@@ -89,30 +89,32 @@ try
         runtimeState,
         safetyGate);
 
-    var receipts = await DisabledCaptureRuntime.RunFixtureAsync(
+    CaptureRuntimeStreamState stream = (await runtimeState.ReadAsync()).Streams.Single(value =>
+        string.Equals(value.SourceStream, sessionId, StringComparison.Ordinal));
+    await DisabledCaptureRuntime.RunClaimedFixtureAsync(
         new CodexJsonlAdapter(),
         fixturePath,
         sessionId,
+        stream.Queue,
         new Uri(endpoint, UriKind.Absolute),
         credential,
-        safetyGate);
-    CaptureRuntimeStreamState stream = (await runtimeState.ReadAsync()).Streams.Single(value =>
-        string.Equals(value.SourceStream, sessionId, StringComparison.Ordinal));
-    foreach ((string receipt, CaptureRuntimeQueueItem queued) in receipts.Zip(stream.Queue))
-    {
-        using JsonDocument document = JsonDocument.Parse(receipt);
-        JsonElement root = document.RootElement;
-        await runtimeState.RecordServerReceiptAsync(
-            sessionId,
-            new CaptureServerReceiptState(
-                queued.SourcePosition,
-                queued.LocatorIdentity,
-                root.GetProperty("status").GetString() ?? "unknown",
-                root.TryGetProperty("observationUuid", out JsonElement observationUuid)
-                    ? observationUuid.GetGuid()
-                    : null));
-        Console.WriteLine(receipt);
-    }
+        safetyGate,
+        async (receipt, queued, cancellationToken) =>
+        {
+            using JsonDocument document = JsonDocument.Parse(receipt);
+            JsonElement root = document.RootElement;
+            await runtimeState.RecordServerReceiptAsync(
+                sessionId,
+                new CaptureServerReceiptState(
+                    queued.SourcePosition,
+                    queued.LocatorIdentity,
+                    root.GetProperty("status").GetString() ?? "unknown",
+                    root.TryGetProperty("observationUuid", out JsonElement observationUuid)
+                        ? observationUuid.GetGuid()
+                        : null),
+                cancellationToken);
+            Console.WriteLine(receipt);
+        });
 }
 catch (CaptureDeliveryException ex)
 {

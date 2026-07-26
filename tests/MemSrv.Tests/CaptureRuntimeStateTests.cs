@@ -194,4 +194,187 @@ public sealed class CaptureRuntimeStateTests
             Directory.Delete(directory, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task PackagedTracerDoesNotDeliverAnUnterminatedFinalRecord()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-undelivered-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        string fixture = await File.ReadAllTextAsync(
+            Path.Combine(root, "fixtures/codex-synthetic.jsonl"));
+        await File.WriteAllTextAsync(
+            transcript,
+            fixture.TrimEnd('\n'),
+            new UTF8Encoding(false));
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var serverCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<int> server = ServeResponsesAsync(
+            listener,
+            [
+                (HttpStatusCode.OK, Receipt(0)),
+                (HttpStatusCode.OK, Receipt(1)),
+                (HttpStatusCode.OK, Receipt(2))
+            ],
+            serverCancellation.Token);
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                TracerEnvironment(transcript, stateDirectory, port));
+            await serverCancellation.CancelAsync();
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(2, await server);
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(1, stream.EnqueuedThrough);
+            Assert.Equal([0L, 1L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(1, stream.LastServerReceipt?.SourcePosition);
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerPersistsEachReceiptBeforeAttemptingTheNextDelivery()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-receipt-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Guid firstObservation = Guid.NewGuid();
+        using var serverCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<int> server = ServeResponsesAsync(
+            listener,
+            [
+                (HttpStatusCode.OK, Receipt(0, firstObservation)),
+                (HttpStatusCode.InternalServerError, """{"error":"later failure"}""")
+            ],
+            serverCancellation.Token);
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                TracerEnvironment(transcript, stateDirectory, port));
+
+            Assert.Equal(1, result.ExitCode);
+            Assert.Equal(2, await server);
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(2, stream.EnqueuedThrough);
+            Assert.Equal([0L, 1L, 2L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
+            Assert.Equal("new", stream.LastServerReceipt?.Status);
+            Assert.Equal(firstObservation, stream.LastServerReceipt?.ObservationUuid);
+        }
+        finally
+        {
+            await serverCancellation.CancelAsync();
+            listener.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static Dictionary<string, string> TracerEnvironment(
+        string transcript,
+        string stateDirectory,
+        int port) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}",
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = $"mcap_{Guid.NewGuid():N}",
+            ["OVERMIND_CODEX_FIXTURE"] = transcript,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory
+        };
+
+    private static string Receipt(long sourcePosition, Guid? observationUuid = null) =>
+        JsonSerializer.Serialize(new
+        {
+            sourcePosition,
+            status = "new",
+            observationUuid = observationUuid ?? Guid.NewGuid()
+        });
+
+    private static async Task<int> ServeResponsesAsync(
+        TcpListener listener,
+        IReadOnlyList<(HttpStatusCode Status, string Body)> responses,
+        CancellationToken cancellationToken)
+    {
+        int requestCount = 0;
+        try
+        {
+            foreach (var (status, body) in responses)
+            {
+                using TcpClient client =
+                    await listener.AcceptTcpClientAsync(cancellationToken);
+                await using NetworkStream stream = client.GetStream();
+                await ReadRequestAsync(stream, cancellationToken);
+                requestCount++;
+                byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
+                byte[] response = Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 {(int)status} {status}\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    $"Content-Length: {bodyBytes.Length}\r\n" +
+                    "Connection: close\r\n\r\n");
+                await stream.WriteAsync(response, cancellationToken);
+                await stream.WriteAsync(bodyBytes, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+
+        return requestCount;
+    }
+
+    private static async Task ReadRequestAsync(
+        NetworkStream stream,
+        CancellationToken cancellationToken)
+    {
+        var header = new List<byte>();
+        byte[] oneByte = new byte[1];
+        while (header.Count < 64 * 1024)
+        {
+            int read = await stream.ReadAsync(oneByte, cancellationToken);
+            if (read == 0)
+            {
+                throw new EndOfStreamException("HTTP request ended before its headers.");
+            }
+            header.Add(oneByte[0]);
+            int count = header.Count;
+            if (count >= 4
+                && header[count - 4] == '\r'
+                && header[count - 3] == '\n'
+                && header[count - 2] == '\r'
+                && header[count - 1] == '\n')
+            {
+                break;
+            }
+        }
+
+        string headerText = Encoding.ASCII.GetString([.. header]);
+        string contentLengthHeader = headerText
+            .Split("\r\n", StringSplitOptions.RemoveEmptyEntries)
+            .Single(line => line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase));
+        int contentLength = int.Parse(
+            contentLengthHeader["Content-Length:".Length..].Trim(),
+            System.Globalization.CultureInfo.InvariantCulture);
+        byte[] body = new byte[contentLength];
+        await stream.ReadExactlyAsync(body, cancellationToken);
+    }
 }

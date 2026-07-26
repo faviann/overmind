@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using MemSrv.Core;
@@ -8,13 +9,15 @@ namespace CaptureAdapters;
 
 /// <summary>
 /// Harness-neutral execution seam for the explicitly disabled fixture tracer.
-/// It owns fixture positions, the local safety gate, and HTTP delivery, while
-/// an injected adapter owns only source interpretation.
+/// It matches durable queued responsibility back to the source fixture, owns
+/// the local safety gate and HTTP delivery, and persists each successful
+/// receipt through its callback before attempting the next queued record.
+/// An injected adapter owns only source interpretation.
 ///
 /// The runtime crosses the SAME governed gate the server crosses, before it
-/// emits anything. There is no local durable queue in this slice, so "before
-/// durable local persistence" means "before the observation leaves this
-/// process"; the server then scans independently before canonical append.
+/// emits anything. A record absent from the durable queue is never delivered;
+/// the server then scans each delivered observation independently before
+/// canonical append.
 ///
 /// It scans but does not REWRITE what it transmits. Pre-redacting the wire
 /// would hand the server already-sanitized bytes and make it record
@@ -26,28 +29,60 @@ namespace CaptureAdapters;
 /// </summary>
 public static class DisabledCaptureRuntime
 {
-    public static async Task<IReadOnlyList<string>> RunFixtureAsync(
+    public static async Task<IReadOnlyList<string>> RunClaimedFixtureAsync(
         ICaptureSourceAdapter adapter,
         string fixturePath,
         string sourceSessionId,
+        IReadOnlyList<CaptureRuntimeQueueItem> queue,
         Uri captureEndpoint,
         string credential,
         NeverStoreGate safetyGate,
+        Func<string, CaptureRuntimeQueueItem, CancellationToken, Task> persistReceiptAsync,
         CancellationToken cancellationToken = default)
     {
         var sourceRecords = await JsonlSourceReader.ReadAsync(
-            fixturePath, sourceSessionId, terminalAtEndOfFile: true, cancellationToken);
+            fixturePath, sourceSessionId, terminalAtEndOfFile: false, cancellationToken);
+        var recordsByPosition = sourceRecords.ToDictionary(record => record.SourcePosition);
+        byte[] sourceBytes = await File.ReadAllBytesAsync(fixturePath, cancellationToken);
+        string transcriptIdentity = Digest(
+            Encoding.UTF8.GetBytes(Path.GetFullPath(fixturePath)));
         using var client = new HttpClient();
         client.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", credential);
         var receipts = new List<string>();
 
-        foreach (var sourceRecord in sourceRecords)
+        foreach (CaptureRuntimeQueueItem queued in queue)
         {
+            if (!string.Equals(queued.SourceStream, sourceSessionId, StringComparison.Ordinal)
+                || !string.Equals(
+                    queued.TranscriptIdentity, transcriptIdentity, StringComparison.Ordinal)
+                || !recordsByPosition.TryGetValue(queued.SourcePosition, out var sourceRecord)
+                || sourceRecord.Locator is not CaptureSourceLocator.ByteRange locator
+                || locator.Offset != queued.ByteOffset
+                || locator.Length != queued.ByteLength
+                || !string.Equals(
+                    locator.SourceContentSha256, queued.RecordSha256, StringComparison.Ordinal)
+                || queued.PrefixEvidence.ByteLength
+                    != checked(queued.ByteOffset + queued.ByteLength)
+                || queued.PrefixEvidence.ByteLength > sourceBytes.LongLength
+                || !string.Equals(
+                    queued.PrefixEvidence.Sha256,
+                    Digest(sourceBytes.AsSpan(
+                        0, checked((int)queued.PrefixEvidence.ByteLength))),
+                    StringComparison.Ordinal))
+            {
+                throw new CapturePrefixChangedException(
+                    sourceSessionId,
+                    $"durable claim at source position {queued.SourcePosition} " +
+                    "does not match the completed source record");
+            }
+
             var outcome = adapter.Adapt(sourceRecord);
             if (outcome is CaptureSourcePositionOutcome.Incomplete)
             {
-                break;
+                throw new CapturePrefixChangedException(
+                    sourceSessionId,
+                    $"durable claim at source position {queued.SourcePosition} is incomplete");
             }
 
             var terminal = (CaptureSourcePositionOutcome.Terminal)outcome;
@@ -62,7 +97,15 @@ public static class DisabledCaptureRuntime
             // not refuse on omissions. The scan result itself is deliberately
             // discarded — the wire carries the original bytes.
             safetyGate.AssertObservationWithinBudget(observationJson);
-            safetyGate.ScanJson(observationJson);
+            string candidateJson = safetyGate.ScanJson(observationJson).Redacted;
+            if (!string.Equals(
+                    candidateJson, queued.CandidateObservationJson, StringComparison.Ordinal))
+            {
+                throw new CapturePrefixChangedException(
+                    sourceSessionId,
+                    $"durable candidate at source position {queued.SourcePosition} " +
+                    "does not match the completed source record");
+            }
             using var content = new StringContent(
                 observationJson, Encoding.UTF8, "application/json");
             using var response = await client.PostAsync(
@@ -75,11 +118,16 @@ public static class DisabledCaptureRuntime
                 throw new CaptureDeliveryException(
                     terminal.SourcePosition, response.StatusCode, responseText);
             }
+            await persistReceiptAsync(
+                responseText, queued, cancellationToken);
             receipts.Add(responseText);
         }
 
         return receipts;
     }
+
+    private static string Digest(ReadOnlySpan<byte> bytes) =>
+        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 }
 
 public sealed class CaptureDeliveryException(

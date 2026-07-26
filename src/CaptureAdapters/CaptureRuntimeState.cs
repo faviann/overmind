@@ -128,7 +128,7 @@ public sealed record CaptureServerReceiptState(
     long SourcePosition,
     string LocatorIdentity,
     string Status,
-    Guid? ObservationUuid);
+    Guid ObservationUuid);
 
 public sealed record CaptureRuntimeStreamState(
     string SourceStream,

@@ -129,6 +129,24 @@ public sealed class CaptureRuntimeStateTests
                     "redactedSafeCandidate"
                 ],
                 persistedQueueItem.EnumerateObject().Select(property => property.Name));
+            JsonElement persistedLocatorEvidence =
+                persistedQueueItem.GetProperty("deterministicLocatorEvidence");
+            Assert.Equal(
+                [
+                    "transcriptIdentity",
+                    "sourcePosition",
+                    "byteOffset",
+                    "byteLength",
+                    "recordSha256",
+                    "prefixEvidence",
+                    "identity"
+                ],
+                persistedLocatorEvidence.EnumerateObject().Select(property => property.Name));
+            Assert.Equal(
+                ["byteLength", "sha256"],
+                persistedLocatorEvidence.GetProperty("prefixEvidence")
+                    .EnumerateObject()
+                    .Select(property => property.Name));
             Assert.DoesNotContain(
                 seededSyntheticSecret,
                 await File.ReadAllTextAsync(Path.Combine(directory, "state", "capture-state.json")));
@@ -494,6 +512,56 @@ public sealed class CaptureRuntimeStateTests
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
             Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
+            Assert.Equal(acceptedObservation, stream.LastServerReceipt?.ObservationUuid);
+        }
+        finally
+        {
+            await serverCancellation.CancelAsync();
+            listener.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("""{"sourcePosition":1,"status":"   ","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"not-a-uuid"}""")]
+    public async Task PackagedTracerRejectsMalformedSuccessfulReceiptWithoutReplacingLastValidReceipt(
+        string malformedReceipt)
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-receipt-malformed-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Guid acceptedObservation = Guid.NewGuid();
+        using var serverCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<int> server = ServeResponsesAsync(
+            listener,
+            [
+                (HttpStatusCode.OK, Receipt(0, acceptedObservation)),
+                (HttpStatusCode.OK, malformedReceipt),
+                (HttpStatusCode.InternalServerError, """{"error":"unexpected delivery"}""")
+            ],
+            serverCancellation.Token);
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                TracerEnvironment(transcript, stateDirectory, port));
+            await serverCancellation.CancelAsync();
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Equal(2, await server);
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
+            Assert.Equal("new", stream.LastServerReceipt?.Status);
             Assert.Equal(acceptedObservation, stream.LastServerReceipt?.ObservationUuid);
         }
         finally

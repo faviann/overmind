@@ -110,15 +110,27 @@ try
                     $"Capture server receipt sourcePosition {receiptSourcePosition} " +
                     $"does not match queued sourcePosition {queued.SourcePosition}.");
             }
+            if (!root.TryGetProperty("status", out JsonElement statusElement)
+                || statusElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(statusElement.GetString()))
+            {
+                throw new InvalidDataException(
+                    "Capture server receipt status must be a nonblank string.");
+            }
+            if (!root.TryGetProperty(
+                    "observationUuid", out JsonElement observationUuidElement)
+                || !observationUuidElement.TryGetGuid(out Guid observationUuid))
+            {
+                throw new InvalidDataException(
+                    "Capture server receipt observationUuid must be a valid UUID.");
+            }
             await runtimeState.RecordServerReceiptAsync(
                 sessionId,
                 new CaptureServerReceiptState(
                     receiptSourcePosition,
                     queued.DeterministicLocatorEvidence.Identity,
-                    root.GetProperty("status").GetString() ?? "unknown",
-                    root.TryGetProperty("observationUuid", out JsonElement observationUuid)
-                        ? observationUuid.GetGuid()
-                        : null),
+                    statusElement.GetString()!,
+                    observationUuid),
                 cancellationToken);
             Console.WriteLine(receipt);
         });

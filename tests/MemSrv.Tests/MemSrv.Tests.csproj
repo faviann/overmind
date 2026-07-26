@@ -24,6 +24,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\CaptureAdapters\CaptureAdapters.csproj" />
     <ProjectReference Include="..\..\src\MemSrv.Core\MemSrv.Core.csproj" />
     <ProjectReference Include="..\..\src\MemSrv.Server\MemSrv.Server.csproj" />
     <ProjectReference Include="..\..\src\MemCtl\MemCtl.csproj" />

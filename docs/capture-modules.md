@@ -4,6 +4,9 @@ The capture spine (issue #74, stabilized by #120) is four public modules in
 `MemSrv.Core`. No module requires a caller to understand another's rules. This
 note records the shape that exists; it decides nothing new.
 
+Source interpretation before this spine is described by the
+[harness-neutral capture adapter contract](capture-adapter-contract.md).
+
 ## Modules and callers
 
 | Module | Public interface | Caller |
@@ -20,9 +23,10 @@ both project into canonical facts.
 ## Invariants each interface hides
 
 **`CaptureEnrollment`** — fail-closed safety configuration; never-store
-clearance of the stable name and derived agent id; the `mcap_` credential form;
-the codex-only restriction of this disabled slice; existence of the route
-namespace. Callers pass strings and get a binding uuid.
+clearance of the stable name, harness, and derived agent id; the `mcap_`
+credential form; a nonempty source-stated harness identity; existence of the route namespace.
+Callers pass strings and get a binding uuid. Enrollment records a harness
+identity but does not select or ship an adapter.
 
 **`CaptureAuthority`** — the only place a raw capture credential is compared.
 It applies the structural `mcap_` pre-check (a non-capture-form credential is

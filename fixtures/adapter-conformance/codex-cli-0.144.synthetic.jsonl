@@ -1,0 +1,9 @@
+{"timestamp":"2026-06-01T10:00:00.000Z","cli_version":"0.144.synthetic","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the synthetic workspace."}]},"additiveFixtureField":"retained"}
+{"cli_version":{"name":"0.144.synthetic"},"type":"response_item","model":{"name":"codex-synthetic-model"},"model_provider":{"name":"synthetic-provider"},"payload":{"type":"message","role":"assistant","content":"The synthetic workspace is ready."}}
+{"cli_version":"0.144.synthetic","type":"response_item","payload":{"type":"function_call","call_id":"codex_call_synthetic_1","name":"shell","arguments":{"command":"pwd"},"futureField":{"accepted":true}}}
+{"cli_version":"0.144.synthetic","type":"response_item","payload":{"type":"function_call_output","call_id":"codex_call_synthetic_1","outcome":"succeeded","output":[{"type":"output_text","text":"/synthetic/workspace"}]}}
+{"cli_version":"0.144.synthetic","type":"response_item","payload":{"type":"function_call_output","call_id":"codex_call_synthetic_2","outcome":"failed","output":"synthetic command failed"}}
+{"cli_version":"0.144.synthetic","type":"event_msg","payload":{"type":"error","message":"synthetic turn failure","outcome":"failed"}}
+{"cli_version":"0.144.synthetic","type":"compacted","payload":{"type":"compacted","trigger":"auto","outcome":"succeeded","summary":[{"text":"Synthetic compacted context."}],"metrics":{"beforeTokens":120,"afterTokens":40}}}
+{"cli_version":"0.144.synthetic","type":"event_msg","payload":{"type":"subagent_start","agent_id":"codex_child_synthetic_1","agent_type":"explorer","call_id":"codex_call_synthetic_spawn","parent_thread_id":"codex_parent_synthetic_1"}}
+{"cli_version":"0.144.synthetic","type":"future_rollout_record","payload":{"type":"future_payload","syntheticValue":"preserve me"}}

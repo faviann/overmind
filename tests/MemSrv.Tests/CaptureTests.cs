@@ -205,7 +205,7 @@ public sealed class CaptureTests : HttpSeamTestBase
     public async Task CaptureBindingIdentityMustCrossNeverStoreBeforeEnrollment()
     {
         string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
-        foreach (bool secretInStableName in new[] { true, false })
+        foreach (string secretField in new[] { "stable_name", "harness", "agent_id" })
         {
             string captureKey = CaptureCredential();
             string credentialPath = Path.Combine(
@@ -213,16 +213,19 @@ public sealed class CaptureTests : HttpSeamTestBase
             await File.WriteAllTextAsync(credentialPath, captureKey);
             try
             {
-                string stableName = secretInStableName
+                string stableName = secretField == "stable_name"
                     ? seededSyntheticSecret
                     : $"safe-binding-{Guid.NewGuid():N}";
-                string agentId = secretInStableName
-                    ? $"capture:safe-{Guid.NewGuid():N}"
-                    : seededSyntheticSecret;
+                string harness = secretField == "harness"
+                    ? seededSyntheticSecret
+                    : "codex";
+                string agentId = secretField == "agent_id"
+                    ? seededSyntheticSecret
+                    : $"capture:safe-{Guid.NewGuid():N}";
                 var rejected = await RunMemCtlForResultAsync(
                     null,
                     "capture", "enroll", stableName,
-                    "--harness", "codex",
+                    "--harness", harness,
                     "--agent-id", agentId,
                     "--credential-file", credentialPath);
                 Assert.NotEqual(0, rejected.ExitCode);

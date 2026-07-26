@@ -20,15 +20,12 @@ public sealed class CaptureEnrollment(string connectionString, NeverStoreGate ne
     {
         CaptureLedger.RequireSafetyConfigured(neverStore);
         CaptureLedger.Require(stableName, nameof(stableName));
+        CaptureLedger.Require(harness, nameof(harness));
         CaptureLedger.Require(agentId, nameof(agentId));
         neverStore.AssertAllowed(stableName);
+        neverStore.AssertAllowed(harness);
         neverStore.AssertAllowed(agentId);
         CaptureCredential.RequireCaptureForm(credential);
-        if (!string.Equals(harness, "codex", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("This disabled slice enrolls only harness 'codex'.");
-        }
-
         string effective = routeNamespace ?? "capture/unscoped";
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);

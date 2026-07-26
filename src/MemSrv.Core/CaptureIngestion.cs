@@ -39,7 +39,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 command.Source,
                 command.Adapter,
                 command.SourcePayload,
-                command.Events),
+                command.Events,
+                command.RouteEvidence),
             CaptureLedger.JsonOptions);
         string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
@@ -72,6 +73,12 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             JsonSerializer.Serialize(command.Source, CaptureLedger.JsonOptions), scan);
         string adapter = Redact(
             JsonSerializer.Serialize(command.Adapter, CaptureLedger.JsonOptions), scan);
+        var routeEvidenceScan = neverStore.Scan(
+            JsonSerializer.Serialize(command.RouteEvidence, CaptureLedger.JsonOptions));
+        scan.Add(routeEvidenceScan);
+        string routeEvidence = routeEvidenceScan.Redacted;
+        CaptureRouteEvidence? safeRouteEvidence =
+            routeEvidenceScan.RedactionCount == 0 ? command.RouteEvidence : null;
         string safePayload = Redact(command.SourcePayload.GetRawText(), scan);
         var safeEvents = command.Events.Select(item => new SafeEvent(
             item,
@@ -88,38 +95,49 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        string proposedNamespace = binding.RouteNamespace ?? "capture/unscoped";
-        string proposedRouteBasis = binding.RouteNamespace is null ? "fallback" : "configured_binding";
-        bool streamExists = await connection.ExecuteScalarAsync<bool>(
+        var stream = await connection.QuerySingleOrDefaultAsync<StreamRow>(
             """
-            SELECT EXISTS (
-              SELECT 1 FROM capture_source_streams
-              WHERE binding_uuid = @BindingUuid AND source_session_id = @SourceSessionId
-            )
+            SELECT stream_uuid AS StreamUuid, effective_namespace AS EffectiveNamespace,
+                   route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition
+            FROM capture_source_streams
+            WHERE binding_uuid = @BindingUuid AND source_session_id = @SourceSessionId
             """,
             new { binding.BindingUuid, command.SourceSessionId }, transaction);
-        if (!streamExists
-            && !binding.AllowedNamespaces.Contains(proposedNamespace, StringComparer.Ordinal))
+        bool streamWasEstablished = stream is not null;
+        if (stream is null)
         {
-            throw new InvalidOperationException("Binding route is outside its allowed namespaces.");
-        }
-        var stream = await connection.QuerySingleAsync<StreamRow>(
-            """
-            INSERT INTO capture_source_streams
-              (binding_uuid, source_session_id, effective_namespace, route_basis)
-            VALUES (@BindingUuid, @SourceSessionId, @proposedNamespace, @proposedRouteBasis)
-            ON CONFLICT (binding_uuid, source_session_id)
-            DO UPDATE SET updated_at = capture_source_streams.updated_at
-            RETURNING stream_uuid AS StreamUuid, effective_namespace AS EffectiveNamespace,
-                      route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition
-            """,
-            new
+            var route = await CaptureRouteResolver.ResolveAsync(
+                connection, transaction, binding, safeRouteEvidence);
+            stream = await connection.QuerySingleOrDefaultAsync<StreamRow>(
+                """
+                INSERT INTO capture_source_streams
+                  (binding_uuid, source_session_id, effective_namespace, route_basis)
+                VALUES (@BindingUuid, @SourceSessionId, @Namespace, @Basis)
+                ON CONFLICT (binding_uuid, source_session_id) DO NOTHING
+                RETURNING stream_uuid AS StreamUuid, effective_namespace AS EffectiveNamespace,
+                          route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition
+                """,
+                new
+                {
+                    binding.BindingUuid,
+                    command.SourceSessionId,
+                    route.Namespace,
+                    route.Basis
+                }, transaction);
+            if (stream is null)
             {
-                binding.BindingUuid,
-                command.SourceSessionId,
-                proposedNamespace,
-                proposedRouteBasis
-            }, transaction);
+                streamWasEstablished = true;
+                stream = await connection.QuerySingleAsync<StreamRow>(
+                    """
+                    SELECT stream_uuid AS StreamUuid, effective_namespace AS EffectiveNamespace,
+                           route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition
+                    FROM capture_source_streams
+                    WHERE binding_uuid = @BindingUuid AND source_session_id = @SourceSessionId
+                    """,
+                    new { binding.BindingUuid, command.SourceSessionId }, transaction);
+            }
+        }
+        string publicRouteBasis = streamWasEstablished ? "established" : stream.RouteBasis;
 
         var existingMatches = (await connection.QueryAsync<ExistingObservation>(
             """
@@ -168,7 +186,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 await transaction.CommitAsync(cancellationToken);
                 return new CaptureImportReceipt(
                     locatorMatch.ObservationUuid, "already_accepted", locatorMatch.SourcePosition,
-                    stream.EffectiveNamespace, stream.RouteBasis, oldObservation!, oldEvents);
+                    stream.EffectiveNamespace, "established", oldObservation!, oldEvents);
             }
 
             await transaction.RollbackAsync(cancellationToken);
@@ -190,14 +208,15 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
               (stream_uuid, source_position, locator_kind, locator_native_id,
                locator_byte_offset, locator_byte_length,
                source_timestamp_raw, source_timestamp_parsed, content_signature,
-               effective_namespace, route_basis, source, adapter, safe_source_payload,
+               effective_namespace, route_basis, source, route_evidence, adapter, safe_source_payload,
                scan_status, scan_rule_set_version, scan_rule_ids, scan_categories,
                scan_redaction_count)
             VALUES
               (@StreamUuid, @SourcePosition, @Kind, @NativeId,
                @ByteOffset, @ByteLength, @SourceTimestampRaw, @SourceTimestampParsed,
                @contentSignature,
-               @EffectiveNamespace, @RouteBasis, CAST(@source AS jsonb), CAST(@adapter AS jsonb),
+               @EffectiveNamespace, @RouteBasis, CAST(@source AS jsonb),
+               CAST(@routeEvidence AS jsonb), CAST(@adapter AS jsonb),
                CAST(@safePayload AS jsonb), @ScanStatus, @RuleSetVersion, @RuleIds,
                @Categories, @RedactionCount)
             RETURNING observation_uuid
@@ -216,6 +235,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 stream.EffectiveNamespace,
                 stream.RouteBasis,
                 source,
+                routeEvidence,
                 adapter,
                 safePayload,
                 ScanStatus = scan.RedactionCount == 0 ? "clean" : "redacted",
@@ -287,7 +307,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         await transaction.CommitAsync(cancellationToken);
         return new CaptureImportReceipt(
             observationUuid, "new", command.SourcePosition,
-            stream.EffectiveNamespace, stream.RouteBasis, observation!, receipts);
+            stream.EffectiveNamespace, publicRouteBasis, observation!, receipts);
     }
 
     private static CaptureConflictException ConflictAt(CaptureObservationCommand command) =>
@@ -396,7 +416,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureSource Source,
         CaptureAdapter Adapter,
         JsonElement SourcePayload,
-        IReadOnlyList<CaptureEvent> Events);
+        IReadOnlyList<CaptureEvent> Events,
+        CaptureRouteEvidence? RouteEvidence);
 
     private sealed class ScanAccumulator(string ruleSetVersion)
     {

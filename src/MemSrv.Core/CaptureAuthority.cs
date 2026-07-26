@@ -1,5 +1,6 @@
 using Dapper;
 using Npgsql;
+using System.Text.Json;
 
 namespace MemSrv.Core;
 
@@ -31,10 +32,21 @@ public sealed class CaptureAuthority(string connectionString)
         var row = await connection.QuerySingleOrDefaultAsync<BindingRow>(
             """
             SELECT binding_uuid AS BindingUuid, harness,
-                   agent_id AS AgentId, route_namespace AS RouteNamespace,
-                   allowed_namespaces AS AllowedNamespaces,
-                   content_signature_key AS ContentSignatureKey
-            FROM capture_source_bindings
+                   agent_id AS AgentId, content_signature_key AS ContentSignatureKey,
+                   COALESCE(p.allowed_repository_patterns, ARRAY[]::text[])
+                     AS AllowedRepositoryPatterns,
+                   COALESCE(p.remote_overrides, '[]'::jsonb)::text AS RemoteOverridesJson,
+                   COALESCE(p.directory_routes, '[]'::jsonb)::text AS DirectoryRoutesJson,
+                   COALESCE(p.special_namespaces, '[]'::jsonb)::text AS SpecialNamespacesJson
+            FROM capture_source_bindings b
+            LEFT JOIN LATERAL (
+              SELECT allowed_repository_patterns, remote_overrides,
+                     directory_routes, special_namespaces
+              FROM capture_route_policies
+              WHERE binding_uuid = b.binding_uuid
+              ORDER BY policy_version DESC
+              LIMIT 1
+            ) p ON true
             WHERE credential_hash = @credentialHash AND active
             """,
             new { credentialHash = CaptureCredential.Hash(credential) });
@@ -44,9 +56,15 @@ public sealed class CaptureAuthority(string connectionString)
                 row.BindingUuid,
                 row.Harness,
                 row.AgentId,
-                row.RouteNamespace,
-                row.AllowedNamespaces,
-                row.ContentSignatureKey);
+                row.ContentSignatureKey,
+                new CaptureRoutingPolicy(
+                    row.AllowedRepositoryPatterns,
+                    JsonSerializer.Deserialize<CaptureRouteOverride[]>(
+                        row.RemoteOverridesJson, CaptureLedger.JsonOptions) ?? [],
+                    JsonSerializer.Deserialize<CaptureDirectoryRoute[]>(
+                        row.DirectoryRoutesJson, CaptureLedger.JsonOptions) ?? [],
+                    JsonSerializer.Deserialize<CaptureSpecialNamespace[]>(
+                        row.SpecialNamespacesJson, CaptureLedger.JsonOptions) ?? []));
     }
 
     private sealed class BindingRow
@@ -54,8 +72,10 @@ public sealed class CaptureAuthority(string connectionString)
         public Guid BindingUuid { get; set; }
         public string Harness { get; set; } = "";
         public string AgentId { get; set; } = "";
-        public string? RouteNamespace { get; set; }
-        public string[] AllowedNamespaces { get; set; } = [];
         public byte[] ContentSignatureKey { get; set; } = [];
+        public string[] AllowedRepositoryPatterns { get; set; } = [];
+        public string RemoteOverridesJson { get; set; } = "[]";
+        public string DirectoryRoutesJson { get; set; } = "[]";
+        public string SpecialNamespacesJson { get; set; } = "[]";
     }
 }

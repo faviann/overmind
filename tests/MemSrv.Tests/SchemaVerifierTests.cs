@@ -282,6 +282,135 @@ public sealed class SchemaVerifierTests
         }
     }
 
+    [Fact]
+    public async Task RoutingPolicyUpgradePreservesAcceptedObservationsAndReadsMissingRouteEvidence()
+    {
+        var migrations = Path.Combine(
+            Path.GetTempPath(), $"memsrv-routing-upgrade-{Guid.NewGuid():N}");
+        var database = $"memory_test_{Guid.NewGuid():N}_routing_upgrade";
+        var admin = TestDatabase.BuildAdminConnection(database);
+        Directory.CreateDirectory(migrations);
+        foreach (string path in Directory.EnumerateFiles(
+                     Path.Combine(_root, "migrations"), "*.sql")
+                     .Where(path => string.Compare(
+                         Path.GetFileName(path),
+                         "0007_capture_routing_policy.sql",
+                         StringComparison.Ordinal) < 0))
+        {
+            File.Copy(path, Path.Combine(migrations, Path.GetFileName(path)));
+        }
+
+        try
+        {
+            await ExecuteAsync(MaintenanceConnection, $"CREATE DATABASE \"{database}\"");
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+            Guid observationUuid;
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                observationUuid = await connection.ExecuteScalarAsync<Guid>(
+                    """
+                    WITH binding AS (
+                      INSERT INTO capture_source_bindings
+                        (stable_name, harness, agent_id, credential_hash,
+                         allowed_namespaces)
+                      VALUES
+                        ('legacy-routing-upgrade', 'codex', 'capture:legacy',
+                         'legacy-credential-hash', '{}')
+                      RETURNING binding_uuid
+                    ),
+                    stream AS (
+                      INSERT INTO capture_source_streams
+                        (binding_uuid, source_session_id, effective_namespace,
+                         route_basis, checkpoint_position)
+                      SELECT binding_uuid, 'legacy-session', 'capture/unscoped',
+                             'fallback', 0
+                      FROM binding
+                      RETURNING stream_uuid
+                    )
+                    INSERT INTO capture_observations
+                      (stream_uuid, source_position, locator_kind,
+                       locator_native_id, content_signature,
+                       effective_namespace, route_basis, source, adapter,
+                       safe_source_payload, scan_status)
+                    SELECT stream_uuid, 0, 'native_id', 'legacy-record',
+                           'legacy-signature', 'capture/unscoped', 'fallback',
+                           '{"harness":"codex"}'::jsonb,
+                           '{"name":"legacy","version":"1"}'::jsonb,
+                           '{}'::jsonb, 'clean'
+                    FROM stream
+                    RETURNING observation_uuid
+                    """);
+                await connection.ExecuteAsync(
+                    """
+                    INSERT INTO captured_events
+                      (observation_uuid, session_id, agent_id, namespace,
+                       part_key, part_order, kind, actor, payload)
+                    VALUES
+                      (@observationUuid, 'legacy-session', 'capture:legacy',
+                       'capture/unscoped', 'legacy-part', 0, 'message', 'user',
+                       '{}'::jsonb)
+                    """,
+                    new { observationUuid });
+            }
+
+            string xminBefore;
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                xminBefore = await connection.ExecuteScalarAsync<string>(
+                    """
+                    SELECT xmin::text
+                    FROM capture_observations
+                    WHERE observation_uuid = @observationUuid
+                    """,
+                    new { observationUuid })
+                    ?? throw new InvalidOperationException("Seeded observation was not found.");
+            }
+
+            File.Copy(
+                Path.Combine(_root, "migrations", "0007_capture_routing_policy.sql"),
+                Path.Combine(migrations, "0007_capture_routing_policy.sql"));
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                Assert.Equal(
+                    xminBefore,
+                    await connection.ExecuteScalarAsync<string>(
+                        """
+                        SELECT xmin::text
+                        FROM capture_observations
+                        WHERE observation_uuid = @observationUuid
+                        """,
+                        new { observationUuid }));
+                Assert.Equal(
+                    "O",
+                    await connection.ExecuteScalarAsync<string>(
+                        """
+                        SELECT tgenabled::text
+                        FROM pg_trigger
+                        WHERE tgrelid = 'capture_observations'::regclass
+                          AND tgname = 'capture_observations_immutable'
+                        """));
+            }
+
+            var envelope = Assert.Single(
+                await new OperatorCaptureReads(admin)
+                    .ReadCapturedEventEnvelopesAsync(observationUuid));
+            Assert.Null(envelope.Observation.RouteEvidence);
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            await ExecuteAsync(
+                MaintenanceConnection,
+                $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
+            Directory.Delete(migrations, recursive: true);
+        }
+    }
+
     private async Task WithDisposableDbAsync(Func<string, Task> body)
     {
         var dbName = $"memory_test_{Guid.NewGuid():N}_verify";

@@ -30,7 +30,8 @@ public sealed record CaptureObservationRequest(
     CaptureSource Source,
     CaptureAdapter Adapter,
     JsonElement SourcePayload,
-    IReadOnlyList<CaptureEvent> Events);
+    IReadOnlyList<CaptureEvent> Events,
+    CaptureRouteEvidence? RouteEvidence = null);
 
 // ---------------------------------------------------------------------------
 // Shared source facts.
@@ -45,6 +46,10 @@ public sealed record CaptureSource(
     string? MaterialKind = null);
 public sealed record CaptureAdapter(string Name, string Version);
 public sealed record CaptureSourceTimestamp(string Raw, DateTimeOffset? Parsed);
+public sealed record CaptureRemote(string Name, string Url);
+public sealed record CaptureRouteEvidence(
+    string? WorkingDirectory,
+    IReadOnlyList<CaptureRemote>? Remotes);
 public sealed record CaptureRelationshipTarget(
     Guid? SourceStreamUuid,
     string NativeId,
@@ -216,7 +221,8 @@ public sealed record CaptureObservationCommand(
     CaptureSource Source,
     CaptureAdapter Adapter,
     JsonElement SourcePayload,
-    IReadOnlyList<CaptureEvent> Events)
+    IReadOnlyList<CaptureEvent> Events,
+    CaptureRouteEvidence? RouteEvidence)
 {
     public static CaptureObservationCommand FromRequest(CaptureObservationRequest request) =>
         new(
@@ -228,7 +234,8 @@ public sealed record CaptureObservationCommand(
             request.Source,
             request.Adapter,
             request.SourcePayload,
-            request.Events);
+            request.Events,
+            request.RouteEvidence);
 }
 
 /// <summary>
@@ -239,9 +246,20 @@ public sealed record CaptureBindingContext(
     Guid BindingUuid,
     string Harness,
     string AgentId,
-    string? RouteNamespace,
-    IReadOnlyList<string> AllowedNamespaces,
-    byte[] ContentSignatureKey);
+    byte[] ContentSignatureKey,
+    CaptureRoutingPolicy RoutingPolicy);
+
+public sealed record CaptureRouteOverride(string Remote, string Target);
+public sealed record CaptureDirectoryRoute(string Directory, string Target);
+public sealed record CaptureSpecialNamespace(string Alias, string Namespace);
+public sealed record CaptureRoutingPolicy(
+    IReadOnlyList<string> AllowedRepositoryPatterns,
+    IReadOnlyList<CaptureRouteOverride> RemoteOverrides,
+    IReadOnlyList<CaptureDirectoryRoute> DirectoryRoutes,
+    IReadOnlyList<CaptureSpecialNamespace> SpecialNamespaces)
+{
+    public static CaptureRoutingPolicy Empty { get; } = new([], [], [], []);
+}
 
 // ---------------------------------------------------------------------------
 // Canonical capture facts. One set, shared by import responses and operator
@@ -261,6 +279,7 @@ public sealed record CaptureObservationReceipt(
     CaptureSource Source,
     CaptureSourceLocator Locator,
     CaptureSourceTimestamp? SourceTimestamp,
+    CaptureRouteEvidence? RouteEvidence,
     CaptureAdapter Adapter,
     JsonElement SafeSourcePayload,
     CaptureScanReceipt Scan,

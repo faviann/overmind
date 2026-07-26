@@ -1,8 +1,9 @@
 # Capture modules
 
-The capture spine (issue #74, stabilized by #120) is four public modules in
-`MemSrv.Core`. No module requires a caller to understand another's rules. This
-note records the shape that exists; it decides nothing new.
+The capture spine (issue #74, stabilized by #120 and routed by #77) is five
+public modules in `MemSrv.Core`. No module requires a caller to understand
+another's rules. This note records the shape that exists; it decides nothing
+new.
 
 Source interpretation before this spine is described by the
 [harness-neutral capture adapter contract](capture-adapter-contract.md).
@@ -11,7 +12,8 @@ Source interpretation before this spine is described by the
 
 | Module | Public interface | Caller |
 | --- | --- | --- |
-| `CaptureEnrollment` | `EnrollAsync(stableName, harness, agentId, credential, routeNamespace)` → binding uuid | `memctl capture enroll` |
+| `CaptureEnrollment` | `EnrollAsync(stableName, harness, agentId, credential)` → binding uuid | `memctl capture enroll` |
+| `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
@@ -24,24 +26,32 @@ both project into canonical facts.
 
 **`CaptureEnrollment`** — fail-closed safety configuration; never-store
 clearance of the stable name, harness, and derived agent id; the `mcap_`
-credential form; a nonempty source-stated harness identity; existence of the route namespace.
+credential form; and a nonempty source-stated harness identity.
 Callers pass strings and get a binding uuid. Enrollment records a harness
 identity but does not select or ship an adapter.
+
+**`CaptureRoutePolicyStore`** — atomic, binding-scoped prospective policy
+replacement through an append-only version row. It canonicalizes raw repository
+patterns, remote keys, directory paths, and repository targets for every caller,
+requires repository targets to match the binding's allowed patterns, requires
+special aliases to resolve to existing non-reserved namespaces, and never edits
+an established stream.
 
 **`CaptureAuthority`** — the only place a raw capture credential is compared.
 It applies the structural `mcap_` pre-check (a non-capture-form credential is
 rejected with no database round trip), hashes the credential, and requires an
 active binding. A non-null result *is* the authorization decision and carries
-every fact ingestion needs: binding uuid, harness, agent id, route namespace,
-allowed namespaces, and the per-binding content-signature key.
+every fact ingestion needs: binding uuid, harness, agent id, the latest
+binding-scoped routing policy, and the per-binding content-signature key.
 `null` means "reject before reading the body".
 
 **`CaptureIngestion`** — contract version, binding/harness agreement, unique
 part keys, relationship shape, the observation size ceiling, the never-store
 gate, the binding-keyed retry signature (which covers the `byte_range` source
-content digest that is signed but never persisted), route fixation on first
-import, contiguous checkpoint advance, locator idempotency and conflict, and
-the single transaction over observation + events + relationships + checkpoint.
+content digest that is signed but never persisted), evidence-driven route
+derivation and fixation on first import, contiguous checkpoint advance,
+locator idempotency and conflict, and the single transaction over observation
++ events + relationships + checkpoint.
 It never resolves a credential; authorization arrives already decided.
 
 **`OperatorCaptureReads`** — envelope assembly. It returns complete versioned

@@ -139,7 +139,10 @@ position and returned byte-range locator match the queued responsibility, whose
 top-level and nested observation UUIDs agree, and whose server-derived source
 stream UUID matches the durable binding established by the first conclusive
 receipt. Outages, malformed or unknown responses, identity mismatches, and lost
-success responses therefore leave the item queued for restart.
+success responses therefore leave the item queued for retry. Each HTTP attempt
+has a five-second response bound. Expiring that internal bound becomes a
+retryable delivery timeout for the scheduler; cancellation from the scheduler
+remains `OperationCanceledException` and is never reclassified or swallowed.
 
 ## Where the gate runs
 

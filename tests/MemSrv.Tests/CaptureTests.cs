@@ -1182,6 +1182,103 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ScheduledPackagedTracerRetriesAWithheldResponseWithoutRestart()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-timeout-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-timeout-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        string firstRecord = (await File.ReadAllLinesAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl")))[0] + "\n";
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "timeout.jsonl"),
+            firstRecord,
+            new UTF8Encoding(false));
+        int proxyPort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            proxyPort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+        using var proxy = new HttpListener();
+        proxy.Prefixes.Add($"http://127.0.0.1:{proxyPort}/");
+        proxy.Start();
+        var secondAttemptAccepted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecondAttempt = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<JsonElement> server = WithholdFirstAndForwardSecondAsync(
+            proxy,
+            captureKey,
+            secondAttemptAccepted,
+            releaseSecondAttempt);
+
+        using var process = TestProcessRunner.StartCaptureTracer(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{proxyPort}",
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "50",
+                ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+            });
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            await secondAttemptAccepted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.False(process.HasExited);
+            CaptureRuntimeStreamState retained = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal([0L], retained.Queue.Select(item => item.SourcePosition));
+            Assert.Null(retained.LastServerReceipt);
+
+            releaseSecondAttempt.SetResult();
+            JsonElement retry = await ReadTracerReceiptAsync(process);
+            JsonElement accepted = await server;
+            Assert.Equal("new", retry.GetProperty("status").GetString());
+            Assert.Equal(
+                accepted.GetProperty("observationUuid").GetGuid(),
+                retry.GetProperty("observationUuid").GetGuid());
+            Guid sourceStreamUuid = retry.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid();
+
+            CaptureRuntimeStreamState converged = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(0, converged.EnqueuedThrough);
+            Assert.Empty(converged.Queue);
+            Assert.Equal(
+                "new",
+                converged.LastServerReceipt?.Status);
+            string canonical = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                retry.GetProperty("observationUuid").GetGuid().ToString());
+            Assert.Contains("\"kind\":\"message\"", canonical);
+            Assert.Equal(
+                new CaptureLedgerMechanics(1, 1, 0, 0),
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
+        }
+        finally
+        {
+            releaseSecondAttempt.TrySetResult();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            await stderr;
+            proxy.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ScheduledPackagedTracerRestartConvergesAfterLostSuccessResponse()
     {
         var captureKey = CaptureCredential();
@@ -2253,6 +2350,42 @@ public sealed class CaptureTests : HttpSeamTestBase
             context.Response.Close();
         }
         return [.. receipts];
+    }
+
+    private async Task<JsonElement> WithholdFirstAndForwardSecondAsync(
+        HttpListener listener,
+        string captureKey,
+        TaskCompletionSource secondAttemptAccepted,
+        TaskCompletionSource releaseSecondAttempt)
+    {
+        HttpListenerContext first = await listener.GetContextAsync()
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        using (var reader = new StreamReader(
+            first.Request.InputStream, Encoding.UTF8, leaveOpen: true))
+        {
+            await reader.ReadToEndAsync();
+        }
+
+        HttpListenerContext second = await listener.GetContextAsync()
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        secondAttemptAccepted.SetResult();
+        await releaseSecondAttempt.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        using var content = new StreamContent(second.Request.InputStream);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var client = CaptureClient(captureKey);
+        using HttpResponseMessage response = await client.PostAsync(
+            "/capture/v1/observations", content);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        string responseBody = await response.Content.ReadAsStringAsync();
+        byte[] responseBytes = Encoding.UTF8.GetBytes(responseBody);
+        second.Response.StatusCode = (int)HttpStatusCode.OK;
+        second.Response.ContentType = "application/json";
+        second.Response.ContentLength64 = responseBytes.Length;
+        await second.Response.OutputStream.WriteAsync(responseBytes);
+        second.Response.Close();
+        first.Response.Abort();
+        return JsonDocument.Parse(responseBody).RootElement.Clone();
     }
 
     private static JsonElement[] ParseReceiptLines(string stdout) =>

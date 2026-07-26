@@ -68,6 +68,22 @@ real 128 MiB and 64 MiB documented numbers, but inject a smaller
 keep the large cases in one class so only one is live at a time under the
 concurrent shards.
 
+### Module-surface tests for scheduled synthetic capture
+
+The disabled synthetic runtime has four deterministic mechanisms whose bounds
+cannot be observed honestly through `memctl`: scheduler delay/jitter and
+non-overlap, named schedule-configuration binding, transcript discovery with
+logical identity and terminal archive evidence, and per-stream filesystem
+isolation with claim-state mechanics. Their documented public module surfaces
+in `docs/capture-modules.md` are legitimate focused test seams, limited to
+those mechanisms.
+
+This is not a general license to test capture behavior through modules.
+Startup/resume, delivery retry and timeout convergence, append/archive
+transitions, and canonical results must retain packaged-apphost coverage
+through the real HTTP API and `memctl` operator reads. Direct database checks
+remain limited to the mechanical categories above.
+
 Namespace isolation and private-memory invisibility are binding acceptance
 behaviors, but their seam is keyed MCP agents. Verify them through public
 searches and reads, not direct table assertions.

@@ -79,6 +79,12 @@ before the next delay begins, so cycles never overlap. New files and completed
 appends are discovered without a hook; endpoint failures stay durably queued
 and are retried by later cycles or process restart.
 
+Each capture request has a five-second response bound. A connection that accepts
+the request but never returns a conclusive response leaves responsibility
+queued and is retried by the next scheduled cycle. This internal request
+timeout is distinct from external scheduler cancellation, which stops the
+process promptly rather than becoming another retry.
+
 The configured root may model Codex's filesystem lifecycle with nested active
 rollouts at `sessions/YYYY/MM/DD/<filename>.jsonl` and flat archived rollouts
 at `archived_sessions/<filename>.jsonl`. While a file is under `sessions/`, a

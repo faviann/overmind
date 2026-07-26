@@ -73,8 +73,12 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             JsonSerializer.Serialize(command.Source, CaptureLedger.JsonOptions), scan);
         string adapter = Redact(
             JsonSerializer.Serialize(command.Adapter, CaptureLedger.JsonOptions), scan);
-        string routeEvidence = Redact(
-            JsonSerializer.Serialize(command.RouteEvidence, CaptureLedger.JsonOptions), scan);
+        var routeEvidenceScan = neverStore.Scan(
+            JsonSerializer.Serialize(command.RouteEvidence, CaptureLedger.JsonOptions));
+        scan.Add(routeEvidenceScan);
+        string routeEvidence = routeEvidenceScan.Redacted;
+        CaptureRouteEvidence? safeRouteEvidence =
+            routeEvidenceScan.RedactionCount == 0 ? command.RouteEvidence : null;
         string safePayload = Redact(command.SourcePayload.GetRawText(), scan);
         var safeEvents = command.Events.Select(item => new SafeEvent(
             item,
@@ -103,7 +107,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (stream is null)
         {
             var route = await CaptureRouteResolver.ResolveAsync(
-                connection, transaction, binding, command.RouteEvidence);
+                connection, transaction, binding, safeRouteEvidence);
             stream = await connection.QuerySingleOrDefaultAsync<StreamRow>(
                 """
                 INSERT INTO capture_source_streams

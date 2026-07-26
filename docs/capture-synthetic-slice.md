@@ -38,11 +38,11 @@ memctl capture route-policy my-codex-fixture \
 
 Options are repeatable. Repository patterns match normalized lowercase
 `owner/name`; repository destinations use `repo/owner/name`. A remote override
-key accepts HTTPS, SSH URL, or scp-style Git syntax and is stored as normalized
-lowercase `host/owner/name`. Directory keys must be absolute and are normalized;
-the longest boundary-respecting match wins. A special destination must use
-`special:alias`, and the alias must map to an existing, non-reserved namespace.
-Whitespace around `=` is ignored.
+key accepts an absolute URL with a host or scp-style Git syntax and is stored as
+normalized lowercase `host/owner/name`. Directory keys must be absolute and are
+normalized; the longest boundary-respecting match wins. A special destination
+must use `special:alias`, and the alias must map to an existing, non-reserved
+namespace. Whitespace around `=` is ignored.
 
 Routing precedence is an explicit normalized-remote override (origin matches
 first, then source order), automatic normalized `origin` routing when its

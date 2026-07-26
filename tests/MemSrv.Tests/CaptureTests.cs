@@ -1138,6 +1138,102 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task UnsafeRouteEvidenceCannotSelectANewRouteOrChangeAnEstablishedRoute()
+    {
+        string binding = $"codex-route-safety-{Guid.NewGuid():N}";
+        string captureKey = CaptureCredential();
+        string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--allow-repository", "faviann/*");
+        using var client = CaptureClient(captureKey);
+
+        var unsafeNewResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                UniqueSession(),
+                0,
+                "unsafe-new-route-0",
+                "/workspace",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = $"https://github.com/faviann/{seededSyntheticSecret}.git"
+                    }
+                ]));
+
+        Assert.Equal(HttpStatusCode.OK, unsafeNewResponse.StatusCode);
+        var unsafeNewReceipt =
+            await unsafeNewResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "capture/unscoped",
+            unsafeNewReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("fallback", unsafeNewReceipt.GetProperty("routeBasis").GetString());
+        string unsafeNewShown = await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            unsafeNewReceipt.GetProperty("observationUuid").GetGuid().ToString());
+        Assert.DoesNotContain(seededSyntheticSecret, unsafeNewShown);
+        Assert.Contains("[REDACTED:aws-access-key-id]", unsafeNewShown);
+
+        string establishedSession = UniqueSession();
+        var establishedResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                establishedSession,
+                0,
+                "established-route-0",
+                "/workspace",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = "https://github.com/faviann/overmind.git"
+                    }
+                ]));
+        Assert.Equal(HttpStatusCode.OK, establishedResponse.StatusCode);
+        var establishedReceipt =
+            await establishedResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            establishedReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal("origin", establishedReceipt.GetProperty("routeBasis").GetString());
+
+        var unsafeEstablishedResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RoutedObservation(
+                establishedSession,
+                1,
+                "established-route-1",
+                "/workspace",
+                [
+                    new
+                    {
+                        name = "origin",
+                        url = $"https://github.com/faviann/{seededSyntheticSecret}.git"
+                    }
+                ]));
+
+        Assert.Equal(HttpStatusCode.OK, unsafeEstablishedResponse.StatusCode);
+        var unsafeEstablishedReceipt =
+            await unsafeEstablishedResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "repo/faviann/overmind",
+            unsafeEstablishedReceipt.GetProperty("effectiveNamespace").GetString());
+        Assert.Equal(
+            "established",
+            unsafeEstablishedReceipt.GetProperty("routeBasis").GetString());
+        string unsafeEstablishedShown = await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            unsafeEstablishedReceipt.GetProperty("observationUuid").GetGuid().ToString());
+        Assert.DoesNotContain(seededSyntheticSecret, unsafeEstablishedShown);
+        Assert.Contains("[REDACTED:aws-access-key-id]", unsafeEstablishedShown);
+    }
+
+    [Fact]
     public async Task PayloadNamespaceClaimsCannotExpandCaptureRoutingAuthority()
     {
         string binding = $"codex-namespace-claim-{Guid.NewGuid():N}";

@@ -36,8 +36,9 @@ public static class HttpServerHost
         builder.Services.AddSingleton(_ => new NeverStoreGate(options.NeverStorePath));
         builder.Services.AddSingleton(provider =>
             new MemoryService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
+        builder.Services.AddSingleton(_ => new CaptureAuthority(options.ConnectionString));
         builder.Services.AddSingleton(provider =>
-            new CaptureService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
+            new CaptureIngestion(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddSingleton<MemoryContextResolver>();
@@ -74,10 +75,12 @@ public static class HttpServerHost
         });
 
         // Deliberately outside MCP authentication: capture credentials are a
-        // separate capability and are resolved only by the capture service.
-        // Read the body only after the credential has resolved, so unknown
-        // credentials receive 401 before payload parsing or safety work.
-        app.MapPost("/capture/v1/observations", async (HttpContext http, CaptureService capture) =>
+        // separate capability resolved only by CaptureAuthority. Capture
+        // authority resolves first, so an unknown credential receives 401
+        // before the body is read, parsed, or scanned; ingestion then receives
+        // the one authenticated binding context rather than the raw credential.
+        app.MapPost("/capture/v1/observations", async (
+            HttpContext http, CaptureAuthority authority, CaptureIngestion ingestion) =>
         {
             string header = http.Request.Headers.Authorization.ToString();
             const string prefix = "Bearer ";
@@ -88,12 +91,12 @@ public static class HttpServerHost
             }
 
             string credential = header[prefix.Length..].Trim();
-            if (!await capture.IsCredentialKnownAsync(credential, http.RequestAborted))
+            var binding = await authority.ResolveAsync(credential, http.RequestAborted);
+            if (binding is null)
             {
                 return Results.Unauthorized();
             }
 
-            CaptureObservationRequest? request;
             try
             {
                 byte[]? body = await ReadCaptureBodyAsync(
@@ -102,14 +105,17 @@ public static class HttpServerHost
                 {
                     return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
                 }
-                request = JsonSerializer.Deserialize<CaptureObservationRequest>(
+                var request = JsonSerializer.Deserialize<CaptureObservationRequest>(
                     body, JsonOptions);
                 if (request is null)
                 {
                     return Results.BadRequest(new { error = "A capture observation body is required." });
                 }
-                var receipt = await capture.ImportAsync(credential, request, http.RequestAborted);
-                return receipt is null ? Results.Unauthorized() : Results.Ok(receipt);
+                // Locator variants are validated here, at the wire seam; past
+                // this point only the closed internal representation exists.
+                var command = CaptureObservationCommand.FromRequest(request);
+                var receipt = await ingestion.ImportAsync(binding, command, http.RequestAborted);
+                return Results.Ok(receipt);
             }
             catch (CaptureConflictException ex)
             {

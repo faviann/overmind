@@ -280,15 +280,15 @@ static async Task TraceAsync(MemSrvOptions options, string sessionId)
 
 static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
 {
-    var capture = new CaptureService(
-        options.ConnectionString, new NeverStoreGate(options.NeverStorePath));
     switch (args[1])
     {
         case "enroll":
             RequireArgs(args, 3);
+            var enrollment = new CaptureEnrollment(
+                options.ConnectionString, new NeverStoreGate(options.NeverStorePath));
             string credentialPath = RequireOption(args, "--credential-file");
             string credential = (await File.ReadAllTextAsync(credentialPath)).Trim();
-            var bindingUuid = await capture.EnrollAsync(
+            var bindingUuid = await enrollment.EnrollAsync(
                 args[2],
                 RequireOption(args, "--harness"),
                 RequireOption(args, "--agent-id"),
@@ -302,25 +302,10 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
 
         case "receipt":
             RequireArgs(args, 3);
-            var receipt = await capture.ReadReceiptAsync(Guid.Parse(args[2]));
-            foreach (var item in receipt.Events)
+            var envelopes = await new OperatorCaptureReads(options.ConnectionString)
+                .ReadCapturedEventEnvelopesAsync(Guid.Parse(args[2]));
+            foreach (var envelope in envelopes)
             {
-                var envelope = new CapturedEventEnvelope(
-                    1,
-                    receipt.Observation,
-                    new CanonicalCapturedEvent(
-                        item.TraceUuid,
-                        item.SessionId,
-                        item.AgentId,
-                        item.Namespace,
-                        item.PartKey,
-                        item.PartOrder,
-                        item.Kind,
-                        item.Actor,
-                        item.OccurredAt,
-                        item.PayloadVersion,
-                        item.Payload),
-                    item.Relationships);
                 Console.WriteLine(JsonSerializer.Serialize(
                     envelope, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
             }

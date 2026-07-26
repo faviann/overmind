@@ -9,8 +9,18 @@
 # matcher runs), a supported `matcher` (`regex` or `sensitive_field`), and a
 # `pattern`. Anything else fails closed at load.
 #
-# Overlap resolution: highest priority wins; ties break by longest match, then
-# by rule id ordinal, then by earliest start.
+# A prefilter is an OPTIMISATION, never a filter: it gates whether the matcher
+# runs at all, so every alternative a pattern can match must contain one of its
+# prefilter literals — including the separator-less forms a `[_-]?` group
+# allows. Prefer a short covering stem ("key") over one literal per spelling
+# ("api_key,apikey,api-key"): each prefilter costs a full case-insensitive
+# scan of the leaf, so fewer, broader stems are both safer and cheaper.
+# SafetyGateTests.EveryPatternAlternativeIsReachableThroughItsPrefilter sweeps
+# every alternation path in this file and fails if one is unreachable.
+#
+# Overlap resolution: overlapping matches merge into one union span; the span
+# is attributed to the highest-priority rule among them, with ties broken by
+# the longest original match and then by rule id ordinal.
 #
 # Operator-provisioned exact credential values do NOT live here. They live in
 # the separate operator-owned file named by MEMSRV_NEVER_STORE_LITERALS_PATH,
@@ -135,7 +145,7 @@ rules:
   - id: sensitive-field-value
     category: structured_field
     priority: 50
-    prefilter: "password,passwd,passphrase,secret,api_key,apikey,api-key,token,credential,authorization,private_key,privatekey,connection_string,session_key"
+    prefilter: "pass,secret,key,token,authorization,credential,connection"
     matcher: sensitive_field
     pattern: '(?i)^([a-z0-9.-]*[_.-])?(password|passwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|authorization|private[_-]?key|secret[_-]?key|secret[_-]?access[_-]?key|credential|credentials|connection[_-]?string|session[_-]?key)$'
 
@@ -145,6 +155,6 @@ rules:
   - id: sensitive-assignment
     category: structured_field
     priority: 45
-    prefilter: "password,passwd,passphrase,secret,api_key,apikey,api-key,token,credential,connection_string,private_key"
+    prefilter: "pass,secret,key,token,credential,connection"
     matcher: regex
     pattern: '(?i)(^|[^A-Za-z0-9_])([a-z0-9.-]*[_.-])?(secret[_-]?access[_-]?key|client[_-]?secret|connection[_-]?string|passphrase|password|passwd|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|session[_-]?key|credentials|credential|secret|token)\s*[:=]\s*("[^"\r\n]+"|''[^''\r\n]+''|[^\s,;)\]}"'']+)'

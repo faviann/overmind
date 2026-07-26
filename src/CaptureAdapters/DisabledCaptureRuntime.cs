@@ -53,10 +53,14 @@ public static class DisabledCaptureRuntime
             var terminal = (CaptureSourcePositionOutcome.Terminal)outcome;
             string observationJson = JsonSerializer.Serialize(
                 terminal.Observation, JsonDefaults.Options);
-            // Fail closed before the observation leaves the process: an
-            // exhausted budget or a value that cannot be inspected completely
-            // throws out of here and nothing is sent. The scan result itself is
-            // deliberately discarded — the wire carries the original bytes.
+            // Fail closed before the observation leaves the process: the scan
+            // runs here, and a scan FAILURE — an exhausted budget, a matcher
+            // timeout, an internal scanner error, or an unusable rule set —
+            // throws out of here and nothing is sent. A leaf the scanner
+            // cannot map to an exact span is not a failure: it becomes an
+            // explicit omission the server persists as one, so this call does
+            // not refuse on omissions. The scan result itself is deliberately
+            // discarded — the wire carries the original bytes.
             safetyGate.AssertObservationWithinBudget(observationJson);
             safetyGate.ScanJson(observationJson);
             using var content = new StringContent(

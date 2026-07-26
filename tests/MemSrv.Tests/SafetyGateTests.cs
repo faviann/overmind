@@ -275,6 +275,77 @@ public sealed class SafetyGateTests : IDisposable
         Assert.DoesNotContain(SecretCore(value), result.Redacted, StringComparison.Ordinal);
     }
 
+    // A prefilter gates its matcher entirely: PrefilterHits decides whether the
+    // regex runs at all, so an alternative no prefilter literal can reach is a
+    // silent false negative, not a slow path. This sweep enumerates every
+    // alternation/optional path through every governed pattern and proves each
+    // one is reachable, so adding an alternative without widening the prefilter
+    // fails here rather than in production.
+    [Fact]
+    public void EveryPatternAlternativeIsReachableThroughItsPrefilter()
+    {
+        Assert.True(
+            SecretRuleSet.TryLoad(
+                _shippedRules, null, SafetyBudgets.Default.MaxRuleTime,
+                out var ruleSet, out string? reason),
+            reason);
+
+        var unreachable = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var rule in ruleSet!.Rules)
+        {
+            foreach (string path in PatternPaths.Expand(rule.Compiled.ToString()))
+            {
+                string[] runs = path.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+                bool reachable = runs.Any(run => rule.Prefilters.Any(
+                    prefilter => run.Contains(prefilter, StringComparison.OrdinalIgnoreCase)));
+                if (!reachable)
+                {
+                    unreachable.Add($"{rule.Id}: {string.Join(" … ", runs)}");
+                }
+            }
+        }
+
+        Assert.True(
+            unreachable.Count == 0,
+            "these pattern alternatives can never run, because no prefilter literal "
+            + "appears in text they match:\n  " + string.Join("\n  ", unreachable));
+    }
+
+    [Theory]
+    [InlineData("session_key=synthetic-fake-value-0101")]
+    [InlineData("session-key=synthetic-fake-value-0102")]
+    [InlineData("sessionkey=synthetic-fake-value-0103")]
+    [InlineData("connection_string=synthetic-fake-value-0104")]
+    [InlineData("connection-string=synthetic-fake-value-0105")]
+    [InlineData("connectionstring=synthetic-fake-value-0106")]
+    [InlineData("private-key=synthetic-fake-value-0107")]
+    [InlineData("privatekey=synthetic-fake-value-0108")]
+    public void SeparatorVariantsOfAGovernedNameAreRedactedInFreeText(string assignment)
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+
+        var result = gate.Scan(assignment);
+
+        Assert.Contains("sensitive-assignment", result.RuleIds);
+        Assert.DoesNotContain("synthetic-fake-value", result.Redacted, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("session-key")]
+    [InlineData("sessionkey")]
+    [InlineData("connection-string")]
+    [InlineData("connectionstring")]
+    [InlineData("private-key")]
+    public void SeparatorVariantsOfAGovernedPropertyNameRedactTheWholeLeaf(string name)
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+
+        var result = gate.ScanJson($$"""{"{{name}}":"synthetic-fake-value-0109"}""");
+
+        Assert.Contains("sensitive-field-value", result.RuleIds);
+        Assert.DoesNotContain("synthetic-fake-value", result.Redacted, StringComparison.Ordinal);
+    }
+
     public static TheoryData<string, string> NegativeCorpus() => new()
     {
         { "sha256 hash", "content_hash 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" },
@@ -749,6 +820,32 @@ public sealed class SafetyGateTests : IDisposable
     }
 
     [Fact]
+    public void AnEncodedOperatorLiteralIsDetectedInsideDecodedText()
+    {
+        const string configuredValue = "synthetic-operator-literal-0007";
+        string literals = Path.Combine(_directory, "encoded-literals.txt");
+        File.WriteAllText(literals, configuredValue + "\n");
+        var gate = new NeverStoreGate(_shippedRules, literals);
+
+        // An exact operator-known value is the highest-confidence rule there
+        // is; a base64 copy of it must not be the one shape that survives.
+        string plain = $"deploy profile {configuredValue} end";
+        string percent = string.Concat(plain.Select(c => $"%{(int)c:X2}"));
+        string hex = Convert.ToHexString(Encoding.UTF8.GetBytes(plain)).ToLowerInvariant();
+        string base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(plain));
+
+        foreach (string encoded in new[] { percent, hex, base64 })
+        {
+            var result = gate.Scan($"value {encoded} end");
+
+            // The ORIGINAL encoded span is what gets redacted.
+            Assert.Equal("value [REDACTED:operator-literal] end", result.Redacted);
+            Assert.Equal(["configured_credential"], result.Categories);
+            Assert.DoesNotContain(configuredValue, result.Redacted, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void AbsentOrEmptyOperatorLiteralFileIsValidAndNotAFailClosedCondition()
     {
         string absent = Path.Combine(_directory, "no-such-literals.txt");
@@ -787,6 +884,196 @@ public sealed class SafetyGateTests : IDisposable
             matcher: regex
             pattern: '{pattern}'
         """;
+
+    /// <summary>
+    /// Enumerates every alternation/optional path through a governed pattern and
+    /// reports, per path, the contiguous LITERAL text that path forces into any
+    /// string the pattern matches. A path is returned as one string in which
+    /// '\0' marks a variable-length or non-literal atom, so splitting on '\0'
+    /// yields that path's guaranteed literal runs. A prefilter is reachable only
+    /// if it appears inside one of those runs.
+    ///
+    /// This understands exactly the regex subset the governed rules use:
+    /// groups, alternation, quantifiers, small enumerable character classes
+    /// (<c>[_-]?</c>, <c>[pousr]</c>), escapes, and anchors. It is a test
+    /// oracle, not a regex engine; a pattern using anything else degrades to a
+    /// non-literal atom, which can only make the sweep stricter.
+    /// </summary>
+    private static class PatternPaths
+    {
+        private const int PathLimit = 200_000;
+
+        public static IReadOnlyList<string> Expand(string pattern)
+        {
+            int index = 0;
+            var paths = Alternatives(pattern, ref index, terminated: false);
+            Assert.Equal(pattern.Length, index);
+            return paths;
+        }
+
+        private static List<string> Alternatives(string pattern, ref int index, bool terminated)
+        {
+            var complete = new List<string>();
+            var current = new List<string> { "" };
+            while (index < pattern.Length && !(terminated && pattern[index] == ')'))
+            {
+                if (pattern[index] == '|')
+                {
+                    index++;
+                    complete.AddRange(current);
+                    current = [""];
+                    continue;
+                }
+                current = Cross(current, Atom(pattern, ref index));
+            }
+            complete.AddRange(current);
+            return complete;
+        }
+
+        private static List<string> Cross(List<string> prefixes, List<string> options)
+        {
+            Assert.InRange(prefixes.Count * options.Count, 0, PathLimit);
+            var crossed = new List<string>(prefixes.Count * options.Count);
+            foreach (string prefix in prefixes)
+            {
+                foreach (string option in options)
+                {
+                    crossed.Add(prefix + option);
+                }
+            }
+            return crossed;
+        }
+
+        private static List<string> Atom(string pattern, ref int index)
+        {
+            List<string> options;
+            char character = pattern[index];
+            if (character == '(')
+            {
+                index++;
+                if (pattern.AsSpan(index).StartsWith("?i)", StringComparison.Ordinal))
+                {
+                    index += 3;
+                    return [""];
+                }
+                if (pattern.AsSpan(index).StartsWith("?:", StringComparison.Ordinal))
+                {
+                    index += 2;
+                }
+                options = Alternatives(pattern, ref index, terminated: true);
+                index++;
+            }
+            else if (character == '[')
+            {
+                options = CharacterClass(pattern, ref index);
+            }
+            else if (character == '\\')
+            {
+                char escaped = pattern[index + 1];
+                index += 2;
+                options = escaped switch
+                {
+                    // Zero-width: the literal run continues across it.
+                    'b' or 'B' or 'A' or 'Z' or 'z' or 'G' => [""],
+                    's' or 'S' or 'd' or 'D' or 'w' or 'W' => ["\0"],
+                    _ => [escaped.ToString()]
+                };
+            }
+            else if (character is '^' or '$')
+            {
+                index++;
+                options = [""];
+            }
+            else if (character == '.')
+            {
+                index++;
+                options = ["\0"];
+            }
+            else
+            {
+                index++;
+                options = [character.ToString()];
+            }
+            return Quantified(options, pattern, ref index);
+        }
+
+        private static List<string> Quantified(
+            List<string> options, string pattern, ref int index)
+        {
+            if (index >= pattern.Length)
+            {
+                return options;
+            }
+            bool optional;
+            switch (pattern[index])
+            {
+                case '?':
+                case '*':
+                    index++;
+                    optional = true;
+                    break;
+                case '+':
+                    index++;
+                    optional = false;
+                    break;
+                case '{':
+                    int close = pattern.IndexOf('}', index);
+                    optional = pattern[index + 1] == '0';
+                    index = close + 1;
+                    break;
+                default:
+                    return options;
+            }
+            if (index < pattern.Length && pattern[index] == '?')
+            {
+                index++;
+            }
+            if (optional && !options.Contains(""))
+            {
+                options.Add("");
+            }
+            return options;
+        }
+
+        private static List<string> CharacterClass(string pattern, ref int index)
+        {
+            int cursor = index + 1;
+            bool negated = pattern[cursor] == '^';
+            if (negated)
+            {
+                cursor++;
+            }
+            int start = cursor;
+            while (pattern[cursor] != ']')
+            {
+                cursor += pattern[cursor] == '\\' ? 2 : 1;
+            }
+            string content = pattern[start..cursor];
+            index = cursor + 1;
+
+            bool enumerable = !negated
+                && !content.Contains('\\')
+                && !HasRange(content)
+                && content.Length <= 8;
+            return enumerable
+                ? [.. content.Distinct().Select(member => member.ToString())]
+                : ["\0"];
+        }
+
+        // A '-' anywhere but the first or last position is a range, and a range
+        // has no small literal enumeration worth expanding.
+        private static bool HasRange(string content)
+        {
+            for (int position = 1; position < content.Length - 1; position++)
+            {
+                if (content[position] == '-')
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
 
     // The distinctive middle of a synthetic credential, used to prove the
     // value itself does not survive redaction.

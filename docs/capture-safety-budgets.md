@@ -47,6 +47,24 @@ encoding twice. Raising the cap further is a cost decision, not a security
 boundary: at 65,536 characters, `MaxDecodedBytes` becomes reachable after ~341
 maximum-length runs, which no transcript under the 1 MB transport cap can hold.
 
+### Line-wrapped Base64 is a second accepted residual risk
+
+Candidate extraction matches a *contiguous* run of Base64 characters. PEM-style
+output wraps at 64 characters, so a wrapped blob yields **one candidate per
+line**, and a credential that straddles a line break decodes to nothing on
+either side of it. A 40-character secret inside a wrapped blob is therefore
+detected only when it happens to fall wholly within one line.
+
+This is stated, not fixed. Joining wrapped lines before decoding means guessing
+which newlines are formatting and which are content — a normalisation heuristic
+the research note rules out of the append path, and one that would change what
+"the original encoded span" means for redaction. The threat model is the same
+as for the candidate-length cap: **accidental leakage, not a determined
+evader**. Two things bound the exposure in practice: a wrapped PEM *private
+key* is caught whole by `private-key-block`, which does not decode at all, and
+the highest-value shapes the decoder exists for — a Base64'd credentials file, a
+kubeconfig, a JWT — are emitted unwrapped by the tools that produce them.
+
 ## Measured evidence
 
 Measured on the development host against the shipped rule set, Release build,
@@ -70,10 +88,23 @@ widened base64url candidate alphabet both cost decode time).
 | 64 MiB leaf, one credential at its final bytes | 67,108,864 | 2 | 2,296.7 ms | 27.9 MiB/s |
 | 64 MiB leaf, measured alone in a cold process | 67,108,864 | 2 | 3,151–3,753 ms | ~19 MiB/s |
 
-Per-matcher cost over the same 64 MiB leaf: the sixteen governed rules run
-26.5–389.7 ms each (`aws-access-key-id` 331.3 ms, `sensitive-field-value`
-389.7 ms); Base64 candidate extraction 775.2 ms, hex 202.7 ms, percent 20.8 ms;
-the literal prefilter sweep 1,328.7 ms. Peak working set for the isolated 64 MiB
+Per-matcher cost over the same 64 MiB leaf, re-measured after the prefilter
+lists were consolidated into covering stems: the sixteen governed rules run
+27.4–199.2 ms each (`github-token` 140.9 ms across five prefilters,
+`sensitive-field-value` 199.2 ms across seven); Base64 candidate extraction
+687.2 ms, hex 380.3 ms, percent 20.1 ms. Each prefilter costs a full
+case-insensitive scan of the leaf — about 27 ms at this size — which is why
+`sensitive-field-value` fell from 402.3 ms (fourteen prefilters) and
+`sensitive-assignment` from 310.6 ms (eleven) to 199.2 ms and 172.4 ms while
+matching strictly more spellings. The operator-literal sweep costs about 26 ms
+per configured literal, so its total is proportional to how many exact values
+the operator provisioned; it is the one phase whose cost an operator controls,
+which is why the scan deadline is checked inside it.
+
+Whole-workload timings on this host vary by up to ±40% between runs (the 64 MiB
+warm case was observed at 1,847–2,586 ms across three consecutive Release runs),
+so treat the table above as an order-of-magnitude budget justification, not a
+regression baseline. Peak working set for the isolated 64 MiB
 case was **577 MiB**. That is larger than the leaf because a .NET `string` is
 UTF-16: 64 MiB of UTF-8 text is 128 MiB in memory, the benchmark holds a warm
 scan's redacted copy alongside the timed one, and the GC has not yet reclaimed
@@ -86,7 +117,7 @@ How each default follows from those numbers:
   Debug build, a loaded host, and four concurrent test shards, while still
   bounding the worst case.
 - **`MaxRuleTime` = 5 s.** The slowest single matcher over a limit-sized leaf is
-  Base64 candidate extraction at 775 ms — up from 692 ms before the alphabet was
+  Base64 candidate extraction, measured at 687–775 ms since the alphabet was
   widened to base64url. Five seconds is still a ~6× margin. A shorter timeout —
   250 ms was the first candidate — fails a legitimate limit-sized leaf closed.
 - **`MaxDecoderCandidates` = 65,536.** The observed transcript-volume ceiling is
@@ -155,7 +186,7 @@ rule requires:
 | `id` | unique, nonempty; appears in `[REDACTED:<id>]` and in scan provenance |
 | `category` | one of `private_key`, `auth_header`, `credential_url`, `provider_token`, `structured_field`, `configured_credential` |
 | `priority` | integer; higher wins an overlap |
-| `prefilter` | comma-separated literals, any-of, matched case-insensitively before the matcher runs |
+| `prefilter` | comma-separated literals, any-of, matched case-insensitively before the matcher runs; must **cover** every alternative the pattern can match |
 | `matcher` | `regex` (applied to a decoded leaf value) or `sensitive_field` (applied to a structured property name) |
 | `pattern` | compiled once with `RegexOptions.NonBacktracking` and `MaxRuleTime` |
 
@@ -166,11 +197,23 @@ pattern; an unsupported matcher; or a pattern `NonBacktracking` cannot compile
 (including one whose automaton exceeds the engine's node limit). Patterns are
 never silently downgraded to the backtracking engine.
 
+A prefilter is an **optimisation, never a filter**. It decides whether the
+matcher runs at all, so an alternative no prefilter literal can reach is a
+silent false negative rather than a slow path — including the separator-less
+spellings a `[_-]?` group allows (`sessionkey` as well as `session_key`).
+Prefilters are therefore short covering stems (`key`, `pass`, `connection`)
+rather than one literal per spelling, which is both safer and cheaper: each
+prefilter costs a full scan of the leaf.
+`SafetyGateTests.EveryPatternAlternativeIsReachableThroughItsPrefilter`
+enumerates every alternation path through every shipped pattern and fails if
+one of them is unreachable.
+
 **Overlap resolution** is deterministic and **merging**. Matches that overlap —
 transitively, so a chain of overlaps is one region — collapse into a single
 union span covering every byte any of them claimed. The span is attributed to
-the highest-`priority` rule among them; ties break by longest original match,
-then by rule id ordinal. Merging rather than discarding is a safety property,
+the highest-`priority` rule among them; ties break by the longest *original*
+match — the raw match lengths, before merging — then by rule id ordinal.
+Merging rather than discarding is a safety property,
 not a cosmetic one: a short high-priority match (an operator literal, priority
 `int.MaxValue`) sitting inside a long lower-priority one (a private-key block,
 priority 100) must not win the region and leave the rest of the key block in
@@ -178,7 +221,11 @@ cleartext. No byte covered by any match survives unredacted.
 
 Because a merged span reports one rule, a scan's `redactionCount` counts union
 spans, not raw matches, and a refusal names the highest-priority accepted
-match — not whichever rule id happens to sort first.
+match — not whichever rule id happens to sort first. That second choice ranks
+the *accepted* spans, so its length tiebreak is the **merged** span length,
+while the tiebreak inside a merge is the original match length. Both use the
+same `MatchRanking` ordering — priority, then length, then rule id ordinal — so
+the two cannot drift apart.
 
 **Atomic reload**: `NeverStoreGate.TryReload` rebuilds the whole rule set and
 swaps it in one reference assignment. A failed reload leaves the previously
@@ -196,6 +243,12 @@ under the rule id `operator-literal` and category `configured_credential`.
 An absent or empty literals file is valid and is **not** a fail-closed
 condition — only the rule file must load. A literal shorter than the minimum
 fails closed with a reason that names the line number and never the value.
+
+Literals are swept over the raw leaf **and** over decoded candidate text, in
+the same bounded pass and against the same budgets as the high-confidence
+rules. An exact operator-known value is the highest-confidence rule there is, so
+a Base64, hex, or percent-encoded copy of one must not be the shape that gets
+through; as with any decoded hit, the span redacted is the original encoded run.
 
 Literal values never enter logs, diagnostics, exception messages, or the
 rule-set version. The version input mixes the rule file's bytes and the *count*
@@ -251,6 +304,8 @@ Blanket entropy scoring, recursive or archive decoding, provider network
 verification, transcript-controlled allowlists, and probabilistic/ML
 classification. Decoding is exactly one level deep — percent, hex, or Base64 in
 either the standard (`+/`) or base64url (`-_`) alphabet — and only around
-high-confidence rules; a decoded hit redacts the original encoded span. Candidate
+high-confidence rules and the operator-provisioned exact values; structured
+field-name recognition has no meaning inside a decoded blob and does not run
+there. A decoded hit redacts the original encoded span. Candidate
 extraction carries the same `MaxRuleTime` matcher timeout the governed rules do,
 and a timeout there fails the scan closed like any other.

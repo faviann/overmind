@@ -63,17 +63,30 @@ internal readonly record struct PrimaryMatch(string RuleId, int Priority, int Le
     {
         if (left is null) { return right; }
         if (right is null) { return left; }
-        var first = left.Value;
-        var second = right.Value;
-        if (first.Priority != second.Priority)
-        {
-            return first.Priority > second.Priority ? first : second;
-        }
-        if (first.Length != second.Length)
-        {
-            return first.Length > second.Length ? first : second;
-        }
-        return string.CompareOrdinal(first.RuleId, second.RuleId) <= 0 ? first : second;
+        return MatchRanking.Wins(
+            left.Value.Priority, left.Value.Length, left.Value.RuleId,
+            right.Value.Priority, right.Value.Length, right.Value.RuleId)
+            ? left.Value
+            : right.Value;
+    }
+}
+
+/// <summary>
+/// The one deterministic ranking this detector uses to pick a winner among
+/// competing matches: highest priority, then longest match, then lowest rule id
+/// ordinal. Both the overlap sweep (over original match lengths) and the
+/// refusal's primary match (over merged span lengths) rank the same way, and
+/// they must not be able to drift apart.
+/// </summary>
+internal static class MatchRanking
+{
+    public static bool Wins(
+        int leftPriority, int leftLength, string leftRuleId,
+        int rightPriority, int rightLength, string rightRuleId)
+    {
+        if (leftPriority != rightPriority) { return leftPriority > rightPriority; }
+        if (leftLength != rightLength) { return leftLength > rightLength; }
+        return string.CompareOrdinal(leftRuleId, rightRuleId) <= 0;
     }
 }
 
@@ -112,8 +125,6 @@ internal sealed class SecretScanner
         _base64Candidates = new Regex("[A-Za-z0-9+/_-]{16,}={0,2}", options, budgets.MaxRuleTime);
     }
 
-    public SafetyBudgets Budgets => _budgets;
-
     /// <summary>
     /// Scans one leaf value. <paramref name="propertyName"/> is the structured
     /// field name the value sits under, or null for free text.
@@ -129,7 +140,7 @@ internal sealed class SecretScanner
         var matches = new List<SpanMatch>();
         CollectLiteralMatches(value, matches, state);
         CollectRuleMatches(value, matches, state);
-        if (propertyName is not null && MatchesSensitiveField(propertyName) is { } fieldRule
+        if (propertyName is not null && MatchesSensitiveField(propertyName, state) is { } fieldRule
             && value.Length > 0)
         {
             matches.Add(new SpanMatch(0, value.Length, fieldRule.Id, fieldRule.Category, fieldRule.Priority));
@@ -184,6 +195,11 @@ internal sealed class SecretScanner
     {
         foreach (string literal in _ruleSet.Literals)
         {
+            // The literal sweep is one of the most expensive phases over a
+            // limit-sized leaf (docs/capture-safety-budgets.md), so the scan
+            // deadline is checked here too — once per literal, which is the
+            // granularity that bounds the phase without distorting it.
+            state.CheckDeadline();
             int index = value.IndexOf(literal, StringComparison.Ordinal);
             while (index >= 0)
             {
@@ -206,30 +222,24 @@ internal sealed class SecretScanner
                 continue;
             }
             state.CheckDeadline();
-            try
+            foreach (Match match in TimedMatches(rule.Compiled, value, $"rule '{rule.Id}'"))
             {
-                foreach (Match match in rule.Compiled.Matches(value))
+                if (match.Length == 0)
                 {
-                    if (match.Length == 0)
-                    {
-                        continue;
-                    }
-                    matches.Add(new SpanMatch(
-                        match.Index, match.Length, rule.Id, rule.Category, rule.Priority));
-                    state.ChargeMatch();
+                    continue;
                 }
-            }
-            catch (RegexMatchTimeoutException)
-            {
-                throw new SafetyScanException($"rule '{rule.Id}' exceeded its matcher timeout");
+                matches.Add(new SpanMatch(
+                    match.Index, match.Length, rule.Id, rule.Category, rule.Priority));
+                state.ChargeMatch();
             }
         }
     }
 
     /// <summary>True when a structured property name is in the governed sensitive vocabulary.</summary>
-    public bool IsSensitiveField(string propertyName) => MatchesSensitiveField(propertyName) is not null;
+    public bool IsSensitiveField(string propertyName, ScanBudgetState state) =>
+        MatchesSensitiveField(propertyName, state) is not null;
 
-    private SecretRule? MatchesSensitiveField(string propertyName)
+    private SecretRule? MatchesSensitiveField(string propertyName, ScanBudgetState state)
     {
         SecretRule? best = null;
         foreach (var rule in _ruleSet.Rules)
@@ -239,17 +249,10 @@ internal sealed class SecretScanner
             {
                 continue;
             }
-            try
+            state.CheckDeadline();
+            if (IsMatch(rule, propertyName) && (best is null || rule.Priority > best.Priority))
             {
-                if (rule.Compiled.IsMatch(propertyName)
-                    && (best is null || rule.Priority > best.Priority))
-                {
-                    best = rule;
-                }
-            }
-            catch (RegexMatchTimeoutException)
-            {
-                throw new SafetyScanException($"rule '{rule.Id}' exceeded its matcher timeout");
+                best = rule;
             }
         }
         return best;
@@ -257,13 +260,19 @@ internal sealed class SecretScanner
 
     /// <summary>
     /// One bounded percent/hex/Base64 pass wrapped around the high-confidence
-    /// rules only. A hit redacts the ORIGINAL encoded span, never the decoded
-    /// text, so the mapping back into the source value is exact.
+    /// rules and the operator-provisioned exact values. A hit redacts the
+    /// ORIGINAL encoded span, never the decoded text, so the mapping back into
+    /// the source value is exact.
     /// </summary>
     private void CollectDecodedMatches(string value, List<SpanMatch> matches, ScanBudgetState state)
     {
         foreach (var (start, length, kind) in EnumerateCandidates(value))
         {
+            // Deadline-checked per candidate, BEFORE the over-length skip: a
+            // leaf can hold tens of thousands of decodable runs that no rule
+            // prefilter ever hits, and a flood of over-length ones must not
+            // spin unchecked either.
+            state.CheckDeadline();
             if (length > _budgets.MaxDecoderCandidateLength)
             {
                 // Not decoded, and NOT fail-closed: an accepted, bounded
@@ -272,10 +281,6 @@ internal sealed class SecretScanner
                 // secret encoded inside a run this long is not detected.
                 continue;
             }
-            // Charged and deadline-checked per candidate: a leaf can hold tens
-            // of thousands of decodable runs that no rule prefilter ever hits,
-            // and that path must still be bounded in time.
-            state.CheckDeadline();
             state.ChargeDecoderCandidate();
             string encoded = value.Substring(start, length);
             if (!TryDecode(encoded, kind, out string decoded))
@@ -288,6 +293,24 @@ internal sealed class SecretScanner
                 continue;
             }
 
+            // Exact operator-known values are the highest-confidence rule there
+            // is, so they sweep the decoded text in the same loop, charge the
+            // same budgets, and attribute to the same original encoded span.
+            // One span per candidate: a second literal in the same run would
+            // only merge back into it.
+            foreach (string literal in _ruleSet.Literals)
+            {
+                state.CheckDeadline();
+                if (decoded.Contains(literal, StringComparison.Ordinal))
+                {
+                    matches.Add(new SpanMatch(
+                        start, length, LiteralRuleId,
+                        SecretCategories.ConfiguredCredential, int.MaxValue));
+                    state.ChargeMatch();
+                    break;
+                }
+            }
+
             foreach (var rule in _ruleSet.Rules)
             {
                 if (!rule.DecodeEligible || !PrefilterHits(decoded, rule))
@@ -295,18 +318,11 @@ internal sealed class SecretScanner
                     continue;
                 }
                 state.CheckDeadline();
-                try
+                if (IsMatch(rule, decoded))
                 {
-                    if (rule.Compiled.IsMatch(decoded))
-                    {
-                        matches.Add(new SpanMatch(
-                            start, length, rule.Id, rule.Category, rule.Priority));
-                        state.ChargeMatch();
-                    }
-                }
-                catch (RegexMatchTimeoutException)
-                {
-                    throw new SafetyScanException($"rule '{rule.Id}' exceeded its matcher timeout");
+                    matches.Add(new SpanMatch(
+                        start, length, rule.Id, rule.Category, rule.Priority));
+                    state.ChargeMatch();
                 }
             }
         }
@@ -314,30 +330,34 @@ internal sealed class SecretScanner
 
     private IEnumerable<(int Start, int Length, DecoderKind Kind)> EnumerateCandidates(string value)
     {
-        if (!_ruleSet.Rules.Any(rule => rule.DecodeEligible))
+        if (_ruleSet.Literals.Count == 0 && !_ruleSet.Rules.Any(rule => rule.DecodeEligible))
         {
             yield break;
         }
-        foreach (Match match in TimedMatches(_percentCandidates, value))
+        const string subject = "the decoder candidate scan";
+        foreach (Match match in TimedMatches(_percentCandidates, value, subject))
         {
             yield return (match.Index, match.Length, DecoderKind.Percent);
         }
-        foreach (Match match in TimedMatches(_hexCandidates, value))
+        foreach (Match match in TimedMatches(_hexCandidates, value, subject))
         {
             yield return (match.Index, match.Length, DecoderKind.Hex);
         }
-        foreach (Match match in TimedMatches(_base64Candidates, value))
+        foreach (Match match in TimedMatches(_base64Candidates, value, subject))
         {
             yield return (match.Index, match.Length, DecoderKind.Base64);
         }
     }
 
     /// <summary>
-    /// Enumerates candidate matches lazily — so the per-candidate budget can
-    /// stop a flood before the whole collection is materialized — while still
-    /// converting a matcher timeout into the fail-closed scan error.
+    /// Enumerates matches lazily — so a per-candidate budget can stop a flood
+    /// before the whole collection is materialized — while converting a matcher
+    /// timeout into the fail-closed scan error. Every enumerating matcher in
+    /// this scanner goes through here; the only other shape is
+    /// <see cref="IsMatch"/>, which is a bare boolean test with no match object
+    /// to allocate.
     /// </summary>
-    private static IEnumerable<Match> TimedMatches(Regex regex, string value)
+    private static IEnumerable<Match> TimedMatches(Regex regex, string value, string subject)
     {
         var matches = regex.Matches(value).GetEnumerator();
         while (true)
@@ -351,12 +371,26 @@ internal sealed class SecretScanner
             }
             catch (RegexMatchTimeoutException)
             {
-                throw new SafetyScanException(
-                    "the decoder candidate scan exceeded its matcher timeout");
+                throw MatcherTimedOut(subject);
             }
             yield return (Match)matches.Current;
         }
     }
+
+    private static bool IsMatch(SecretRule rule, string text)
+    {
+        try
+        {
+            return rule.Compiled.IsMatch(text);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            throw MatcherTimedOut($"rule '{rule.Id}'");
+        }
+    }
+
+    private static SafetyScanException MatcherTimedOut(string subject) =>
+        new($"{subject} exceeded its matcher timeout");
 
     private static bool TryDecode(string encoded, DecoderKind kind, out string decoded)
     {
@@ -476,18 +510,12 @@ internal sealed class SecretScanner
         return accepted;
     }
 
-    private static SpanMatch Outrank(SpanMatch left, SpanMatch right)
-    {
-        if (left.Priority != right.Priority)
-        {
-            return left.Priority > right.Priority ? left : right;
-        }
-        if (left.Length != right.Length)
-        {
-            return left.Length > right.Length ? left : right;
-        }
-        return string.CompareOrdinal(left.RuleId, right.RuleId) <= 0 ? left : right;
-    }
+    private static SpanMatch Outrank(SpanMatch left, SpanMatch right) =>
+        MatchRanking.Wins(
+            left.Priority, left.Length, left.RuleId,
+            right.Priority, right.Length, right.RuleId)
+            ? left
+            : right;
 
     private enum DecoderKind { Percent, Hex, Base64 }
 

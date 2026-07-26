@@ -78,9 +78,15 @@ semantics because both construct the gate from the same configuration; there is
 no second scanner implementation.
 
 The two sides do different things with the result. The runtime **scans and
-refuses**: a budget exhaustion, matcher timeout, or value it cannot inspect
-completely means it emits nothing, exits non-zero, and says why on stderr. It
-does **not** rewrite the payload it transmits. If it did, the server would scan
+refuses on scan failure**: a budget exhaustion, a matcher timeout, an internal
+scanner error, or an unusable rule set means it emits nothing, exits non-zero,
+and says why on stderr. An omission is not a refusal — a leaf past its byte
+limit, a sensitive property name carrying a subtree, or a redaction-caused name
+collision is a recorded fidelity outcome that the server persists *as* an
+omission, not an unscanned tail, so the runtime still sends those observations.
+Only a required identity value that cannot be inspected completely fails closed,
+through `AssertAllowed`/`AssertAllowedObject`. The runtime does **not** rewrite
+the payload it transmits. If it did, the server would scan
 already-sanitized bytes and record `scan_status = "clean"` with no rule ids for
 content that was in fact redacted. Imported content supplies evidence only and
 cannot assert its own scan provenance, so the server — which sanitizes what it

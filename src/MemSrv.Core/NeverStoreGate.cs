@@ -197,7 +197,7 @@ public sealed class NeverStoreGate
         // map, so the whole value is omitted rather than partially rewritten.
         if (propertyName is not null
             && element.ValueKind is JsonValueKind.Object or JsonValueKind.Array
-            && scanner.IsSensitiveField(propertyName))
+            && scanner.IsSensitiveField(propertyName, state))
         {
             WriteOmitted(writer, ledger, OmissionReasons.SensitiveFieldSubtree);
             return;
@@ -278,7 +278,7 @@ public sealed class NeverStoreGate
                 // no span; a low-entropy numeric PIN is still a credential.
                 if (propertyName is not null
                     && element.ValueKind is not JsonValueKind.Null
-                    && scanner.IsSensitiveField(propertyName))
+                    && scanner.IsSensitiveField(propertyName, state))
                 {
                     WriteOmitted(writer, ledger, OmissionReasons.SensitiveFieldScalar);
                     return;

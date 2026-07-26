@@ -18,13 +18,9 @@ public sealed class CaptureEnrollment(string connectionString, NeverStoreGate ne
         string? routeNamespace,
         CancellationToken cancellationToken = default)
     {
-        if (!neverStore.IsConfigured)
-        {
-            throw new InvalidOperationException(
-                "Capture safety rules are missing or empty; capture fails closed.");
-        }
-        Require(stableName, nameof(stableName));
-        Require(agentId, nameof(agentId));
+        CaptureLedger.RequireSafetyConfigured(neverStore);
+        CaptureLedger.Require(stableName, nameof(stableName));
+        CaptureLedger.Require(agentId, nameof(agentId));
         neverStore.AssertAllowed(stableName);
         neverStore.AssertAllowed(agentId);
         CaptureCredential.RequireCaptureForm(credential);
@@ -59,13 +55,5 @@ public sealed class CaptureEnrollment(string connectionString, NeverStoreGate ne
                 routeNamespace,
                 allowedNamespaces = new[] { effective }
             });
-    }
-
-    private static void Require(string value, string name)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            throw new ArgumentException($"{name} is required.");
-        }
     }
 }

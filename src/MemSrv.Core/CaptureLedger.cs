@@ -9,7 +9,8 @@ namespace MemSrv.Core;
 /// <summary>
 /// The single reader over durable capture rows. Ingestion and operator reads
 /// both project canonical facts through here, so an observation looks the same
-/// whichever module returns it.
+/// whichever module returns it. It is also where the capture modules keep the
+/// small guards they share, so a rule is stated once.
 /// </summary>
 internal static class CaptureLedger
 {
@@ -17,6 +18,25 @@ internal static class CaptureLedger
 
     internal static string Hash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    /// <summary>Capture refuses to run at all without a loaded never-store rule set.</summary>
+    internal static void RequireSafetyConfigured(NeverStoreGate neverStore)
+    {
+        if (!neverStore.IsConfigured)
+        {
+            throw new InvalidOperationException(
+                "Capture safety rules are missing or empty; capture fails closed.");
+        }
+    }
+
+    /// <summary>Rejects a blank required string argument.</summary>
+    internal static void Require(string value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new ArgumentException($"{name} is required.");
+        }
+    }
 
     internal static async Task<CaptureObservationReceipt?> LoadObservationAsync(
         NpgsqlConnection connection,
@@ -55,7 +75,8 @@ internal static class CaptureLedger
             row.ObservationUuid,
             row.SourceStreamUuid,
             JsonSerializer.Deserialize<CaptureSource>(row.SourceJson, JsonOptions)!,
-            LocatorOf(row),
+            CaptureSourceLocator.FromColumns(new CaptureSourceLocator.Columns(
+                row.LocatorKind, row.LocatorNativeId, row.LocatorByteOffset, row.LocatorByteLength)),
             row.SourceTimestampRaw is null
                 ? null
                 : new CaptureSourceTimestamp(row.SourceTimestampRaw, row.SourceTimestampParsed),
@@ -123,12 +144,6 @@ internal static class CaptureLedger
         }
         return receipts;
     }
-
-    private static CaptureSourceLocator LocatorOf(ObservationRow row) =>
-        string.Equals(row.LocatorKind, "native_id", StringComparison.Ordinal)
-            ? new CaptureSourceLocator.NativeId(row.LocatorNativeId!)
-            : new CaptureSourceLocator.ByteRange(
-                row.LocatorByteOffset!.Value, row.LocatorByteLength!.Value, null);
 
     private sealed class ObservationRow
     {

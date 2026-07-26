@@ -30,7 +30,7 @@ public sealed class CaptureAuthority(string connectionString)
         await connection.OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<BindingRow>(
             """
-            SELECT binding_uuid AS BindingUuid, stable_name AS StableName, harness,
+            SELECT binding_uuid AS BindingUuid, harness,
                    agent_id AS AgentId, route_namespace AS RouteNamespace,
                    allowed_namespaces AS AllowedNamespaces,
                    content_signature_key AS ContentSignatureKey
@@ -42,7 +42,6 @@ public sealed class CaptureAuthority(string connectionString)
             ? null
             : new CaptureBindingContext(
                 row.BindingUuid,
-                row.StableName,
                 row.Harness,
                 row.AgentId,
                 row.RouteNamespace,
@@ -53,7 +52,6 @@ public sealed class CaptureAuthority(string connectionString)
     private sealed class BindingRow
     {
         public Guid BindingUuid { get; set; }
-        public string StableName { get; set; } = "";
         public string Harness { get; set; } = "";
         public string AgentId { get; set; } = "";
         public string? RouteNamespace { get; set; }

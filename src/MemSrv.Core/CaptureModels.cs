@@ -54,10 +54,12 @@ public sealed record CaptureEvent(
     IReadOnlyList<CaptureRelationship>? Relationships);
 
 // ---------------------------------------------------------------------------
-// The internal source-locator representation. The hierarchy is closed (the
-// base constructor is private, so only the nested variants can derive), which
-// makes "native id plus byte range" unrepresentable rather than merely
-// rejected. Everything past the HTTP seam speaks this type.
+// The internal source-locator representation. The private primary constructor
+// rules out accidental or positional derivation, so "native id plus byte range"
+// is unrepresentable through the parse path rather than merely rejected. The
+// protected copy constructor every record synthesizes stays a deliberate-abuse
+// escape hatch, undefended by design. Everything past the HTTP seam speaks this
+// type.
 // ---------------------------------------------------------------------------
 
 [JsonConverter(typeof(CaptureSourceLocatorConverter))]
@@ -118,6 +120,33 @@ public abstract record CaptureSourceLocator
     private static bool IsLowerHexSha256(string? value) =>
         value is { Length: 64 }
         && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    /// <summary>
+    /// The four columns a locator occupies in <c>capture_observations</c>. The
+    /// projection and its inverse live together on this type so a new variant
+    /// cannot be persisted one way and rebuilt another.
+    /// </summary>
+    internal sealed record Columns(
+        string Kind, string? NativeId, long? ByteOffset, long? ByteLength);
+
+    /// <summary>Projects this locator onto its persisted columns.</summary>
+    internal Columns ToColumns() =>
+        this switch
+        {
+            NativeId nativeId => new Columns(nativeId.Kind, nativeId.Value, null, null),
+            ByteRange range => new Columns(range.Kind, null, range.Offset, range.Length),
+            _ => throw new InvalidOperationException("Unknown source locator variant.")
+        };
+
+    /// <summary>
+    /// Rebuilds a locator from its persisted columns. The inverse of
+    /// <see cref="ToColumns"/>, except that a rebuilt <see cref="ByteRange"/>
+    /// carries a null digest because the digest is signed but never stored.
+    /// </summary>
+    internal static CaptureSourceLocator FromColumns(Columns columns) =>
+        string.Equals(columns.Kind, "native_id", StringComparison.Ordinal)
+            ? new NativeId(columns.NativeId!)
+            : new ByteRange(columns.ByteOffset!.Value, columns.ByteLength!.Value, null);
 
     public sealed record NativeId(string Value) : CaptureSourceLocator
     {
@@ -202,7 +231,6 @@ public sealed record CaptureObservationCommand(
 /// </summary>
 public sealed record CaptureBindingContext(
     Guid BindingUuid,
-    string StableName,
     string Harness,
     string AgentId,
     string? RouteNamespace,

@@ -27,8 +27,8 @@ namespace. Callers pass strings and get a binding uuid.
 It applies the structural `mcap_` pre-check (a non-capture-form credential is
 rejected with no database round trip), hashes the credential, and requires an
 active binding. A non-null result *is* the authorization decision and carries
-every fact ingestion needs: binding uuid, stable name, harness, agent id, route
-namespace, allowed namespaces, and the per-binding content-signature key.
+every fact ingestion needs: binding uuid, harness, agent id, route namespace,
+allowed namespaces, and the per-binding content-signature key.
 `null` means "reject before reading the body".
 
 **`CaptureIngestion`** — contract version, binding/harness agreement, unique
@@ -51,11 +51,18 @@ scanner configuration.
 mix of `nativeId` and byte-range fields, because arbitrary JSON can. The HTTP
 seam calls `CaptureObservationCommand.FromRequest`, which parses it through
 `CaptureSourceLocator.Parse` into a closed hierarchy — `NativeId(value)` or
-`ByteRange(offset, length, sourceContentSha256)`. The base constructor is
-private, so those two variants are the whole world and a mixed locator is
-unrepresentable past the seam rather than merely rejected. Parse failures are
-`ArgumentException` → `400`. A locator rebuilt from the ledger is a `ByteRange`
-with a null digest, because the digest is signed but never stored.
+`ByteRange(offset, length, sourceContentSha256)`. The private primary
+constructor rules out accidental or positional derivation, so a mixed locator is
+unrepresentable through the parse path rather than merely rejected; the
+*protected* copy constructor every record synthesizes remains a deliberate-abuse
+escape hatch, which is not defended against because #120 asks only that the
+variants cannot be mixed by accident. Parse failures are `ArgumentException` →
+`400`. A locator rebuilt from the ledger is a `ByteRange` with a null digest,
+because the digest is signed but never stored.
+
+`CaptureSourceLocator` also owns both directions of its persistence projection —
+`ToColumns()` and `FromColumns()` — so the four `capture_observations` locator
+columns cannot be written one way and read back another.
 
 ## One set of canonical facts
 

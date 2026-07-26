@@ -24,7 +24,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureObservationCommand command,
         CancellationToken cancellationToken = default)
     {
-        EnsureSafetyConfigured();
+        CaptureLedger.RequireSafetyConfigured(neverStore);
         Validate(binding, command);
         string inputJson = JsonSerializer.Serialize(command, JsonOptions);
         if (Encoding.UTF8.GetByteCount(inputJson) > 1_000_000)
@@ -84,7 +84,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                     : Redact(relationship.Target.Kind, scan))).ToArray()
         )).ToArray();
 
-        var locator = LocatorColumns(command.Locator);
+        var locator = command.Locator.ToColumns();
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -294,26 +294,16 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         new($"Source position {command.SourcePosition} or locator '{command.Locator.Describe()}' " +
             "was already accepted with different identity or content.");
 
-    private static LocatorColumnValues LocatorColumns(CaptureSourceLocator locator) =>
-        locator switch
-        {
-            CaptureSourceLocator.NativeId nativeId =>
-                new LocatorColumnValues(nativeId.Kind, nativeId.Value, null, null),
-            CaptureSourceLocator.ByteRange range =>
-                new LocatorColumnValues(range.Kind, null, range.Offset, range.Length),
-            _ => throw new InvalidOperationException("Unknown source locator variant.")
-        };
-
     private static void Validate(CaptureBindingContext binding, CaptureObservationCommand command)
     {
         if (command.ContractVersion != 1)
         {
             throw new InvalidOperationException("Only capture contractVersion 1 is supported.");
         }
-        Require(command.SourceSessionId, nameof(command.SourceSessionId));
+        CaptureLedger.Require(command.SourceSessionId, nameof(command.SourceSessionId));
         if (command.SourceTimestamp is not null)
         {
-            Require(command.SourceTimestamp.Raw, "sourceTimestamp.raw");
+            CaptureLedger.Require(command.SourceTimestamp.Raw, "sourceTimestamp.raw");
         }
         if (!string.Equals(binding.Harness, command.Source.Harness, StringComparison.Ordinal))
         {
@@ -330,33 +320,16 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         }
         foreach (var relationship in command.Events.SelectMany(item => item.Relationships ?? []))
         {
-            Require(relationship.Type, "relationship.type");
+            CaptureLedger.Require(relationship.Type, "relationship.type");
             if (relationship.Target is null)
             {
                 throw new ArgumentException("relationship.target is required.");
             }
-            Require(relationship.Target.NativeId, "relationship.target.nativeId");
+            CaptureLedger.Require(relationship.Target.NativeId, "relationship.target.nativeId");
         }
         if (command.SourcePosition < 0)
         {
             throw new InvalidOperationException("sourcePosition must be zero or greater.");
-        }
-    }
-
-    private static void Require(string value, string name)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            throw new ArgumentException($"{name} is required.");
-        }
-    }
-
-    private void EnsureSafetyConfigured()
-    {
-        if (!neverStore.IsConfigured)
-        {
-            throw new InvalidOperationException(
-                "Capture safety rules are missing or empty; capture fails closed.");
         }
     }
 
@@ -383,9 +356,6 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         return result.Redacted;
     }
 
-    private sealed record LocatorColumnValues(
-        string Kind, string? NativeId, long? ByteOffset, long? ByteLength);
-
     private sealed class StreamRow
     {
         public Guid StreamUuid { get; set; }
@@ -404,7 +374,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         public long? LocatorByteLength { get; set; }
         public string ContentSignature { get; set; } = "";
 
-        public bool Matches(LocatorColumnValues locator) =>
+        public bool Matches(CaptureSourceLocator.Columns locator) =>
             string.Equals(LocatorKind, locator.Kind, StringComparison.Ordinal)
             && string.Equals(LocatorNativeId, locator.NativeId, StringComparison.Ordinal)
             && LocatorByteOffset == locator.ByteOffset

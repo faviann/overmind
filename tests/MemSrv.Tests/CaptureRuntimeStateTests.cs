@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CaptureAdapters;
 using MemSrv.Core;
 
@@ -290,6 +291,43 @@ public sealed class CaptureRuntimeStateTests
         }
     }
 
+    [Theory]
+    [InlineData("new")]
+    [InlineData("already_accepted")]
+    public async Task ConclusiveReceiptRetiresOnlyTheEarliestQueuedResponsibility(string status)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-retire-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            var first = QueueItem("stream", 0, 10);
+            var second = QueueItem("stream", 1, 20);
+            Assert.True(await state.ClaimAsync(first, expectedPrefix: null));
+            Assert.True(await state.ClaimAsync(
+                second, first.DeterministicLocatorEvidence.PrefixEvidence));
+
+            var receipt = new CaptureServerReceiptState(
+                first.SourcePosition,
+                first.DeterministicLocatorEvidence.Identity,
+                status,
+                Guid.NewGuid(),
+                Guid.NewGuid());
+            await state.RecordServerReceiptAsync("stream", receipt);
+
+            CaptureRuntimeStreamState stream = Assert.Single((await state.ReadAsync()).Streams);
+            Assert.Equal([1L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(receipt, stream.LastServerReceipt);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     [Fact]
     public async Task KillingPackagedTracerDuringRealStateTempWriteLeavesAtomicClaimSnapshot()
     {
@@ -419,7 +457,7 @@ public sealed class CaptureRuntimeStateTests
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
             Assert.Equal(1, stream.EnqueuedThrough);
-            Assert.Equal([0L, 1L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Empty(stream.Queue);
             Assert.Equal(1, stream.LastServerReceipt?.SourcePosition);
         }
         finally
@@ -462,7 +500,7 @@ public sealed class CaptureRuntimeStateTests
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
             Assert.Equal(2, stream.EnqueuedThrough);
-            Assert.Equal([0L, 1L, 2L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal([1L, 2L], stream.Queue.Select(item => item.SourcePosition));
             Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
             Assert.Equal("new", stream.LastServerReceipt?.Status);
             Assert.Equal(firstObservation, stream.LastServerReceipt?.ObservationUuid);
@@ -524,8 +562,12 @@ public sealed class CaptureRuntimeStateTests
 
     [Theory]
     [InlineData("""{"sourcePosition":1,"status":"   ","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"failed","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
     [InlineData("""{"sourcePosition":1,"status":"new"}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"not-a-uuid"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"locator":{"kind":"byte_range","byteOffset":999999,"byteLength":1}}}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"observationUuid":"9da8ad61-92c5-40b5-8b71-0ef233648c56","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"646daf38-73d9-4c9e-8a84-13e1fc5667f2"}}""")]
     public async Task PackagedTracerRejectsMalformedSuccessfulReceiptWithoutReplacingLastValidReceipt(
         string malformedReceipt)
     {
@@ -563,6 +605,10 @@ public sealed class CaptureRuntimeStateTests
             Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
             Assert.Equal("new", stream.LastServerReceipt?.Status);
             Assert.Equal(acceptedObservation, stream.LastServerReceipt?.ObservationUuid);
+            Assert.Equal([1L, 2L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(
+                stream.CanonicalSourceStreamUuid,
+                stream.LastServerReceipt?.SourceStreamUuid);
         }
         finally
         {
@@ -584,13 +630,33 @@ public sealed class CaptureRuntimeStateTests
             ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory
         };
 
-    private static string Receipt(long sourcePosition, Guid? observationUuid = null) =>
-        JsonSerializer.Serialize(new
+    private static CaptureRuntimeQueueItem QueueItem(
+        string stream, long sourcePosition, long prefixLength) =>
+        new(
+            stream,
+            new CaptureRuntimeLocatorEvidence(
+                "transcript",
+                sourcePosition,
+                prefixLength - 10,
+                10,
+                $"record-{sourcePosition}",
+                new CapturePrefixEvidence(prefixLength, $"prefix-{sourcePosition}")),
+            """{"safe":"candidate"}""");
+
+    private static string Receipt(long sourcePosition, Guid? observationUuid = null)
+    {
+        Guid uuid = observationUuid ?? Guid.NewGuid();
+        return JsonSerializer.Serialize(new
         {
             sourcePosition,
             status = "new",
-            observationUuid = observationUuid ?? Guid.NewGuid()
+            observationUuid = uuid,
+            observation = new
+            {
+                observationUuid = uuid
+            }
         });
+    }
 
     private static async Task<int> ServeResponsesAsync(
         TcpListener listener,
@@ -598,6 +664,7 @@ public sealed class CaptureRuntimeStateTests
         CancellationToken cancellationToken)
     {
         int requestCount = 0;
+        Guid sourceStreamUuid = Guid.NewGuid();
         try
         {
             foreach (var (status, body) in responses)
@@ -605,9 +672,11 @@ public sealed class CaptureRuntimeStateTests
                 using TcpClient client =
                     await listener.AcceptTcpClientAsync(cancellationToken);
                 await using NetworkStream stream = client.GetStream();
-                await ReadRequestAsync(stream, cancellationToken);
+                string requestBody = await ReadRequestAsync(stream, cancellationToken);
                 requestCount++;
-                byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
+                string responseBody = AddRequestObservation(
+                    body, requestBody, sourceStreamUuid);
+                byte[] bodyBytes = Encoding.UTF8.GetBytes(responseBody);
                 byte[] response = Encoding.ASCII.GetBytes(
                     $"HTTP/1.1 {(int)status} {status}\r\n" +
                     "Content-Type: application/json\r\n" +
@@ -624,7 +693,25 @@ public sealed class CaptureRuntimeStateTests
         return requestCount;
     }
 
-    private static async Task ReadRequestAsync(
+    private static string AddRequestObservation(
+        string responseBody,
+        string requestBody,
+        Guid sourceStreamUuid)
+    {
+        JsonObject? response = JsonNode.Parse(responseBody)?.AsObject();
+        JsonObject? request = JsonNode.Parse(requestBody)?.AsObject();
+        if (response is not null && request?["locator"] is JsonObject locator)
+        {
+            JsonObject observation = response["observation"] as JsonObject ?? new JsonObject();
+            observation["locator"] ??= locator.DeepClone();
+            observation["observationUuid"] ??= response["observationUuid"]?.DeepClone();
+            observation["sourceStreamUuid"] ??= sourceStreamUuid;
+            response["observation"] = observation;
+        }
+        return response?.ToJsonString() ?? responseBody;
+    }
+
+    private static async Task<string> ReadRequestAsync(
         NetworkStream stream,
         CancellationToken cancellationToken)
     {
@@ -658,5 +745,6 @@ public sealed class CaptureRuntimeStateTests
             System.Globalization.CultureInfo.InvariantCulture);
         byte[] body = new byte[contentLength];
         await stream.ReadExactlyAsync(body, cancellationToken);
+        return Encoding.UTF8.GetString(body);
     }
 }

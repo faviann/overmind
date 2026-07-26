@@ -112,10 +112,10 @@ try
             }
             if (!root.TryGetProperty("status", out JsonElement statusElement)
                 || statusElement.ValueKind != JsonValueKind.String
-                || string.IsNullOrWhiteSpace(statusElement.GetString()))
+                || statusElement.GetString() is not ("new" or "already_accepted"))
             {
                 throw new InvalidDataException(
-                    "Capture server receipt status must be a nonblank string.");
+                    "Capture server receipt status must be new or already_accepted.");
             }
             if (!root.TryGetProperty(
                     "observationUuid", out JsonElement observationUuidElement)
@@ -124,13 +124,34 @@ try
                 throw new InvalidDataException(
                     "Capture server receipt observationUuid must be a valid UUID.");
             }
+            if (!root.TryGetProperty("observation", out JsonElement observation)
+                || !observation.TryGetProperty(
+                    "observationUuid", out JsonElement nestedObservationUuidElement)
+                || !nestedObservationUuidElement.TryGetGuid(out Guid nestedObservationUuid)
+                || nestedObservationUuid != observationUuid
+                || !observation.TryGetProperty(
+                    "sourceStreamUuid", out JsonElement sourceStreamUuidElement)
+                || !sourceStreamUuidElement.TryGetGuid(out Guid sourceStreamUuid)
+                || !observation.TryGetProperty("locator", out JsonElement receiptLocator)
+                || receiptLocator.GetProperty("kind").GetString() != "byte_range"
+                || receiptLocator.GetProperty("byteOffset").GetInt64()
+                    != queued.DeterministicLocatorEvidence.ByteOffset
+                || receiptLocator.GetProperty("byteLength").GetInt64()
+                    != queued.DeterministicLocatorEvidence.ByteLength)
+            {
+                throw new InvalidDataException(
+                    $"Capture server receipt observation identity or locator does not match " +
+                    $"queued sourcePosition " +
+                    $"{queued.SourcePosition}.");
+            }
             await runtimeState.RecordServerReceiptAsync(
                 sessionId,
                 new CaptureServerReceiptState(
                     receiptSourcePosition,
                     queued.DeterministicLocatorEvidence.Identity,
                     statusElement.GetString()!,
-                    observationUuid),
+                    observationUuid,
+                    sourceStreamUuid),
                 cancellationToken);
             Console.WriteLine(receipt);
         });

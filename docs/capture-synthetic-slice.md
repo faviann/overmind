@@ -74,7 +74,9 @@ single writable directory selected by `OVERMIND_CAPTURE_STATE_DIR` (the image
 default is `/state`). Mount that path as a durable volume. The flushed,
 atomically replaced state distinguishes verified-prefix evidence,
 `enqueuedThrough`, retryable queued responsibility, and the last server receipt
-known locally. A queue item retains only its capture source stream,
+known locally. Once a conclusive receipt arrives, the same stream state also
+retains the server-derived canonical source-stream UUID; later receipts must
+match it. A queue item retains only its capture source stream,
 deterministic transcript/position/byte-range/prefix locator evidence, source
 position, and redacted-safe candidate observation; the source JSONL remains the
 only raw transcript archive. An unterminated final line remains wholly
@@ -87,6 +89,17 @@ Rollout records do not invent a per-record session ID; this disabled adapter
 uses one stable synthetic source session, while capture bindings isolate
 installations. It sends the three ordered observations to
 `POST /capture/v1/observations`.
+
+Delivery always chooses the earliest unresolved durable responsibility. A
+responsibility is removed in the same atomic local-state replacement that
+records a matching `new` or `already_accepted` receipt. An outage, non-success
+HTTP response, malformed or unknown receipt, mismatched position or locator,
+contradictory observation UUID, mismatched canonical source-stream UUID, process
+termination, or lost success response leaves it queued. Restart reads the same
+state artifact and retries the same deterministic locator; when the server
+committed before the response was lost, its immutable
+`already_accepted` receipt converges local responsibility without another
+canonical observation or checkpoint advance.
 
 Each JSONL record has its own numeric source position, verified `byte_range`
 locator measured from the actual fixture bytes, idempotency identity, and

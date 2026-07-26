@@ -20,6 +20,10 @@ Source interpretation before this spine is described by the
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `ClaimAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
+| `CodexTranscriptDiscovery` | `Enumerate(configuredLocation)` | `CodexCaptureTracer` |
+| `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
+| `CaptureRescanScheduler` | `RunAsync(scanCycle, schedule, jitterSource, delay)` | `CodexCaptureTracer` |
+| `CaptureRescanConfiguration` | `Load(readEnvironment)` → `CaptureRescanSchedule` | `CodexCaptureTracer` |
 
 `CaptureLedger` is internal: the single reader over the durable capture ledger
 rows — observations, events, relationships — that ingestion and operator reads
@@ -101,6 +105,22 @@ the durable claim transaction. Its locator identity binds transcript identity,
 source position, byte range and record digest, plus the new verified-prefix
 evidence.
 
+**`CodexTranscriptDiscovery`, `CodexTranscriptScanCycle`,
+`CaptureRescanConfiguration`, and `CaptureRescanScheduler`** — enumerate every
+synthetic JSONL stream under the configured location at startup and afresh on
+each later cycle. A stream identity is stable for its absolute path and
+independent of enumeration order. The scan cycle isolates a stream that
+disappears or becomes unreadable after enumeration: that attempt advances
+nothing, later enumerated streams still run, and the next scheduled enumeration
+gets another chance. It does not catch cancellation. Configuration binds the
+named interval and maximum-jitter environment inputs to one validated schedule.
+Startup enumeration runs immediately; only after a complete cycle does the
+scheduler choose a new bounded jitter sample and wait the configured interval
+plus that jitter. The scheduler awaits each whole
+enumeration/claim/delivery cycle, so a slow cycle cannot overlap another. The
+packaged tracer retains per-stream failures for a later cycle rather than
+letting one outage cancel responsibility for other configured streams.
+
 **`DisabledCaptureRuntime`** — orders durable responsibility by source
 position, revalidates each queued candidate against the source fixture, and
 sends it through the ordinary authenticated capture endpoint. It advances to a
@@ -126,8 +146,10 @@ author of the canonical `scan_*` columns when delivery occurs.
 The two sides do different things with the result. The runtime calls exactly two
 gate methods — `AssertObservationWithinBudget` and `ScanJson` — and **refuses on
 scan failure**: a budget exhaustion, a matcher timeout, an internal scanner
-error, or an unusable rule set throws out of `ScanJson`, so it emits nothing,
-exits non-zero, and says why on stderr. An omission is not a refusal — a leaf
+error, or an unusable rule set throws out of `ScanJson`, so it emits nothing
+and says why on stderr. The one-shot compatibility mode exits non-zero; the
+scheduled synthetic mode retains responsibility and retries a later cycle. An
+omission is not a refusal — a leaf
 past its byte limit, a sensitive property name carrying a subtree, or a
 redaction-caused name collision is a recorded fidelity outcome that the server
 persists *as* an omission, not an unscanned tail, so the runtime still sends

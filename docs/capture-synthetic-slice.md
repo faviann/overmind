@@ -67,7 +67,17 @@ docker run --rm \
 It defaults to the baked synthetic three-record JSONL fixture.
 `OVERMIND_CODEX_FIXTURE` may explicitly select another synthetic fixture for
 non-production tests. The exact-value enable gate and strict three-record
-rollout-schema validation still apply.
+rollout-schema validation still apply to that one-shot compatibility mode.
+
+For scheduled synthetic testing, `OVERMIND_CODEX_TRANSCRIPT_ROOT` selects a
+directory tree whose `*.jsonl` files are enumerated immediately at startup and
+again after every complete scan cycle. `OVERMIND_CAPTURE_SCAN_INTERVAL_MS`
+configures the positive base delay (default `1000`) and
+`OVERMIND_CAPTURE_SCAN_JITTER_MS` configures the non-negative random addition
+(default `250`). The entire enumeration, claim, and delivery cycle is awaited
+before the next delay begins, so cycles never overlap. New files and completed
+appends are discovered without a hook; endpoint failures stay durably queued
+and are retried by later cycles or process restart.
 
 Before delivery, each completed record is locally scanned and claimed in the
 single writable directory selected by `OVERMIND_CAPTURE_STATE_DIR` (the image
@@ -86,8 +96,9 @@ The fixture uses representative persisted Codex rollout records shaped as
 `{timestamp,type,payload}`: a nested `message`/`input_text`, a
 `function_call` with JSON-string arguments, and a `function_call_output`.
 Rollout records do not invent a per-record session ID; this disabled adapter
-uses one stable synthetic source session, while capture bindings isolate
-installations. It sends the three ordered observations to
+uses one stable synthetic source session in one-shot mode and a stable
+path-derived source stream per scheduled file, while capture bindings isolate
+installations. It sends ordered observations to
 `POST /capture/v1/observations`.
 
 Delivery always chooses the earliest unresolved durable responsibility. A
@@ -126,7 +137,9 @@ writes and checkpoint movement, not reads.
 
 ## Explicit limitations
 
-- No live Codex transcript discovery, watch, hook, scheduler, or catch-up.
+- No production Codex discovery, filesystem watch, hook, or supported catch-up
+  installation. Scheduled enumeration is confined to explicitly configured
+  synthetic JSONL trees behind the non-production enable gate.
 - No production adapter compatibility or supported capture installation.
 - Enrollment records a harness identity but does not select an adapter. The
   disposable Claude conformance spike lives only in the test assembly and is

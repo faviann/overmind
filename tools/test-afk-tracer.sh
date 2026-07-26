@@ -100,6 +100,16 @@ Closes #42
 | Final workflow outcome | Closes |
 BODY
 gh pr create --head "$branch" --body-file "$AFK_TEST_PR_BODY" >/dev/null
+printf '%s\n' '{"type":"item.started","item":{"type":"command_execution","command":"scripted-tracer-command --secret-argument zumbleflux"}}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"scripted commentary line one\nscripted commentary line two\nscripted \u001b[31mcoloured\u001b[0m commentary line three\n"}}'
+# Hold the turn open after the commentary so the scenario can observe that
+# commentary while this agent is demonstrably still running. `sleep` on PATH is
+# the adapter that kills its parent, so poll with the real binary.
+release_wait=0
+while [[ ! -e "$AFK_TEST_RELEASE" && "$release_wait" -lt 500 ]]; do
+  /usr/bin/sleep 0.02
+  release_wait=$((release_wait + 1))
+done
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"<promise>COMPLETE</promise>"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'
 EOF
@@ -183,6 +193,7 @@ run_command() {
       AFK_TEST_PR_BODY="$pr_body" \
       AFK_TEST_REAL_GIT="$real_git" \
       AFK_TEST_TIMER_EVENTS="$timer_events" \
+      AFK_TEST_RELEASE="$fixture/release" \
       NODE_OPTIONS="${NODE_OPTIONS:-} --require=$timer_recorder" \
       AFK_TEST_FAIL_FETCH="${2:-0}" \
       AFK_TEST_FAIL_GH_AUTH="${3:-0}" \
@@ -264,7 +275,88 @@ fi
 
 : >"$events"
 : >"$timer_events"
-run_command 1
+progress="$fixture/progress.out"
+
+fail_with() {
+  echo "$1" >&2
+  cat "$2" >&2
+  exit 1
+}
+
+# Commentary must reach the launch terminal *as it is produced*, not as a batch
+# flushed when the agent exits. The scripted agent blocks after its first
+# commentary message until this scenario releases it, so observing that
+# commentary in the capture below happens while the agent is provably still
+# running mid-turn. A watcher that buffered the stream to exit would never
+# satisfy this poll, and the bounded loop turns that into a loud failure.
+rm -f "$fixture/release"
+run_command 1 >"$progress" 2>&1 &
+watcher_pid=$!
+
+live_wait=0
+until grep -Fxq '[afk #42] scripted commentary line one' "$progress" 2>/dev/null; do
+  live_wait=$((live_wait + 1))
+  if [[ "$live_wait" -ge 500 ]]; then
+    kill "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    fail_with \
+      "agent commentary never appeared in watcher terminal output while the agent was still running" \
+      "$progress"
+  fi
+  /usr/bin/sleep 0.02
+done
+
+touch "$fixture/release"
+watcher_status=0
+wait "$watcher_pid" || watcher_status=$?
+[[ "$watcher_status" == 0 ]] ||
+  fail_with "watcher exited with status $watcher_status" "$progress"
+
+# The operator watching the launch terminal must see the agent working on the
+# active issue, while the durable log keeps the complete record.
+grep -Fxq '[afk #42] scripted commentary line one' "$progress" ||
+  fail_with "agent commentary line one missing from watcher terminal output" "$progress"
+grep -Fxq '[afk #42] scripted commentary line two' "$progress" ||
+  fail_with "agent commentary line two missing from watcher terminal output" "$progress"
+grep -Fxq '[afk #42] scripted coloured commentary line three' "$progress" ||
+  fail_with "ANSI-coloured agent commentary missing or unstripped in watcher terminal output" "$progress"
+[[ "$(grep -Fc '[31m' "$progress" || true)" == 0 ]] ||
+  fail_with "ANSI colour sequence residue leaked into watcher terminal output" "$progress"
+[[ "$(grep -Fc '[0m' "$progress" || true)" == 0 ]] ||
+  fail_with "ANSI reset sequence residue leaked into watcher terminal output" "$progress"
+# Criterion 7 ("long or multiline agent content is rendered without making
+# subsequent lifecycle messages ambiguous"): agent text chunks end with a
+# newline, so splitting them yields a trailing empty segment. That segment must
+# never surface as a bare prefix line with no content behind it.
+[[ "$(grep -Ec '^\[afk #42\] ?$' "$progress" || true)" == 0 ]] ||
+  fail_with "empty agent line emitted as a bare run prefix in watcher terminal output" "$progress"
+grep -Fxq '[afk #42] tool: Bash' "$progress" ||
+  fail_with "tool activity missing from watcher terminal output" "$progress"
+[[ "$(grep -Fc 'zumbleflux' "$progress" || true)" == 0 ]] ||
+  fail_with "full tool arguments leaked into watcher terminal output" "$progress"
+[[ "$(grep -Fc '"type":"item.' "$progress" || true)" == 0 ]] ||
+  fail_with "raw provider JSON leaked into watcher terminal output" "$progress"
+
+# Criterion 7, second half: a lifecycle message emitted *after* the streamed
+# agent commentary must stay unambiguous — it reaches the terminal intact, on
+# its own line, and never wearing the agent run prefix.
+completion_line='AFK issue #42 completed: pull request #7 awaits review'
+grep -Fxq "$completion_line" "$progress" ||
+  fail_with "lifecycle completion message missing or altered after streamed agent commentary" "$progress"
+[[ "$(grep -Fc "[afk #42] $completion_line" "$progress" || true)" == 0 ]] ||
+  fail_with "lifecycle completion message was rendered as agent commentary" "$progress"
+commentary_last="$(grep -Fxn '[afk #42] scripted coloured commentary line three' "$progress" | cut -d: -f1)"
+completion_at="$(grep -Fxn "$completion_line" "$progress" | cut -d: -f1)"
+[[ -n "$commentary_last" && -n "$completion_at" && "$completion_at" -gt "$commentary_last" ]] ||
+  fail_with "lifecycle completion message did not follow the streamed agent commentary" "$progress"
+
+durable_log="$repo/.sandcastle/logs/afk-issue-42.log"
+[[ -s "$durable_log" ]] ||
+  fail_with "durable per-run log $durable_log is missing or empty" "$progress"
+grep -Fq 'Bash(scripted-tracer-command --secret-argument zumbleflux)' "$durable_log" ||
+  fail_with "durable log lost the complete tool invocation" "$durable_log"
+grep -Fq 'tail -f .sandcastle/logs/afk-issue-42.log' "$progress" ||
+  fail_with "watcher terminal no longer displays the durable log location" "$progress"
 
 # A watcher must observe the authorized queue before asking the intelligent
 # selector to spend model tokens, and it must return to that live query after

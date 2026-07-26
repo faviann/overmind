@@ -26,8 +26,10 @@ server.
 The terminal request preserves source identity, locator, raw-and-parsed source
 timestamp, harness/version/record discriminator, material kind, explicitly
 observed model and provider, adapter identity, the source payload, deterministic
-semantic parts, and source-stated relationships. The server then applies its
-independent fail-closed safety gate and returns the safe canonical receipt.
+semantic parts, source-stated relationships, and optional route evidence
+(`workingDirectory` plus the complete named remote list). The server then
+applies its independent fail-closed safety gate and returns the safe canonical
+receipt. Route evidence is provenance, not a namespace claim.
 
 Unavailable model, provider, timestamp, actor, outcome, and relationship facts
 are never filled from adjacent records or harness stereotypes. Nullable

@@ -21,7 +21,8 @@ public static class SchemaVerifier
         "namespaces", "traces", "trace_snapshots", "memories",
         "retrieval_config", "workstreams", "jobs",
         "capture_source_bindings", "capture_source_streams",
-        "capture_observations", "captured_events", "captured_event_relationships"
+        "capture_route_policies", "capture_observations",
+        "captured_events", "captured_event_relationships"
     ];
 
     private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab", "capture/unscoped"];
@@ -39,6 +40,7 @@ public static class SchemaVerifier
         ("namespaces", ["SELECT", "INSERT", "UPDATE"]),
         ("capture_source_bindings", ["SELECT", "INSERT"]),
         ("capture_source_streams", ["SELECT", "INSERT"]),
+        ("capture_route_policies", ["SELECT", "INSERT"]),
         ("capture_observations", ["SELECT", "INSERT"]),
         ("captured_events", ["SELECT", "INSERT"]),
         ("captured_event_relationships", ["SELECT", "INSERT"]),
@@ -103,6 +105,7 @@ public static class SchemaVerifier
         foreach (var (table, trigger) in new[]
         {
             ("capture_observations", "capture_observations_immutable"),
+            ("capture_route_policies", "capture_route_policies_immutable"),
             ("captured_events", "captured_events_immutable"),
             ("captured_event_relationships", "captured_event_relationships_immutable")
         })
@@ -256,7 +259,7 @@ public static class SchemaVerifier
         foreach (var table in new[]
         {
             "traces", "trace_snapshots", "capture_observations",
-            "captured_events", "captured_event_relationships"
+            "capture_route_policies", "captured_events", "captured_event_relationships"
         })
         {
             if (!existingTables.Contains(table))

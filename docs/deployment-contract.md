@@ -135,9 +135,9 @@ What it asserts:
   migration.
 - Bootstrap rows exist: the `memory-system` and `homelab` namespaces and the
   default (`*`/`*`) retrieval config.
-- The disabled capture slice's binding, stream, observation, event, and
-  relationship tables exist; immutable capture-ledger triggers and restricted
-  grants are present; and `capture/unscoped` exists.
+- The capture slice's binding, append-only route-policy, stream, observation,
+  event, and relationship tables exist; immutable capture-ledger triggers and
+  restricted grants are present; and `capture/unscoped` exists.
 
 Run it against a **disposable** target only — dev/test/CI use a locally
 provisioned database, never the persistent production `memory`.

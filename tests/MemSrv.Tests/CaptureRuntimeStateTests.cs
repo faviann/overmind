@@ -10,6 +10,63 @@ namespace MemSrv.Tests;
 public sealed class CaptureRuntimeStateTests
 {
     [Fact]
+    public void LocatorEvidenceIdentityBindsEveryMechanicalComponent()
+    {
+        var baseline = new CaptureRuntimeLocatorEvidence(
+            "transcript", 7, 11, 13, "record",
+            new CapturePrefixEvidence(24, "prefix"));
+
+        Assert.Equal(
+            "87c6b278198689495a3d56ecbc0dba5748ff6588e825a0a7f74ea07a55fa895f",
+            baseline.Identity);
+        Assert.Equal(
+            baseline.Identity,
+            new CaptureRuntimeLocatorEvidence(
+                "transcript", 7, 11, 13, "record",
+                new CapturePrefixEvidence(24, "prefix")).Identity);
+
+        CaptureRuntimeLocatorEvidence[] changed =
+        [
+            new("other-transcript", 7, 11, 13, "record", new(24, "prefix")),
+            new("transcript", 8, 11, 13, "record", new(24, "prefix")),
+            new("transcript", 7, 12, 13, "record", new(24, "prefix")),
+            new("transcript", 7, 11, 14, "record", new(24, "prefix")),
+            new("transcript", 7, 11, 13, "other-record", new(24, "prefix")),
+            new("transcript", 7, 11, 13, "record", new(25, "prefix")),
+            new("transcript", 7, 11, 13, "record", new(24, "other-prefix"))
+        ];
+        Assert.All(changed, evidence => Assert.NotEqual(baseline.Identity, evidence.Identity));
+    }
+
+    [Fact]
+    public void QueueItemCannotDeserializeWithAContradictorySourcePosition()
+    {
+        const string contradictory = """
+            {
+              "sourceStream": "stream",
+              "sourcePosition": 8,
+              "deterministicLocatorEvidence": {
+                "transcriptIdentity": "transcript",
+                "sourcePosition": 7,
+                "byteOffset": 11,
+                "byteLength": 13,
+                "recordSha256": "record",
+                "prefixEvidence": { "byteLength": 24, "sha256": "prefix" }
+              },
+              "redactedSafeCandidate": "{\"safe\":true}"
+            }
+            """;
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            JsonSerializer.Deserialize<CaptureRuntimeQueueItem>(
+                contradictory,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        Assert.Equal(
+            "Queued sourcePosition must match deterministic locator evidence.",
+            exception.Message);
+    }
+
+    [Fact]
     public async Task CompletedRecordIsDurablyClaimedOnlyAfterLocalSanitization()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -44,18 +101,34 @@ public sealed class CaptureRuntimeStateTests
 
             var claim = Assert.Single(claims);
             Assert.Equal(0, claim.SourcePosition);
-            Assert.DoesNotContain(seededSyntheticSecret, claim.CandidateObservationJson);
-            Assert.Contains("[REDACTED:aws-access-key-id]", claim.CandidateObservationJson);
+            Assert.DoesNotContain(seededSyntheticSecret, claim.RedactedSafeCandidate);
+            Assert.Contains("[REDACTED:aws-access-key-id]", claim.RedactedSafeCandidate);
 
             CaptureRuntimeSnapshot snapshot = await state.ReadAsync();
             var stream = Assert.Single(snapshot.Streams);
             Assert.Equal(0, stream.EnqueuedThrough);
             Assert.NotNull(stream.VerifiedPrefix);
             var queued = Assert.Single(stream.Queue);
-            Assert.Equal(claim.LocatorIdentity, queued.LocatorIdentity);
+            Assert.Equal(
+                claim.DeterministicLocatorEvidence.Identity,
+                queued.DeterministicLocatorEvidence.Identity);
             Assert.Equal("codex-runtime-state-test", queued.SourceStream);
             Assert.Equal(0, queued.SourcePosition);
-            Assert.DoesNotContain(seededSyntheticSecret, queued.CandidateObservationJson);
+            Assert.DoesNotContain(seededSyntheticSecret, queued.RedactedSafeCandidate);
+            using JsonDocument stateDocument = JsonDocument.Parse(
+                await File.ReadAllTextAsync(
+                    Path.Combine(directory, "state", "capture-state.json")));
+            JsonElement persistedQueueItem = Assert.Single(
+                stateDocument.RootElement.GetProperty("streams")[0].GetProperty("queue")
+                    .EnumerateArray());
+            Assert.Equal(
+                [
+                    "sourceStream",
+                    "sourcePosition",
+                    "deterministicLocatorEvidence",
+                    "redactedSafeCandidate"
+                ],
+                persistedQueueItem.EnumerateObject().Select(property => property.Name));
             Assert.DoesNotContain(
                 seededSyntheticSecret,
                 await File.ReadAllTextAsync(Path.Combine(directory, "state", "capture-state.json")));
@@ -138,15 +211,15 @@ public sealed class CaptureRuntimeStateTests
         {
             var state = new FileCaptureRuntimeState(directory);
             var prefix = new CapturePrefixEvidence(10, new string('a', 64));
-            var claim = new CaptureRuntimeClaim(
+            var claim = new CaptureRuntimeQueueItem(
                 "stream",
-                new string('b', 64),
-                0,
-                0,
-                10,
-                new string('c', 64),
-                prefix,
-                new string('d', 64),
+                new CaptureRuntimeLocatorEvidence(
+                    new string('b', 64),
+                    0,
+                    0,
+                    10,
+                    new string('c', 64),
+                    prefix),
                 """{"safe":"candidate"}""");
 
             await Assert.ThrowsAsync<CaptureRuntimeConcurrencyException>(() =>
@@ -162,6 +235,100 @@ public sealed class CaptureRuntimeStateTests
             {
                 Directory.Delete(directory, recursive: true);
             }
+        }
+    }
+
+    [Fact]
+    public async Task DuplicateLocatorDoesNotDuplicateResponsibilityOrAdvanceProgress()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-duplicate-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            var prefix = new CapturePrefixEvidence(10, new string('a', 64));
+            var claim = new CaptureRuntimeQueueItem(
+                "stream",
+                new CaptureRuntimeLocatorEvidence(
+                    new string('b', 64), 0, 0, 10, new string('c', 64), prefix),
+                """{"safe":"candidate"}""");
+
+            Assert.True(await state.ClaimAsync(claim, expectedPrefix: null));
+            CaptureRuntimeSnapshot once = await state.ReadAsync();
+            Assert.False(await state.ClaimAsync(claim, prefix));
+            CaptureRuntimeSnapshot twice = await state.ReadAsync();
+
+            Assert.Equal(JsonSerializer.Serialize(once), JsonSerializer.Serialize(twice));
+            CaptureRuntimeStreamState stream = Assert.Single(twice.Streams);
+            Assert.Equal(0, stream.EnqueuedThrough);
+            Assert.Single(stream.Queue);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task KillingPackagedTracerDuringRealStateTempWriteLeavesAtomicClaimSnapshot()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-kill-write-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(stateDirectory);
+        string fixture = await File.ReadAllTextAsync(
+            Path.Combine(root, "fixtures/codex-synthetic.jsonl"));
+        fixture = fixture.Replace(
+            "Show the working directory.",
+            new string('x', 700_000),
+            StringComparison.Ordinal);
+        await File.WriteAllTextAsync(transcript, fixture, new UTF8Encoding(false));
+
+        var tempObserved = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var watcher = new FileSystemWatcher(stateDirectory, ".capture-state.json.*.tmp")
+        {
+            EnableRaisingEvents = true
+        };
+        watcher.Created += (_, _) => tempObserved.TrySetResult();
+
+        try
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(
+                TracerEnvironment(transcript, stateDirectory, port: 1));
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            await tempObserved.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            await Task.WhenAll(stdout, stderr);
+
+            CaptureRuntimeSnapshot snapshot =
+                await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+            if (snapshot.Streams.Count == 0)
+            {
+                return;
+            }
+
+            CaptureRuntimeStreamState stream = Assert.Single(snapshot.Streams);
+            Assert.NotEmpty(stream.Queue);
+            Assert.Equal(stream.Queue.Count - 1, stream.EnqueuedThrough);
+            Assert.Equal(
+                Enumerable.Range(0, stream.Queue.Count).Select(value => (long)value),
+                stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(
+                stream.VerifiedPrefix,
+                stream.Queue[^1].DeterministicLocatorEvidence.PrefixEvidence);
+            Assert.Null(stream.LastServerReceipt);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
         }
     }
 
@@ -281,6 +448,53 @@ public sealed class CaptureRuntimeStateTests
             Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
             Assert.Equal("new", stream.LastServerReceipt?.Status);
             Assert.Equal(firstObservation, stream.LastServerReceipt?.ObservationUuid);
+        }
+        finally
+        {
+            await serverCancellation.CancelAsync();
+            listener.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerRejectsReceiptForAnotherSourcePosition()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-receipt-position-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Guid acceptedObservation = Guid.NewGuid();
+        using var serverCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<int> server = ServeResponsesAsync(
+            listener,
+            [
+                (HttpStatusCode.OK, Receipt(0, acceptedObservation)),
+                (HttpStatusCode.OK, Receipt(2))
+            ],
+            serverCancellation.Token);
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                TracerEnvironment(transcript, stateDirectory, port));
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Equal(2, await server);
+            Assert.Contains(
+                "does not match queued sourcePosition 1",
+                result.Stderr,
+                StringComparison.Ordinal);
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
+            Assert.Equal(acceptedObservation, stream.LastServerReceipt?.ObservationUuid);
         }
         finally
         {

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using MemSrv.Core;
 
 namespace CaptureAdapters;
@@ -16,7 +17,7 @@ public interface ICaptureRuntimeState
     Task<CaptureRuntimeSnapshot> ReadAsync(CancellationToken cancellationToken = default);
 
     Task<bool> ClaimAsync(
-        CaptureRuntimeClaim claim,
+        CaptureRuntimeQueueItem claim,
         CapturePrefixEvidence? expectedPrefix,
         CancellationToken cancellationToken = default);
 
@@ -28,27 +29,100 @@ public interface ICaptureRuntimeState
 
 public sealed record CapturePrefixEvidence(long ByteLength, string Sha256);
 
-public sealed record CaptureRuntimeClaim(
-    string SourceStream,
-    string TranscriptIdentity,
-    long SourcePosition,
-    long ByteOffset,
-    long ByteLength,
-    string RecordSha256,
-    CapturePrefixEvidence VerifiedPrefix,
-    string LocatorIdentity,
-    string CandidateObservationJson);
+/// <summary>
+/// Complete, immutable mechanical evidence for one persisted source record.
+/// Its identity binds every field and is independent of delivery requests or
+/// batches.
+/// </summary>
+public sealed record CaptureRuntimeLocatorEvidence
+{
+    public CaptureRuntimeLocatorEvidence(
+        string transcriptIdentity,
+        long sourcePosition,
+        long byteOffset,
+        long byteLength,
+        string recordSha256,
+        CapturePrefixEvidence prefixEvidence)
+    {
+        TranscriptIdentity = transcriptIdentity;
+        SourcePosition = sourcePosition;
+        ByteOffset = byteOffset;
+        ByteLength = byteLength;
+        RecordSha256 = recordSha256;
+        PrefixEvidence = prefixEvidence;
+        Identity = CalculateIdentity(
+            transcriptIdentity, sourcePosition, byteOffset, byteLength,
+            recordSha256, prefixEvidence);
+    }
 
-public sealed record CaptureRuntimeQueueItem(
-    string SourceStream,
-    string TranscriptIdentity,
-    long SourcePosition,
-    long ByteOffset,
-    long ByteLength,
-    string RecordSha256,
-    CapturePrefixEvidence PrefixEvidence,
-    string LocatorIdentity,
-    string CandidateObservationJson);
+    public string TranscriptIdentity { get; }
+    public long SourcePosition { get; }
+    public long ByteOffset { get; }
+    public long ByteLength { get; }
+    public string RecordSha256 { get; }
+    public CapturePrefixEvidence PrefixEvidence { get; }
+    public string Identity { get; }
+
+    private static string CalculateIdentity(
+        string transcriptIdentity,
+        long sourcePosition,
+        long byteOffset,
+        long byteLength,
+        string recordSha256,
+        CapturePrefixEvidence prefix)
+    {
+        string canonical = string.Join(
+            "\n",
+            "capture-locator/v1",
+            transcriptIdentity,
+            sourcePosition.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            byteOffset.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            byteLength.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            recordSha256,
+            prefix.ByteLength.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            prefix.Sha256);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
+            .ToLowerInvariant();
+    }
+}
+
+public sealed record CaptureRuntimeQueueItem
+{
+    [JsonConstructor]
+    public CaptureRuntimeQueueItem(
+        string sourceStream,
+        long sourcePosition,
+        CaptureRuntimeLocatorEvidence deterministicLocatorEvidence,
+        string redactedSafeCandidate)
+    {
+        if (sourcePosition != deterministicLocatorEvidence.SourcePosition)
+        {
+            throw new InvalidDataException(
+                "Queued sourcePosition must match deterministic locator evidence.");
+        }
+        SourceStream = sourceStream;
+        SourcePosition = sourcePosition;
+        DeterministicLocatorEvidence = deterministicLocatorEvidence;
+        RedactedSafeCandidate = redactedSafeCandidate;
+    }
+
+    public CaptureRuntimeQueueItem(
+        string sourceStream,
+        CaptureRuntimeLocatorEvidence deterministicLocatorEvidence,
+        string redactedSafeCandidate)
+        : this(
+            sourceStream,
+            deterministicLocatorEvidence.SourcePosition,
+            deterministicLocatorEvidence,
+            redactedSafeCandidate)
+    {
+    }
+
+    public string SourceStream { get; }
+    public long SourcePosition { get; }
+    public CaptureRuntimeLocatorEvidence DeterministicLocatorEvidence { get; }
+    public string RedactedSafeCandidate { get; }
+}
 
 public sealed record CaptureServerReceiptState(
     long SourcePosition,
@@ -108,7 +182,7 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
     }
 
     public async Task<bool> ClaimAsync(
-        CaptureRuntimeClaim claim,
+        CaptureRuntimeQueueItem claim,
         CapturePrefixEvidence? expectedPrefix,
         CancellationToken cancellationToken = default)
     {
@@ -123,7 +197,9 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
 
         if (stream is not null
             && !string.Equals(
-                stream.TranscriptIdentity, claim.TranscriptIdentity, StringComparison.Ordinal))
+                stream.TranscriptIdentity,
+                claim.DeterministicLocatorEvidence.TranscriptIdentity,
+                StringComparison.Ordinal))
         {
             throw new CapturePrefixChangedException(
                 claim.SourceStream, "transcript identity changed");
@@ -133,27 +209,21 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
             throw new CaptureRuntimeConcurrencyException(claim.SourceStream);
         }
         if (stream?.Queue.Any(item =>
-                string.Equals(item.LocatorIdentity, claim.LocatorIdentity, StringComparison.Ordinal))
+                string.Equals(
+                    item.DeterministicLocatorEvidence.Identity,
+                    claim.DeterministicLocatorEvidence.Identity,
+                    StringComparison.Ordinal))
             == true)
         {
             return false;
         }
 
         var queue = stream?.Queue.ToList() ?? [];
-        queue.Add(new CaptureRuntimeQueueItem(
-            claim.SourceStream,
-            claim.TranscriptIdentity,
-            claim.SourcePosition,
-            claim.ByteOffset,
-            claim.ByteLength,
-            claim.RecordSha256,
-            claim.VerifiedPrefix,
-            claim.LocatorIdentity,
-            claim.CandidateObservationJson));
+        queue.Add(claim);
         var nextStream = new CaptureRuntimeStreamState(
             claim.SourceStream,
-            claim.TranscriptIdentity,
-            claim.VerifiedPrefix,
+            claim.DeterministicLocatorEvidence.TranscriptIdentity,
+            claim.DeterministicLocatorEvidence.PrefixEvidence,
             claim.SourcePosition,
             queue,
             stream?.LastServerReceipt);
@@ -190,7 +260,9 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         CaptureRuntimeStreamState stream = streams[streamIndex];
         if (!stream.Queue.Any(item =>
                 string.Equals(
-                    item.LocatorIdentity, receipt.LocatorIdentity, StringComparison.Ordinal)
+                    item.DeterministicLocatorEvidence.Identity,
+                    receipt.LocatorIdentity,
+                    StringComparison.Ordinal)
                 && item.SourcePosition == receipt.SourcePosition))
         {
             throw new InvalidOperationException(
@@ -255,7 +327,7 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
 /// </summary>
 public static class CodexCaptureClaimer
 {
-    public static async Task<IReadOnlyList<CaptureRuntimeClaim>> ClaimCompletedAsync(
+    public static async Task<IReadOnlyList<CaptureRuntimeQueueItem>> ClaimCompletedAsync(
         ICaptureSourceAdapter adapter,
         string transcriptPath,
         string sourceStream,
@@ -280,7 +352,7 @@ public static class CodexCaptureClaimer
             throw new CapturePrefixChangedException(
                 sourceStream, "transcript identity changed");
         }
-        var claimed = new List<CaptureRuntimeClaim>();
+        var claimed = new List<CaptureRuntimeQueueItem>();
         CapturePrefixEvidence? expectedPrefix = stream?.VerifiedPrefix;
 
         foreach (TrustedSourceObservation record in records)
@@ -309,20 +381,16 @@ public static class CodexCaptureClaimer
                 terminal.Observation, JsonDefaults.Options);
             safetyGate.AssertObservationWithinBudget(originalJson);
             string candidateJson = safetyGate.ScanJson(originalJson).Redacted;
-            string locatorIdentity = LocatorIdentity(
-                transcriptIdentity,
-                record.SourcePosition,
-                byteRange,
-                prefix);
-            var claim = new CaptureRuntimeClaim(
-                sourceStream,
+            var locatorEvidence = new CaptureRuntimeLocatorEvidence(
                 transcriptIdentity,
                 record.SourcePosition,
                 byteRange.Offset,
                 byteRange.Length,
                 byteRange.SourceContentSha256!,
-                prefix,
-                locatorIdentity,
+                prefix);
+            var claim = new CaptureRuntimeQueueItem(
+                sourceStream,
+                locatorEvidence,
                 candidateJson);
             if (await state.ClaimAsync(claim, expectedPrefix, cancellationToken))
             {
@@ -370,25 +438,6 @@ public static class CodexCaptureClaimer
             throw new CapturePrefixChangedException(
                 sourceStream, $"source record {sourcePosition} changed while being claimed");
         }
-    }
-
-    private static string LocatorIdentity(
-        string transcriptIdentity,
-        long sourcePosition,
-        CaptureSourceLocator.ByteRange locator,
-        CapturePrefixEvidence prefix)
-    {
-        string canonical = string.Join(
-            "\n",
-            "capture-locator/v1",
-            transcriptIdentity,
-            sourcePosition.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            locator.Offset.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            locator.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            locator.SourceContentSha256,
-            prefix.ByteLength.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            prefix.Sha256);
-        return Digest(Encoding.UTF8.GetBytes(canonical));
     }
 
     private static string Digest(ReadOnlySpan<byte> bytes) =>

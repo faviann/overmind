@@ -53,22 +53,23 @@ public static class DisabledCaptureRuntime
 
         foreach (CaptureRuntimeQueueItem queued in queue)
         {
+            CaptureRuntimeLocatorEvidence evidence = queued.DeterministicLocatorEvidence;
             if (!string.Equals(queued.SourceStream, sourceSessionId, StringComparison.Ordinal)
                 || !string.Equals(
-                    queued.TranscriptIdentity, transcriptIdentity, StringComparison.Ordinal)
+                    evidence.TranscriptIdentity, transcriptIdentity, StringComparison.Ordinal)
                 || !recordsByPosition.TryGetValue(queued.SourcePosition, out var sourceRecord)
                 || sourceRecord.Locator is not CaptureSourceLocator.ByteRange locator
-                || locator.Offset != queued.ByteOffset
-                || locator.Length != queued.ByteLength
+                || locator.Offset != evidence.ByteOffset
+                || locator.Length != evidence.ByteLength
                 || !string.Equals(
-                    locator.SourceContentSha256, queued.RecordSha256, StringComparison.Ordinal)
-                || queued.PrefixEvidence.ByteLength
-                    != checked(queued.ByteOffset + queued.ByteLength)
-                || queued.PrefixEvidence.ByteLength > sourceBytes.LongLength
+                    locator.SourceContentSha256, evidence.RecordSha256, StringComparison.Ordinal)
+                || evidence.PrefixEvidence.ByteLength
+                    != checked(evidence.ByteOffset + evidence.ByteLength)
+                || evidence.PrefixEvidence.ByteLength > sourceBytes.LongLength
                 || !string.Equals(
-                    queued.PrefixEvidence.Sha256,
+                    evidence.PrefixEvidence.Sha256,
                     Digest(sourceBytes.AsSpan(
-                        0, checked((int)queued.PrefixEvidence.ByteLength))),
+                        0, checked((int)evidence.PrefixEvidence.ByteLength))),
                     StringComparison.Ordinal))
             {
                 throw new CapturePrefixChangedException(
@@ -99,7 +100,7 @@ public static class DisabledCaptureRuntime
             safetyGate.AssertObservationWithinBudget(observationJson);
             string candidateJson = safetyGate.ScanJson(observationJson).Redacted;
             if (!string.Equals(
-                    candidateJson, queued.CandidateObservationJson, StringComparison.Ordinal))
+                    candidateJson, queued.RedactedSafeCandidate, StringComparison.Ordinal))
             {
                 throw new CapturePrefixChangedException(
                     sourceSessionId,

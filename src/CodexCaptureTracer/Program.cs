@@ -103,11 +103,18 @@ try
         {
             using JsonDocument document = JsonDocument.Parse(receipt);
             JsonElement root = document.RootElement;
+            long receiptSourcePosition = root.GetProperty("sourcePosition").GetInt64();
+            if (receiptSourcePosition != queued.SourcePosition)
+            {
+                throw new InvalidDataException(
+                    $"Capture server receipt sourcePosition {receiptSourcePosition} " +
+                    $"does not match queued sourcePosition {queued.SourcePosition}.");
+            }
             await runtimeState.RecordServerReceiptAsync(
                 sessionId,
                 new CaptureServerReceiptState(
-                    queued.SourcePosition,
-                    queued.LocatorIdentity,
+                    receiptSourcePosition,
+                    queued.DeterministicLocatorEvidence.Identity,
                     root.GetProperty("status").GetString() ?? "unknown",
                     root.TryGetProperty("observationUuid", out JsonElement observationUuid)
                         ? observationUuid.GetGuid()

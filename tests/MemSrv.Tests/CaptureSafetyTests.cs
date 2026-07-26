@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using Dapper;
@@ -512,7 +513,6 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     public async Task DisabledRuntimeRefusesToSendWhenItsOwnScanFailsClosed()
     {
         string captureKey = CaptureCredential();
-        await EnrollAsync($"codex-failclosed-{Guid.NewGuid():N}", captureKey);
         string fixturePath = Path.Combine(
             Path.GetTempPath(), $"codex-failclosed-{Guid.NewGuid():N}.jsonl");
         // Past the 10,000-match budget: the runtime's own scan fails closed
@@ -525,34 +525,60 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             .Replace("Show the working directory.", flood, StringComparison.Ordinal);
         await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
 
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int requestCount = 0;
+        using var probeCancellation = new CancellationTokenSource();
+        Task responder = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    using var incoming =
+                        await listener.AcceptTcpClientAsync(probeCancellation.Token);
+                    Interlocked.Increment(ref requestCount);
+                    await incoming.GetStream().WriteAsync(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8
+                            .ToArray(),
+                        probeCancellation.Token);
+                }
+            }
+            catch (OperationCanceledException) when (probeCancellation.IsCancellationRequested)
+            {
+                // The runtime exited without contacting the probe.
+            }
+        });
+        var probeEndpoint = new Uri(
+            $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}");
+
         try
         {
             var tracer = await TestProcessRunner.RunCaptureTracerToExitAsync(
                 new Dictionary<string, string>
                 {
                     ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
-                    ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+                    ["OVERMIND_CAPTURE_URL"] = probeEndpoint.ToString(),
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
                     ["OVERMIND_CODEX_FIXTURE"] = fixturePath
                 });
 
             Assert.NotEqual(0, tracer.ExitCode);
-            // Nothing was emitted: no receipt, so nothing was ever sent.
+            // Nothing was emitted: the independent HTTP probe saw no request.
             Assert.Empty(tracer.Stdout);
+            Assert.Equal(0, Volatile.Read(ref requestCount));
             Assert.Contains("failed closed", tracer.Stderr);
             Assert.Contains("match-count budget of 10000", tracer.Stderr);
             // AC10 still holds on the refusal path.
             Assert.DoesNotContain("AKIA0000", tracer.Stderr, StringComparison.Ordinal);
             Assert.DoesNotContain(captureKey, tracer.Stderr, StringComparison.Ordinal);
             Assert.DoesNotContain("sourcePayload", tracer.Stderr, StringComparison.Ordinal);
-
-            await using var connection = new NpgsqlConnection(AdminConnection);
-            await connection.OpenAsync();
-            Assert.False(await connection.ExecuteScalarAsync<bool>(
-                "SELECT EXISTS (SELECT 1 FROM capture_observations WHERE safe_source_payload::text LIKE '%AKIA0000000000000001%')"));
         }
         finally
         {
+            await probeCancellation.CancelAsync();
+            listener.Stop();
+            await responder;
             File.Delete(fixturePath);
         }
     }

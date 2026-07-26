@@ -122,7 +122,6 @@ internal sealed class SecretRuleSet
         {
             var deserializer = new DeserializerBuilder()
                 .WithNamingConvention(UnderscoredNamingConvention.Instance)
-                .IgnoreUnmatchedProperties()
                 .Build();
             file = deserializer.Deserialize<RuleSetFile>(contents);
         }

@@ -41,6 +41,13 @@ public sealed class SafetyGateTests : IDisposable
         { "empty file", "", "empty" },
         { "whitespace only", "   \n  \n", "empty" },
         { "not yaml", "rules: [ this: is: not: yaml", "not valid YAML" },
+        {
+            "unsupported field",
+            "version: \"v1\"\nunsupported_mode: permissive\nrules:\n" +
+            "  - id: a\n    category: provider_token\n    priority: 1\n" +
+            "    prefilter: AKIA\n    matcher: regex\n    pattern: AKIA\n",
+            "not valid YAML"
+        },
         { "no version", "rules:\n  - id: a\n", "version" },
         { "no rules", "version: \"v1\"\nrules: []\n", "no rules" },
         {

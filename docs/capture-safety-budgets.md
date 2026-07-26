@@ -7,7 +7,7 @@ operator cannot loosen them from a file. Tests inject smaller budgets where the
 mechanism, not the number, is what is under test.
 
 Budget set version: **`capture-safety-budgets/2026-07-26.2`**.
-Shipped rule set version: **`never-store/2026-07-26.1`** (the runtime version
+Shipped rule set version: **`never-store/2026-07-26.2`** (the runtime version
 string appends a SHA-256 prefix of the rule file and, when present, the *count*
 of operator literals — never their values).
 

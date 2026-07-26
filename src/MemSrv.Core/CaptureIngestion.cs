@@ -17,8 +17,6 @@ public sealed class CaptureConflictException(string message) : Exception(message
 /// </summary>
 public sealed class CaptureIngestion(string connectionString, NeverStoreGate neverStore)
 {
-    private static readonly JsonSerializerOptions JsonOptions = CaptureLedger.JsonOptions;
-
     public async Task<CaptureImportReceipt> ImportAsync(
         CaptureBindingContext binding,
         CaptureObservationCommand command,
@@ -26,7 +24,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     {
         CaptureLedger.RequireSafetyConfigured(neverStore);
         Validate(binding, command);
-        string inputJson = JsonSerializer.Serialize(command, JsonOptions);
+        string inputJson = JsonSerializer.Serialize(command, CaptureLedger.JsonOptions);
         if (Encoding.UTF8.GetByteCount(inputJson) > 1_000_000)
         {
             throw new InvalidOperationException("Capture observation exceeds the 1000000-byte non-production limit.");
@@ -42,7 +40,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 command.Adapter,
                 command.SourcePayload,
                 command.Events),
-            JsonOptions);
+            CaptureLedger.JsonOptions);
         string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
         AssertSafe(command.SourceSessionId, scan);
@@ -70,8 +68,10 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 AssertSafe(relationship.Type, scan);
             }
         }
-        string source = Redact(JsonSerializer.Serialize(command.Source, JsonOptions), scan);
-        string adapter = Redact(JsonSerializer.Serialize(command.Adapter, JsonOptions), scan);
+        string source = Redact(
+            JsonSerializer.Serialize(command.Source, CaptureLedger.JsonOptions), scan);
+        string adapter = Redact(
+            JsonSerializer.Serialize(command.Adapter, CaptureLedger.JsonOptions), scan);
         string safePayload = Redact(command.SourcePayload.GetRawText(), scan);
         var safeEvents = command.Events.Select(item => new SafeEvent(
             item,
@@ -385,6 +385,9 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureEvent Event, string Payload, IReadOnlyList<SafeRelationship> Relationships);
     private sealed record SafeRelationship(
         CaptureRelationship Relationship, string TargetNativeId, string? TargetKind);
+    // Mirrors CaptureObservationCommand except for SourcePosition, which is
+    // deliberately excluded: the retry signature covers source identity and
+    // content, not the stream position the record happened to arrive at.
     private sealed record CaptureSignatureContent(
         int ContractVersion,
         string SourceSessionId,

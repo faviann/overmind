@@ -13,8 +13,9 @@ note records the shape that exists; it decides nothing new.
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
 
-`CaptureLedger` is internal: the single reader that projects durable rows into
-canonical facts, shared by ingestion and operator reads.
+`CaptureLedger` is internal: the single reader over the durable capture ledger
+rows — observations, events, relationships — that ingestion and operator reads
+both project into canonical facts.
 
 ## Invariants each interface hides
 
@@ -51,7 +52,7 @@ scanner configuration.
 mix of `nativeId` and byte-range fields, because arbitrary JSON can. The HTTP
 seam calls `CaptureObservationCommand.FromRequest`, which parses it through
 `CaptureSourceLocator.Parse` into a closed hierarchy — `NativeId(value)` or
-`ByteRange(offset, length, sourceContentSha256)`. The private primary
+`ByteRange(offset, length, sourceContentSha256)`. The private parameterless
 constructor rules out accidental or positional derivation, so a mixed locator is
 unrepresentable through the parse path rather than merely rejected; the
 *protected* copy constructor every record synthesizes remains a deliberate-abuse

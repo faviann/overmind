@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Dapper;
 using Npgsql;
@@ -15,9 +13,6 @@ namespace MemSrv.Core;
 internal static class CaptureLedger
 {
     internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
-    internal static string Hash(string value) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
     /// <summary>Capture refuses to run at all without a loaded never-store rule set.</summary>
     internal static void RequireSafetyConfigured(NeverStoreGate neverStore)

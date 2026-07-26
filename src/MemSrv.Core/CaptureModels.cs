@@ -54,12 +54,12 @@ public sealed record CaptureEvent(
     IReadOnlyList<CaptureRelationship>? Relationships);
 
 // ---------------------------------------------------------------------------
-// The internal source-locator representation. The private primary constructor
-// rules out accidental or positional derivation, so "native id plus byte range"
-// is unrepresentable through the parse path rather than merely rejected. The
-// protected copy constructor every record synthesizes stays a deliberate-abuse
-// escape hatch, undefended by design. Everything past the HTTP seam speaks this
-// type.
+// The internal source-locator representation. The private parameterless
+// constructor rules out accidental or positional derivation, so "native id plus
+// byte range" is unrepresentable through the parse path rather than merely
+// rejected. The protected copy constructor every record synthesizes stays a
+// deliberate-abuse escape hatch, undefended by design. Everything past the HTTP
+// seam speaks this type.
 // ---------------------------------------------------------------------------
 
 [JsonConverter(typeof(CaptureSourceLocatorConverter))]

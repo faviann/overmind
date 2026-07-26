@@ -37,7 +37,7 @@ public sealed class CaptureAuthority(string connectionString)
             FROM capture_source_bindings
             WHERE credential_hash = @credentialHash AND active
             """,
-            new { credentialHash = CaptureLedger.Hash(credential) });
+            new { credentialHash = CaptureCredential.Hash(credential) });
         return row is null
             ? null
             : new CaptureBindingContext(

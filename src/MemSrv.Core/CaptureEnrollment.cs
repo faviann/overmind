@@ -51,7 +51,7 @@ public sealed class CaptureEnrollment(string connectionString, NeverStoreGate ne
                 stableName,
                 harness,
                 agentId,
-                credentialHash = CaptureLedger.Hash(credential),
+                credentialHash = CaptureCredential.Hash(credential),
                 routeNamespace,
                 allowedNamespaces = new[] { effective }
             });

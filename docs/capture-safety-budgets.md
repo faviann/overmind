@@ -234,7 +234,9 @@ key, so the document stays parseable and its structure survives.
 Redaction is not injective, so two distinct sibling names can collapse to one
 key. Emitting both would produce a duplicate JSON key and silently lose a value
 on re-parse, so the **whole object** is dropped instead, as
-`[OMITTED:redacted_name_collision]`. The *original* name still governs
+`[OMITTED:redacted_name_collision]`. This applies only when redaction *caused*
+the collision: source keys that were already identical and were left unchanged
+are passed through as they arrived. The *original* name still governs
 sensitive-field recognition for the value beneath it: redacting a name must not
 change what its value means.
 

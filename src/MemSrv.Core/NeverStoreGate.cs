@@ -211,17 +211,30 @@ public sealed class NeverStoreGate
                 // credential used as a map key, or an environment dump keyed by
                 // its value, would otherwise persist verbatim forever.
                 var properties = new List<(string SafeName, JsonProperty Property)>();
-                var safeNames = new HashSet<string>(StringComparer.Ordinal);
+                // Value: whether any name written as this key was CHANGED by
+                // sanitization. Duplicate keys are legal JSON the source may
+                // already contain; only a collision this gate CAUSED is a loss
+                // it has to answer for.
+                var safeNames = new Dictionary<string, bool>(StringComparer.Ordinal);
                 foreach (var property in element.EnumerateObject())
                 {
                     string safeName = SanitizeName(property.Name, scanner, state, ledger);
-                    if (!safeNames.Add(safeName))
+                    bool changed = !string.Equals(safeName, property.Name, StringComparison.Ordinal);
+                    if (safeNames.TryGetValue(safeName, out bool earlierChanged))
                     {
-                        // Two siblings collapsed to one key. Emitting both would
-                        // write a duplicate key and lose a value on re-parse, so
-                        // the object goes as a whole with a stated reason.
-                        WriteOmitted(writer, ledger, OmissionReasons.RedactedNameCollision);
-                        return;
+                        if (changed || earlierChanged)
+                        {
+                            // Two siblings collapsed to one key. Emitting both
+                            // would write a duplicate key and lose a value on
+                            // re-parse, so the object goes as a whole with a
+                            // stated reason.
+                            WriteOmitted(writer, ledger, OmissionReasons.RedactedNameCollision);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        safeNames.Add(safeName, changed);
                     }
                     properties.Add((safeName, property));
                 }

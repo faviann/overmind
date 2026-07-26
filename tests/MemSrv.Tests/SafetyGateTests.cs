@@ -419,6 +419,27 @@ public sealed class SafetyGateTests : IDisposable
     }
 
     [Fact]
+    public void LiterallyDuplicateSourceKeysWithNoSecretsPassThroughWithoutOmission()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        // Duplicate keys are legal JSON that JsonDocument preserves. Nothing was
+        // redacted here, so the collision was in the SOURCE, not caused by the
+        // gate: dropping the object would be a fidelity loss unrelated to secrets.
+        const string json = """
+            {"env":{"a":1,"a":2},"safe":"untouched"}
+            """;
+
+        var result = gate.ScanJson(json);
+
+        Assert.Empty(result.OmissionReasons);
+        Assert.DoesNotContain("[OMITTED:", result.Redacted, StringComparison.Ordinal);
+        using var document = JsonDocument.Parse(result.Redacted);
+        Assert.Equal(
+            JsonValueKind.Object, document.RootElement.GetProperty("env").ValueKind);
+        Assert.Equal("untouched", document.RootElement.GetProperty("safe").GetString());
+    }
+
+    [Fact]
     public void AShortHighPriorityMatchInsideALongerOneStillRedactsTheWholeOuterSpan()
     {
         const string configuredValue = "synthetic-operator-literal-0004";

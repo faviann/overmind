@@ -77,20 +77,29 @@ durable queue in this slice, so "scan before durable local persistence" means
 semantics because both construct the gate from the same configuration; there is
 no second scanner implementation.
 
-The two sides do different things with the result. The runtime **scans and
-refuses on scan failure**: a budget exhaustion, a matcher timeout, an internal
-scanner error, or an unusable rule set means it emits nothing, exits non-zero,
-and says why on stderr. An omission is not a refusal — a leaf past its byte
-limit, a sensitive property name carrying a subtree, or a redaction-caused name
-collision is a recorded fidelity outcome that the server persists *as* an
-omission, not an unscanned tail, so the runtime still sends those observations.
-Only a required identity value that cannot be inspected completely fails closed,
-through `AssertAllowed`/`AssertAllowedObject`. The runtime does **not** rewrite
-the payload it transmits. If it did, the server would scan
+The two sides do different things with the result. The runtime calls exactly two
+gate methods — `AssertObservationWithinBudget` and `ScanJson` — and **refuses on
+scan failure**: a budget exhaustion, a matcher timeout, an internal scanner
+error, or an unusable rule set throws out of `ScanJson`, so it emits nothing,
+exits non-zero, and says why on stderr. An omission is not a refusal — a leaf
+past its byte limit, a sensitive property name carrying a subtree, or a
+redaction-caused name collision is a recorded fidelity outcome that the server
+persists *as* an omission, not an unscanned tail, so the runtime still sends
+those observations. The runtime discards the scan result and does **not**
+rewrite the payload it transmits. If it did, the server would scan
 already-sanitized bytes and record `scan_status = "clean"` with no rule ids for
 content that was in fact redacted. Imported content supplies evidence only and
 cannot assert its own scan provenance, so the server — which sanitizes what it
 appends — remains the sole author of the canonical `scan_*` columns.
+
+`AssertAllowed`/`AssertAllowedObject` are **server-side only**: they are the
+reject door, and rejecting is something only the side that owns the durable
+write can do. `CaptureEnrollment` asserts on the stable name, harness, and agent
+id; `CaptureIngestion` asserts on a required identity value whose scan came back
+with a redaction or an omission, because such a value cannot be redacted or
+omitted and still mean what it claims; `MemoryService` asserts on memory-write
+content, which Phase 1 rejects rather than redacts. Everything else the server
+persists goes through `Scan`/`ScanJson` and is redacted in place.
 
 ## Source locator representation
 

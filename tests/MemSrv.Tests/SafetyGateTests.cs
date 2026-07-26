@@ -290,8 +290,23 @@ public sealed class SafetyGateTests : IDisposable
                 out var ruleSet, out string? reason),
             reason);
 
+        var unreachable = UnreachableAlternatives(ruleSet!.Rules);
+
+        Assert.True(
+            unreachable.Count == 0,
+            "these pattern alternatives can never run, because no prefilter literal "
+            + "appears in text they match:\n  " + string.Join("\n  ", unreachable));
+    }
+
+    /// <summary>
+    /// The reachability judgement itself, shared by the sweep over the shipped
+    /// rules and by the fixture that pins it. A path's guaranteed literal runs
+    /// are the '\0'-separated segments <see cref="PatternPaths"/> reports.
+    /// </summary>
+    private static SortedSet<string> UnreachableAlternatives(IEnumerable<SecretRule> rules)
+    {
         var unreachable = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var rule in ruleSet!.Rules)
+        foreach (var rule in rules)
         {
             foreach (string path in PatternPaths.Expand(rule.Compiled.ToString()))
             {
@@ -304,11 +319,73 @@ public sealed class SafetyGateTests : IDisposable
                 }
             }
         }
+        return unreachable;
+    }
 
+    // The prefilter guarantee for the whole rule set rests on PatternPaths, a
+    // test-only regex path expander. Its failure direction is conservative — an
+    // atom it does not understand degrades to "no literal", which only makes the
+    // sweep stricter — but a bad edit could just as easily make Expand return a
+    // single empty path, at which point the sweep passes EVERYTHING and stops
+    // guarding anything. This fixture pins both directions.
+    [Fact]
+    public void ThePrefilterSweepStillFlagsAnUnreachableAlternative()
+    {
+        string path = Path.Combine(_directory, "reachability-fixture.yaml");
+        File.WriteAllText(path, """
+            version: "reachability-fixture"
+            rules:
+              - id: covered
+                category: provider_token
+                priority: 10
+                prefilter: "key,token"
+                matcher: regex
+                pattern: '(?i)(api[_-]?key|access[_-]?token)=\S+'
+              - id: uncovered
+                category: provider_token
+                priority: 10
+                prefilter: "key"
+                matcher: regex
+                pattern: '(?i)(api[_-]?key|access[_-]?token)=\S+'
+              - id: uncovered-optional-separator
+                category: provider_token
+                priority: 10
+                prefilter: "api_key"
+                matcher: regex
+                pattern: '(?i)api[_-]?key=\S+'
+            """);
         Assert.True(
-            unreachable.Count == 0,
-            "these pattern alternatives can never run, because no prefilter literal "
-            + "appears in text they match:\n  " + string.Join("\n  ", unreachable));
+            SecretRuleSet.TryLoad(
+                path, null, SafetyBudgets.Default.MaxRuleTime, out var ruleSet, out string? reason),
+            reason);
+
+        var unreachable = UnreachableAlternatives(ruleSet!.Rules);
+
+        // Exactly the three genuinely unreachable alternatives, and nothing from
+        // the rule whose prefilters cover both branches.
+        Assert.Equal(
+            [
+                "uncovered-optional-separator: api-key=",
+                "uncovered-optional-separator: apikey=",
+                "uncovered: access-token=",
+                "uncovered: access_token=",
+                "uncovered: accesstoken="
+            ],
+            unreachable.OrderBy(entry => entry, StringComparer.Ordinal).ToArray());
+    }
+
+    // The expander's own output, pinned on the constructs the governed patterns
+    // actually use. If Expand stops reporting literal runs, this fails here
+    // rather than silently disarming the sweep above.
+    [Fact]
+    public void ThePatternPathExpanderReportsTheLiteralRunsEachPathForces()
+    {
+        Assert.Equal(["ab", "cd"], PatternPaths.Expand("(ab|cd)"));
+        Assert.Equal(["a\0b"], PatternPaths.Expand(@"a\s+b"));
+        Assert.Equal(["a_b", "a-b", "ab"], PatternPaths.Expand("a[_-]?b"));
+        Assert.Equal(["x\0"], PatternPaths.Expand("x[A-Z0-9]{16}"));
+        // (?i) is a mode flag, \b is zero-width: neither breaks a literal run.
+        Assert.Equal(["AKIA\0"], PatternPaths.Expand(@"(?i)\bAKIA[0-9A-Z]{16}\b"));
     }
 
     [Theory]
@@ -346,8 +423,50 @@ public sealed class SafetyGateTests : IDisposable
         Assert.DoesNotContain("synthetic-fake-value", result.Redacted, StringComparison.Ordinal);
     }
 
+    // F3. AC2 requires authentication headers to be covered. A scheme-less
+    // `Authorization:` with a substantial credential-shaped value is the shape
+    // opaque-token APIs emit, and it matched nothing: `authorization-header`
+    // demanded a scheme keyword and `sensitive-assignment` has no
+    // `authorization` branch.
+    [Theory]
+    [InlineData("Authorization: abc123def456ghi789")]
+    [InlineData("authorization=Zm9vYmFyYmF6cXV4MDEyMzQ1")]
+    [InlineData("Proxy-Authorization: synthetic.fake.opaque.value")]
+    public void ASchemeLessAuthenticationHeaderIsRedacted(string header)
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+
+        var result = gate.Scan(header);
+
+        Assert.Contains("authorization-header", result.RuleIds);
+        Assert.Contains("[REDACTED:authorization-header]", result.Redacted);
+        Assert.DoesNotContain(SecretCore(header), result.Redacted, StringComparison.Ordinal);
+    }
+
+    // F4. A tool that prints serialized JSON is one of the most common transcript
+    // shapes there is, and as FREE TEXT the closing quote sat between the
+    // governed name and its separator, so the assignment rule never fired.
+    [Theory]
+    [InlineData("""tool printed {"password": "synthetic-fake-pw-0301"} and exited""")]
+    [InlineData("""{"api_key":"synthetic-fake-value-0302"}""")]
+    [InlineData("""log line: 'client_secret' = 'synthetic-fake-value-0303'""")]
+    public void SerializedJsonAppearingAsFreeTextIsStillRedacted(string line)
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+
+        var result = gate.Scan(line);
+
+        Assert.Contains("sensitive-assignment", result.RuleIds);
+        Assert.DoesNotContain("synthetic-fake", result.Redacted, StringComparison.Ordinal);
+    }
+
     public static TheoryData<string, string> NegativeCorpus() => new()
     {
+        { "authorization status prose", "authorization: pending" },
+        { "authorization status prose, hyphenated", "Authorization: not-granted" },
+        { "authorization word in prose", "The authorization flow is documented elsewhere." },
+        { "json field that is not governed", "{\"integrity\": \"sha512-abcdefghijklmnop\"}" },
+        { "quoted prose about a token", "the field \"token\" is described in the spec" },
         { "sha256 hash", "content_hash 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" },
         { "uuid", "session 550e8400-e29b-41d4-a716-446655440000 consumed" },
         { "git commit sha", "commit 1dbe57f8f2a4c9b0e1d3a5f7c9b1d3e5f7a9c1b3" },
@@ -621,6 +740,59 @@ public sealed class SafetyGateTests : IDisposable
 
         Assert.Contains("aws-access-key-id", result.RuleIds);
         Assert.Equal("blob [REDACTED:aws-access-key-id] end", result.Redacted);
+    }
+
+    // F1. `sensitive-assignment` is a free-text `NAME=value` regex that happens to
+    // carry the `structured_field` category. Gating decode eligibility on the
+    // category dropped it from the decoded pass, so the single most common shape
+    // the decoder exists for — a Base64'd credentials file — went unscanned
+    // unless it also happened to carry a provider-prefixed value.
+    [Fact]
+    public void AnEncodedAssignmentInsideABlobIsDecodedAndRedacted()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        string encoded = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("password=synthetic-fake-pw-0201"));
+
+        var result = gate.Scan($"blob {encoded} end");
+
+        Assert.Contains("sensitive-assignment", result.RuleIds);
+        Assert.Equal("blob [REDACTED:sensitive-assignment] end", result.Redacted);
+    }
+
+    // F2. One aligned Base64 prefix decodes to NUL bytes ahead of the plaintext.
+    // Discarding a decoded candidate because it holds ANY control character made
+    // every Base64'd blob with binary framing invisible; the decoded text is
+    // split into printable runs and each run is scanned instead.
+    [Fact]
+    public void ADecodedCandidateWithBinaryFramingIsStillScannedRunByRun()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        string encoded = "AAAA" + Convert.ToBase64String(Encoding.UTF8.GetBytes(FakeAwsKeyId));
+
+        var result = gate.Scan($"blob {encoded} end");
+
+        Assert.Contains("aws-access-key-id", result.RuleIds);
+        Assert.Equal("blob [REDACTED:aws-access-key-id] end", result.Redacted);
+    }
+
+    // F5. An odd-length hex run has two byte alignments and only one of them can
+    // be the real encoding. Dropping the trailing character was tried; dropping
+    // the leading one never was.
+    [Fact]
+    public void AnOddLengthHexRunIsTriedOnBothAlignments()
+    {
+        var gate = new NeverStoreGate(_shippedRules);
+        // A stray leading nibble: only the alignment that drops the FIRST
+        // character decodes back to the credential.
+        string hex = "f"
+            + Convert.ToHexString(Encoding.UTF8.GetBytes(FakeAwsKeyId)).ToLowerInvariant();
+        Assert.Equal(1, hex.Length % 2);
+
+        var result = gate.Scan($"value {hex} end");
+
+        Assert.Contains("aws-access-key-id", result.RuleIds);
+        Assert.Equal("value [REDACTED:aws-access-key-id] end", result.Redacted);
     }
 
     [Fact]

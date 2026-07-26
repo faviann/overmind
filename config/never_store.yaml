@@ -30,7 +30,7 @@
 #
 # Numeric scan budgets are versioned runtime constants, not configuration; see
 # docs/capture-safety-budgets.md.
-version: "never-store/2026-07-26.1"
+version: "never-store/2026-07-26.2"
 
 rules:
   # --- private keys ----------------------------------------------------------
@@ -44,12 +44,16 @@ rules:
     pattern: '-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----[\s\S]*?(-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----|$)'
 
   # --- authentication headers and credential-bearing URLs --------------------
+  # Two forms. With a scheme keyword, eight credential characters are enough to
+  # be conclusive. Scheme-less headers are what opaque-token APIs emit, so they
+  # are covered too, but only for a run of at least sixteen credential-shaped
+  # characters — short status words ("pending", "not-granted") stay out.
   - id: authorization-header
     category: auth_header
     priority: 96
     prefilter: "authorization"
     matcher: regex
-    pattern: '(?i)(proxy-)?authorization\s*[:=]\s*"?(bearer|basic|token|apikey)\s+[A-Za-z0-9._~+/=-]{8,}'
+    pattern: '(?i)(proxy-)?authorization\s*[:=]\s*"?(?:(bearer|basic|token|apikey)\s+[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9._~+/=-]{16,})'
 
   - id: credential-bearing-url
     category: credential_url
@@ -151,10 +155,13 @@ rules:
 
   # Free-text assignment form for dotenv, CLI flags, and shell output, where
   # there is no structure to walk. Requires a separator, so ordinary prose
-  # containing "token" or "secret" does not match.
+  # containing "token" or "secret" does not match. The optional closing quote
+  # before the separator covers serialized JSON/YAML/TOML that a tool PRINTED
+  # into the transcript — `{"password": "…"}` arrives as free text, with no
+  # structure for the sensitive_field matcher to walk.
   - id: sensitive-assignment
     category: structured_field
     priority: 45
     prefilter: "pass,secret,key,token,credential,connection"
     matcher: regex
-    pattern: '(?i)(^|[^A-Za-z0-9_])([a-z0-9.-]*[_.-])?(secret[_-]?access[_-]?key|client[_-]?secret|connection[_-]?string|passphrase|password|passwd|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|session[_-]?key|credentials|credential|secret|token)\s*[:=]\s*("[^"\r\n]+"|''[^''\r\n]+''|[^\s,;)\]}"'']+)'
+    pattern: '(?i)(^|[^A-Za-z0-9_])([a-z0-9.-]*[_.-])?(secret[_-]?access[_-]?key|client[_-]?secret|connection[_-]?string|passphrase|password|passwd|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|session[_-]?key|credentials|credential|secret|token)["'']?\s*[:=]\s*("[^"\r\n]+"|''[^''\r\n]+''|[^\s,;)\]}"'']+)'

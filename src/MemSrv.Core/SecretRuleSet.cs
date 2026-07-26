@@ -28,12 +28,17 @@ internal sealed record SecretRule(
     Regex Compiled)
 {
     /// <summary>
-    /// Only high-confidence rules run against decoded candidates. Structured
-    /// field-name recognition has no meaning inside a decoded blob and would
-    /// turn bounded decoding into a general heuristic pass.
+    /// Every rule that reads TEXT runs against decoded candidates. The one kind
+    /// that cannot is <see cref="SecretMatcherKind.SensitiveField"/>: it reads a
+    /// structured property NAME, and a decoded blob has no structure to take a
+    /// name from. Gating this on <see cref="Category"/> instead was a live false
+    /// negative — `sensitive-assignment` is an ordinary free-text
+    /// <c>NAME=value</c> regex that merely carries the `structured_field`
+    /// category, so a Base64'd credentials file, the exact shape
+    /// docs/capture-safety-budgets.md says the decoder exists for, was stored
+    /// unredacted unless it also happened to hold a provider-prefixed value.
     /// </summary>
-    public bool DecodeEligible => Matcher == SecretMatcherKind.Regex
-        && !string.Equals(Category, SecretCategories.StructuredField, StringComparison.Ordinal);
+    public bool DecodeEligible => Matcher != SecretMatcherKind.SensitiveField;
 }
 
 internal static class SecretCategories

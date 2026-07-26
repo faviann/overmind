@@ -59,17 +59,26 @@ internal static class OmissionReasons
 /// </summary>
 internal readonly record struct PrimaryMatch(string RuleId, int Priority, int Length)
 {
+    public Ranked Rank => new(Priority, Length, RuleId);
+
     public static PrimaryMatch? Best(PrimaryMatch? left, PrimaryMatch? right)
     {
         if (left is null) { return right; }
         if (right is null) { return left; }
-        return MatchRanking.Wins(
-            left.Value.Priority, left.Value.Length, left.Value.RuleId,
-            right.Value.Priority, right.Value.Length, right.Value.RuleId)
+        return MatchRanking.Wins(left.Value.Rank, right.Value.Rank)
             ? left.Value
             : right.Value;
     }
 }
+
+/// <summary>
+/// One competitor in the ranking, carried as a single value. The comparison
+/// takes two of these rather than two shredded (priority, length, id) triples,
+/// because adjacent same-typed triples can be transposed silently and still
+/// type-check — which is the hazard extracting <see cref="MatchRanking"/> was
+/// meant to remove.
+/// </summary>
+internal readonly record struct Ranked(int Priority, int Length, string RuleId);
 
 /// <summary>
 /// The one deterministic ranking this detector uses to pick a winner among
@@ -80,13 +89,11 @@ internal readonly record struct PrimaryMatch(string RuleId, int Priority, int Le
 /// </summary>
 internal static class MatchRanking
 {
-    public static bool Wins(
-        int leftPriority, int leftLength, string leftRuleId,
-        int rightPriority, int rightLength, string rightRuleId)
+    public static bool Wins(Ranked left, Ranked right)
     {
-        if (leftPriority != rightPriority) { return leftPriority > rightPriority; }
-        if (leftLength != rightLength) { return leftLength > rightLength; }
-        return string.CompareOrdinal(leftRuleId, rightRuleId) <= 0;
+        if (left.Priority != right.Priority) { return left.Priority > right.Priority; }
+        if (left.Length != right.Length) { return left.Length > right.Length; }
+        return string.CompareOrdinal(left.RuleId, right.RuleId) <= 0;
     }
 }
 
@@ -283,47 +290,83 @@ internal sealed class SecretScanner
             }
             state.ChargeDecoderCandidate();
             string encoded = value.Substring(start, length);
-            if (!TryDecode(encoded, kind, out string decoded))
+            // At most two decodings per candidate — the two byte alignments an
+            // odd-length hex run allows — and never a second decoding LEVEL.
+            // Each attempt charges the decoded-byte budget.
+            var claimed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string decoded in Decode(encoded, kind))
             {
-                continue;
+                state.ChargeDecodedBytes(Encoding.UTF8.GetByteCount(decoded));
+                foreach (var run in PrintableRuns(decoded))
+                {
+                    ScanDecodedRun(decoded, run, start, length, claimed, matches, state);
+                }
             }
-            state.ChargeDecodedBytes(Encoding.UTF8.GetByteCount(decoded));
-            if (decoded.Length == 0 || !IsPrintableText(decoded))
-            {
-                continue;
-            }
+        }
+    }
 
-            // Exact operator-known values are the highest-confidence rule there
-            // is, so they sweep the decoded text in the same loop, charge the
-            // same budgets, and attribute to the same original encoded span.
-            // One span per candidate: a second literal in the same run would
-            // only merge back into it.
+    /// <summary>
+    /// Scans one printable run of a decoded candidate. <paramref name="claimed"/>
+    /// carries the rule ids that already took a span for this candidate, so a
+    /// credential visible in two runs or under both hex alignments produces one
+    /// span, not several identical ones that would merge anyway while charging
+    /// the match budget twice.
+    /// </summary>
+    private void ScanDecodedRun(
+        string decoded,
+        Range run,
+        int start,
+        int length,
+        HashSet<string> claimed,
+        List<SpanMatch> matches,
+        ScanBudgetState state)
+    {
+        // Once per RUN, not once per candidate: control-byte-dense decoded text
+        // splits into many short runs, and the per-rule loop below only reaches
+        // its own deadline check when a prefilter actually hits. Without this,
+        // a candidate that decodes to alternating control and printable bytes
+        // would spin through the rule list millions of times unchecked.
+        state.CheckDeadline();
+        var text = decoded.AsSpan()[run];
+
+        // Exact operator-known values are the highest-confidence rule there is,
+        // so they sweep the decoded text in the same loop, charge the same
+        // budgets, and attribute to the same original encoded span.
+        if (!claimed.Contains(LiteralRuleId))
+        {
             foreach (string literal in _ruleSet.Literals)
             {
                 state.CheckDeadline();
-                if (decoded.Contains(literal, StringComparison.Ordinal))
+                if (text.Contains(literal, StringComparison.Ordinal))
                 {
                     matches.Add(new SpanMatch(
                         start, length, LiteralRuleId,
                         SecretCategories.ConfiguredCredential, int.MaxValue));
                     state.ChargeMatch();
+                    claimed.Add(LiteralRuleId);
                     break;
                 }
             }
+        }
 
-            foreach (var rule in _ruleSet.Rules)
+        string? materialized = null;
+        foreach (var rule in _ruleSet.Rules)
+        {
+            if (!rule.DecodeEligible
+                || claimed.Contains(rule.Id)
+                || !PrefilterHits(text, rule))
             {
-                if (!rule.DecodeEligible || !PrefilterHits(decoded, rule))
-                {
-                    continue;
-                }
-                state.CheckDeadline();
-                if (IsMatch(rule, decoded))
-                {
-                    matches.Add(new SpanMatch(
-                        start, length, rule.Id, rule.Category, rule.Priority));
-                    state.ChargeMatch();
-                }
+                continue;
+            }
+            state.CheckDeadline();
+            // Only paid for once, and only when some prefilter actually hit.
+            materialized ??= decoded[run];
+            if (IsMatch(rule, materialized))
+            {
+                matches.Add(new SpanMatch(
+                    start, length, rule.Id, rule.Category, rule.Priority));
+                state.ChargeMatch();
+                claimed.Add(rule.Id);
             }
         }
     }
@@ -392,6 +435,33 @@ internal sealed class SecretScanner
     private static SafetyScanException MatcherTimedOut(string subject) =>
         new($"{subject} exceeded its matcher timeout");
 
+    /// <summary>
+    /// The decodings of one candidate: one for percent and Base64, and for an
+    /// odd-length hex run BOTH byte alignments, because only one of the two can
+    /// be the real encoding and there is no way to tell which from the run
+    /// alone. Still exactly one decoding level — a decoding is never re-fed to
+    /// this method.
+    /// </summary>
+    private static IEnumerable<string> Decode(string encoded, DecoderKind kind)
+    {
+        if (kind == DecoderKind.Hex && encoded.Length % 2 != 0)
+        {
+            if (TryDecode(encoded[..^1], kind, out string trailingDropped))
+            {
+                yield return trailingDropped;
+            }
+            if (TryDecode(encoded[1..], kind, out string leadingDropped))
+            {
+                yield return leadingDropped;
+            }
+            yield break;
+        }
+        if (TryDecode(encoded, kind, out string decoded))
+        {
+            yield return decoded;
+        }
+    }
+
     private static bool TryDecode(string encoded, DecoderKind kind, out string decoded)
     {
         decoded = "";
@@ -401,12 +471,8 @@ internal sealed class SecretScanner
             {
                 case DecoderKind.Percent:
                     decoded = Uri.UnescapeDataString(encoded);
-                    return true;
+                    return decoded.Length > 0;
                 case DecoderKind.Hex:
-                    if (encoded.Length % 2 != 0)
-                    {
-                        encoded = encoded[..^1];
-                    }
                     decoded = DecodeStrictUtf8(Convert.FromHexString(encoded));
                     return decoded.Length > 0;
                 case DecoderKind.Base64:
@@ -447,19 +513,36 @@ internal sealed class SecretScanner
         }
     }
 
-    private static bool IsPrintableText(string text)
+    /// <summary>
+    /// Splits decoded text into its maximal printable runs. A decoded blob
+    /// routinely carries binary framing — length prefixes, NUL padding, a
+    /// container header — around perfectly ordinary plaintext, and discarding
+    /// the whole candidate because it held ANY control character made every such
+    /// blob invisible. This is a bounded deterministic split, not a heuristic:
+    /// no scoring, no recursion, no second decoding level. A credential that
+    /// straddles a control byte is not detected, which is the same accepted
+    /// residual risk line-wrapped Base64 already sits behind.
+    /// </summary>
+    private static IEnumerable<Range> PrintableRuns(string decoded)
     {
-        foreach (char character in text)
+        int runStart = 0;
+        for (int index = 0; index <= decoded.Length; index++)
         {
-            if (char.IsControl(character) && character is not ('\t' or '\r' or '\n'))
+            bool boundary = index == decoded.Length
+                || (char.IsControl(decoded[index]) && decoded[index] is not ('\t' or '\r' or '\n'));
+            if (!boundary)
             {
-                return false;
+                continue;
             }
+            if (index > runStart)
+            {
+                yield return runStart..index;
+            }
+            runStart = index + 1;
         }
-        return true;
     }
 
-    private static bool PrefilterHits(string text, SecretRule rule)
+    private static bool PrefilterHits(ReadOnlySpan<char> text, SecretRule rule)
     {
         foreach (string prefilter in rule.Prefilters)
         {
@@ -511,16 +594,15 @@ internal sealed class SecretScanner
     }
 
     private static SpanMatch Outrank(SpanMatch left, SpanMatch right) =>
-        MatchRanking.Wins(
-            left.Priority, left.Length, left.RuleId,
-            right.Priority, right.Length, right.RuleId)
-            ? left
-            : right;
+        MatchRanking.Wins(left.Rank, right.Rank) ? left : right;
 
     private enum DecoderKind { Percent, Hex, Base64 }
 
     private readonly record struct SpanMatch(
-        int Start, int Length, string RuleId, string Category, int Priority);
+        int Start, int Length, string RuleId, string Category, int Priority)
+    {
+        public Ranked Rank => new(Priority, Length, RuleId);
+    }
 }
 
 /// <summary>The result of scanning one leaf: either a sanitized value or an omission.</summary>

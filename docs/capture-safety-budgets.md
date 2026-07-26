@@ -96,10 +96,19 @@ lists were consolidated into covering stems: the sixteen governed rules run
 case-insensitive scan of the leaf — about 27 ms at this size — which is why
 `sensitive-field-value` fell from 402.3 ms (fourteen prefilters) and
 `sensitive-assignment` from 310.6 ms (eleven) to 199.2 ms and 172.4 ms while
-matching strictly more spellings. The operator-literal sweep costs about 26 ms
-per configured literal, so its total is proportional to how many exact values
-the operator provisioned; it is the one phase whose cost an operator controls,
-which is why the scan deadline is checked inside it.
+matching strictly more spellings.
+
+The operator-literal sweep runs in **two** places, and only the first of them is
+what that 26 ms-per-literal figure describes. Over the whole leaf it is one
+ordinal `IndexOf` per configured literal — about 26 ms per literal at 64 MiB,
+proportional to how many exact values the operator provisioned. It then runs
+*again* inside the decoded pass, where every configured literal is tried against
+every printable run of every decoded candidate. That second sweep costs
+literals × candidates, not literals; with `MaxDecoderCandidates` at 65,536 it is
+the phase with the widest cost range in the scanner, and nothing but
+`MaxScanTime` bounds it — which is why the scan deadline is checked inside both
+loops rather than only around them. The literal sweep is the one phase whose
+cost an operator controls, and it is now controlled in two dimensions.
 
 Whole-workload timings on this host vary by up to ±40% between runs (the 64 MiB
 warm case was observed at 1,847–2,586 ms across three consecutive Release runs),
@@ -138,6 +147,23 @@ How each default follows from those numbers:
   packing a whole 4 MB leaf with maximum-length runs costs 211 ms.
 
 No published default had to move as a result of this re-measurement.
+
+The later round that made `sensitive-assignment` decode-eligible, split decoded
+text into printable runs, and tried both alignments of an odd-length hex run was
+measured **paired** — the previous scanner and the current one, same host, same
+generated workloads, four alternating runs each, median of three timed scans per
+run. Medians: GUID-dense ~230 KB 201 ms → 148 ms; GUID-dense ~1 MB 274 ms →
+272 ms; Base64'd credentials file 0.9 ms → 0.8 ms; 1 MB packed with
+maximum-length runs 40 ms → 50 ms; 4 MB packed 226 ms → 228 ms. Every one of
+those differences is inside the ±40% run-to-run spread this host already shows
+(single observations in the same series ranged 150–324 ms and 205–444 ms for the
+two extremes), so the table above is left as measured and no default's
+justification changes. The paired harness generates its own workloads and is not
+the harness that produced the table, so read it as a *delta* check, not as
+replacement absolute numbers. The one structural cost this round does add is six
+extra prefilter scans per decoded candidate, because `sensitive-assignment`'s
+covering stems now run over decoded text too; `MaxDecodedBytes` is what bounds
+it.
 
 Re-run the measurement whenever a rule is added or a pattern changes, and bump
 the budget-set version if a default moves.
@@ -303,9 +329,25 @@ the matched value, an unsafe excerpt, or a reversible content fingerprint.
 Blanket entropy scoring, recursive or archive decoding, provider network
 verification, transcript-controlled allowlists, and probabilistic/ML
 classification. Decoding is exactly one level deep — percent, hex, or Base64 in
-either the standard (`+/`) or base64url (`-_`) alphabet — and only around
-high-confidence rules and the operator-provisioned exact values; structured
-field-name recognition has no meaning inside a decoded blob and does not run
-there. A decoded hit redacts the original encoded span. Candidate
-extraction carries the same `MaxRuleTime` matcher timeout the governed rules do,
-and a timeout there fails the scan closed like any other.
+either the standard (`+/`) or base64url (`-_`) alphabet — and covers every rule
+that reads TEXT plus the operator-provisioned exact values. The one matcher that
+does not run there is `sensitive_field`, which reads a structured property NAME:
+a decoded blob has no structure to take a name from. Eligibility is decided by
+**matcher kind, not category** — `sensitive-assignment` is an ordinary free-text
+`NAME=value` regex that merely carries the `structured_field` category, and
+gating it on category is what previously left a Base64'd credentials file, the
+headline shape this decoder exists for, unscanned. A decoded hit redacts the
+original encoded span. Candidate extraction carries the same `MaxRuleTime`
+matcher timeout the governed rules do, and a timeout there fails the scan closed
+like any other.
+
+An odd-length hex run has two possible byte alignments and nothing in the run
+says which is real, so both are decoded; that is two decodings of one candidate,
+not two decoding levels, and each charges `MaxDecodedBytes`. Decoded text is
+split on control characters into its maximal printable runs and each run is
+scanned separately, because a decoded blob routinely carries binary framing
+around ordinary plaintext and discarding the whole candidate for one control
+byte made every such blob invisible. The split is bounded and deterministic —
+no scoring, no recursion, no re-decoding of a run. A credential that straddles a
+control byte is not detected, the same accepted residual risk line-wrapped
+Base64 sits behind.

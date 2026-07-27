@@ -125,7 +125,7 @@ public static class HttpServerHost
             }
             catch (CaptureConflictException ex)
             {
-                return Results.Conflict(new { error = ex.Message });
+                return Results.Conflict(new { error = ex.Message, reason = ex.Reason });
             }
             catch (JsonException ex)
             {

@@ -132,7 +132,9 @@ public static class DisabledCaptureRuntime
                 if (!response.IsSuccessStatusCode)
                 {
                     throw new CaptureDeliveryException(
-                        terminal.SourcePosition, response.StatusCode, responseText);
+                        terminal.SourcePosition,
+                        response.StatusCode,
+                        ContentFreeFailureReason(responseText));
                 }
                 await persistReceiptAsync(
                     responseText, queued, cancellationToken);
@@ -152,6 +154,25 @@ public static class DisabledCaptureRuntime
 
     private static string Digest(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    private static string? ContentFreeFailureReason(string responseText)
+    {
+        try
+        {
+            using JsonDocument response = JsonDocument.Parse(responseText);
+            if (response.RootElement.TryGetProperty("reason", out JsonElement reason)
+                && reason.ValueKind == JsonValueKind.String
+                && reason.GetString() is
+                    ("blocked_by_earlier_gap" or "accepted_source_conflict"))
+            {
+                return reason.GetString();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+        return null;
+    }
 }
 
 public sealed class CaptureDeliveryTimeoutException(
@@ -170,11 +191,13 @@ public sealed class CaptureDeliveryTimeoutException(
 public sealed class CaptureDeliveryException(
     long sourcePosition,
     HttpStatusCode statusCode,
-    string responseBody)
+    string? reason)
     : Exception(
         $"Capture failed at source position {sourcePosition} " +
-        $"with HTTP {(int)statusCode}: {responseBody}")
+        $"with HTTP {(int)statusCode}" +
+        (reason is null ? "." : $" ({reason})."))
 {
     public long SourcePosition { get; } = sourcePosition;
     public HttpStatusCode StatusCode { get; } = statusCode;
+    public string? Reason { get; } = reason;
 }

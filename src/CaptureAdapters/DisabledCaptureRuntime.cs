@@ -130,7 +130,9 @@ public static class DisabledCaptureRuntime
                 if (!response.IsSuccessStatusCode)
                 {
                     if (CaptureRuntimeConflictClassifier.FromHttpFailure(
-                            terminal.SourcePosition, responseText) is { } stop)
+                            terminal.SourcePosition,
+                            response.StatusCode,
+                            responseText) is { } stop)
                     {
                         throw new CaptureRuntimeConflictException(stop);
                     }
@@ -167,8 +169,14 @@ public static class CaptureRuntimeConflictClassifier
 
     public static CaptureRuntimeStopState? FromHttpFailure(
         long sourcePosition,
+        HttpStatusCode statusCode,
         string responseText)
     {
+        if (statusCode != HttpStatusCode.Conflict)
+        {
+            return null;
+        }
+
         try
         {
             using JsonDocument response = JsonDocument.Parse(responseText);

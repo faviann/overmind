@@ -37,10 +37,6 @@ public interface ICaptureRuntimeState
         Func<CancellationToken, Task<CaptureRuntimeDeliveryResult<TResult>>> deliverAsync,
         CancellationToken cancellationToken = default);
 
-    Task<CaptureRuntimeStopState> StopAsync(
-        string sourceStream,
-        CaptureRuntimeStopState stop,
-        CancellationToken cancellationToken = default);
 }
 
 public sealed record CapturePrefixEvidence(long ByteLength, string Sha256);
@@ -428,30 +424,6 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         streams[streamIndex] = ApplyReceipt(sourceStream, stream, delivery.Receipt);
         await WriteAtomicallyAsync(new CaptureRuntimeSnapshot(1, streams), cancellationToken);
         return delivery.Result;
-    }
-
-    public async Task<CaptureRuntimeStopState> StopAsync(
-        string sourceStream,
-        CaptureRuntimeStopState stop,
-        CancellationToken cancellationToken = default)
-    {
-        Directory.CreateDirectory(_directory);
-        await using FileStream stateLock = await AcquireLockAsync(cancellationToken);
-        CaptureRuntimeSnapshot current = await ReadAsync(cancellationToken);
-        var streams = current.Streams.ToList();
-        int streamIndex = streams.FindIndex(stream =>
-            string.Equals(stream.SourceStream, sourceStream, StringComparison.Ordinal));
-        if (streamIndex < 0)
-        {
-            throw new InvalidOperationException(
-                $"Capture source stream '{sourceStream}' has no durable state to stop.");
-        }
-        if (streams[streamIndex].Stop is { } existingStop)
-        {
-            return existingStop;
-        }
-
-        return await PersistStopAsync(current, streamIndex, stop);
     }
 
     private async Task<CaptureRuntimeStopState> PersistStopAsync(

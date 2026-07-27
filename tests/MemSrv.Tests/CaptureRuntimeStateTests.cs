@@ -10,6 +10,39 @@ namespace MemSrv.Tests;
 
 public sealed class CaptureRuntimeStateTests
 {
+    [Theory]
+    [InlineData(
+        409,
+        """{"reason":"blocked_by_earlier_gap"}""",
+        CaptureRuntimeStopCode.BlockedByEarlierGap)]
+    [InlineData(
+        409,
+        """{"reason":"accepted_source_conflict"}""",
+        CaptureRuntimeStopCode.AcceptedSourceConflict)]
+    [InlineData(409, """{"reason":"unknown_conflict"}""", null)]
+    [InlineData(409, """{"reason":null}""", null)]
+    [InlineData(409, """{"reason":""", null)]
+    [InlineData(400, """{"reason":"blocked_by_earlier_gap"}""", null)]
+    [InlineData(401, """{"reason":"accepted_source_conflict"}""", null)]
+    [InlineData(408, """{"reason":"blocked_by_earlier_gap"}""", null)]
+    [InlineData(429, """{"reason":"accepted_source_conflict"}""", null)]
+    [InlineData(500, """{"reason":"blocked_by_earlier_gap"}""", null)]
+    [InlineData(503, """{"reason":"accepted_source_conflict"}""", null)]
+    public void HttpFailureStopsOnlyForRecognizedConflictReasons(
+        int statusCode,
+        string responseBody,
+        string? expectedStopCode)
+    {
+        CaptureRuntimeStopState? stop =
+            CaptureRuntimeConflictClassifier.FromHttpFailure(
+                7,
+                (HttpStatusCode)statusCode,
+                responseBody);
+
+        Assert.Equal(expectedStopCode, stop?.Code);
+        Assert.Equal(expectedStopCode is null ? null : 7L, stop?.SourcePosition);
+    }
+
     [Fact]
     public void LocatorEvidenceIdentityBindsEveryMechanicalComponent()
     {
@@ -476,14 +509,21 @@ public sealed class CaptureRuntimeStateTests
                 second, first.DeterministicLocatorEvidence.PrefixEvidence));
             CaptureRuntimeSnapshot beforeStop = await state.ReadAsync();
 
-            await state.StopAsync(
-                "stream",
-                new CaptureRuntimeStopState("verified_prefix_changed", null));
+            CaptureStreamStoppedException detected =
+                await Assert.ThrowsAsync<CaptureStreamStoppedException>(() =>
+                    state.InspectSourceAsync(
+                        "stream",
+                        _ => new CaptureRuntimeStopState(
+                            CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                            null)));
             CaptureRuntimeSnapshot stopped = await state.ReadAsync();
 
             var stoppedStream = Assert.Single(stopped.Streams);
             Assert.Equal(
                 new CaptureRuntimeStopState("verified_prefix_changed", null),
+                detected.Stop);
+            Assert.Equal(
+                detected.Stop,
                 stoppedStream.Stop);
             Assert.Equal(
                 Assert.Single(beforeStop.Streams).VerifiedPrefix,
@@ -517,11 +557,20 @@ public sealed class CaptureRuntimeStateTests
                         Guid.NewGuid(),
                         Guid.NewGuid())));
 
-            await state.StopAsync(
-                "stream",
-                new CaptureRuntimeStopState(
-                    CaptureRuntimeStopCode.BlockedByEarlierGap,
-                    1));
+            bool competingDetectorEntered = false;
+            CaptureStreamStoppedException sticky =
+                await Assert.ThrowsAsync<CaptureStreamStoppedException>(() =>
+                    state.InspectSourceAsync(
+                        "stream",
+                        _ =>
+                        {
+                            competingDetectorEntered = true;
+                            return new CaptureRuntimeStopState(
+                                CaptureRuntimeStopCode.BlockedByEarlierGap,
+                                1);
+                        }));
+            Assert.Equal(detected.Stop, sticky.Stop);
+            Assert.False(competingDetectorEntered);
             Assert.Equal(
                 JsonSerializer.Serialize(stopped),
                 JsonSerializer.Serialize(await state.ReadAsync()));
@@ -549,11 +598,14 @@ public sealed class CaptureRuntimeStateTests
             CaptureRuntimeQueueItem staleQueued = Assert.Single(
                 Assert.Single((await staleDeliveryState.ReadAsync()).Streams).Queue);
 
-            CaptureRuntimeStopState durableStop = await stoppingState.StopAsync(
-                "stream",
-                new CaptureRuntimeStopState(
-                    CaptureRuntimeStopCode.VerifiedPrefixChanged,
-                    null));
+            CaptureStreamStoppedException detected =
+                await Assert.ThrowsAsync<CaptureStreamStoppedException>(() =>
+                    stoppingState.InspectSourceAsync(
+                        "stream",
+                        _ => new CaptureRuntimeStopState(
+                            CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                            null)));
+            CaptureRuntimeStopState durableStop = detected.Stop;
             CaptureRuntimeSnapshot stopped = await stoppingState.ReadAsync();
             bool deliveryAttempted = false;
 
@@ -1112,6 +1164,52 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task PackagedTracerKeepsAllResponsibilityRetryableForNonConflictReasonBody()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-retryable-reason-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var serverCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<int> server = ServeResponsesAsync(
+            listener,
+            [
+                (
+                    HttpStatusCode.ServiceUnavailable,
+                    """{"reason":"blocked_by_earlier_gap"}""")
+            ],
+            serverCancellation.Token);
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                TracerEnvironment(transcript, stateDirectory, port));
+
+            Assert.Equal(1, result.ExitCode);
+            Assert.Equal(1, await server);
+            Assert.Empty(result.Stdout);
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Null(stream.Stop);
+            Assert.Equal([0L, 1L, 2L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(2, stream.EnqueuedThrough);
+            Assert.Null(stream.LastServerReceipt);
+        }
+        finally
+        {
+            await serverCancellation.CancelAsync();
+            listener.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerStopsAtTheQueuedPositionWhoseSourceEvidenceChanged()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -1476,11 +1574,6 @@ public sealed class CaptureRuntimeStateTests
             inner.DeliverAuthorizedAsync(
                 sourceStream, queued, deliverAsync, cancellationToken);
 
-        public Task<CaptureRuntimeStopState> StopAsync(
-            string sourceStream,
-            CaptureRuntimeStopState stop,
-            CancellationToken cancellationToken = default) =>
-            inner.StopAsync(sourceStream, stop, cancellationToken);
     }
 
     private sealed class SourceInspectionObservingRuntimeState(
@@ -1521,10 +1614,5 @@ public sealed class CaptureRuntimeStateTests
             inner.DeliverAuthorizedAsync(
                 sourceStream, queued, deliverAsync, cancellationToken);
 
-        public Task<CaptureRuntimeStopState> StopAsync(
-            string sourceStream,
-            CaptureRuntimeStopState stop,
-            CancellationToken cancellationToken = default) =>
-            inner.StopAsync(sourceStream, stop, cancellationToken);
     }
 }

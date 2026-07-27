@@ -19,6 +19,7 @@ public interface ICaptureRuntimeState
     Task<bool> ClaimAsync(
         CaptureRuntimeQueueItem claim,
         CapturePrefixEvidence? expectedPrefix,
+        Func<CapturePrefixEvidence?, bool> verifiedPrefixMatchesSnapshot,
         CancellationToken cancellationToken = default);
 
     Task<CaptureRuntimeStreamState?> InspectSourceAsync(
@@ -260,8 +261,10 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
     public async Task<bool> ClaimAsync(
         CaptureRuntimeQueueItem claim,
         CapturePrefixEvidence? expectedPrefix,
+        Func<CapturePrefixEvidence?, bool> verifiedPrefixMatchesSnapshot,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(verifiedPrefixMatchesSnapshot);
         Directory.CreateDirectory(_directory);
         await using FileStream stateLock = await AcquireLockAsync(cancellationToken);
         CaptureRuntimeSnapshot current = await ReadAsync(cancellationToken);
@@ -281,12 +284,34 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
                 claim.DeterministicLocatorEvidence.TranscriptIdentity,
                 StringComparison.Ordinal))
         {
-            throw new CapturePrefixChangedException(
-                claim.SourceStream, "transcript identity changed");
+            CaptureRuntimeStopState durableStop = await PersistStopAsync(
+                current,
+                streamIndex,
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.TranscriptIdentityChanged,
+                    null));
+            throw new CaptureStreamStoppedException(claim.SourceStream, durableStop);
         }
         if (!Equals(stream?.VerifiedPrefix, expectedPrefix))
         {
-            throw new CaptureRuntimeConcurrencyException(claim.SourceStream);
+            if (stream is null)
+            {
+                throw new CaptureRuntimeConcurrencyException(claim.SourceStream);
+            }
+            if (!verifiedPrefixMatchesSnapshot(stream.VerifiedPrefix))
+            {
+                CaptureRuntimeStopState durableStop = await PersistStopAsync(
+                    current,
+                    streamIndex,
+                    new CaptureRuntimeStopState(
+                        CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                        null));
+                throw new CaptureStreamStoppedException(claim.SourceStream, durableStop);
+            }
+        }
+        if (stream?.EnqueuedThrough >= claim.SourcePosition)
+        {
+            return false;
         }
         if (stream?.Queue.Any(item =>
                 string.Equals(
@@ -622,7 +647,11 @@ public static class CodexCaptureClaimer
                 sourceStream,
                 locatorEvidence,
                 candidateJson);
-            if (await state.ClaimAsync(claim, expectedPrefix, cancellationToken))
+            if (await state.ClaimAsync(
+                    claim,
+                    expectedPrefix,
+                    evidence => KnownPrefixMatches(sourceBytes, evidence),
+                    cancellationToken))
             {
                 claimed.Add(claim);
             }

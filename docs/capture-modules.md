@@ -84,7 +84,11 @@ scanner configuration.
 
 **`ICaptureRuntimeState`** — one durable local progress boundary. A claim
 atomically records the verified transcript prefix, advances `enqueuedThrough`,
-and adds one retryable queue item. The item contains the capture source stream,
+and adds one retryable queue item. It revalidates the current durable prefix
+against the claimant's immutable byte snapshot under the same process-shared
+lock: a same-history concurrent advance converges without another queue item,
+while a changed prefix or transcript identity is durably stopped before the
+lock is released. The item contains the capture source stream,
 deterministic transcript/position/byte-range/prefix locator evidence, source
 position, and the redacted-safe candidate observation. It never stores the raw
 transcript record. Recording a server receipt atomically removes exactly the

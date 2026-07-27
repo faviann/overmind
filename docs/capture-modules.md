@@ -18,7 +18,7 @@ Source interpretation before this spine is described by the
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
-| `ICaptureRuntimeState` | `ReadAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync`, `StopAsync` | `CodexCaptureTracer` |
+| `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync`, `StopAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
 | `CodexTranscriptDiscovery` | `Enumerate(configuredLocation)` | `CodexCaptureTracer` |
 | `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
@@ -116,11 +116,18 @@ commits, that delivery cannot enter its external callback. A failed or
 cancelled callback leaves responsibility queued and releases the shared lock;
 the runtime's response timeout bounds a stalled endpoint, so authorization
 cannot become a fail-open lease or a durable lock.
+Source-prefix and transcript-identity inspection likewise run under that
+process-shared transaction: a detected conflict is durably stopped before the
+lock is released, and the stop write no longer observes caller cancellation.
+Delivery owns the content-free mapping from queued-evidence mismatches and the
+server's conflict reason values to the same durable stop codes; the packaged
+host does not interpret those rules.
 `FileCaptureRuntimeState` implements the transaction as a flushed complete
 snapshot followed by an atomic rename, under a process-shared lock file.
 
 **`CodexCaptureClaimer`** — verifies the previously recorded append-only prefix
-against the read-only transcript, defers an unterminated final JSONL record,
+against one immutable transcript byte snapshot, parses and adapts records from
+that same snapshot, defers an unterminated final JSONL record,
 and accepts that record only after newline completion or an explicit terminal
 flag from configured discovery. It adapts a terminal record, runs the local
 safety boundary, and only then calls the durable claim transaction. Its locator

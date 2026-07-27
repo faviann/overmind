@@ -75,71 +75,39 @@ async Task ScanAndDeliverAsync(
     foreach (CaptureRuntimeQueueItem queued in
         stream.Queue.OrderBy(item => item.SourcePosition))
     {
-        try
-        {
-            string response = await runtimeState.DeliverAuthorizedAsync(
-                transcript.SourceStream,
-                queued,
-                async token =>
+        string response = await runtimeState.DeliverAuthorizedAsync(
+            transcript.SourceStream,
+            queued,
+            async token =>
+            {
+                CaptureServerReceiptState? receiptState = null;
+                IReadOnlyList<string> responses =
+                    await DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                        adapter,
+                        transcript.Path,
+                        transcript.SourceStream,
+                        [queued],
+                        new Uri(endpoint, UriKind.Absolute),
+                        credential,
+                        safetyGate,
+                        (receipt, delivered, _) =>
+                        {
+                            receiptState = ValidateReceipt(receipt, delivered);
+                            return Task.CompletedTask;
+                        },
+                        token,
+                        transcript.TerminalAtEndOfFile,
+                        transcript.TranscriptIdentity);
+                if (receiptState is null || responses.Count != 1)
                 {
-                    CaptureServerReceiptState? receiptState = null;
-                    IReadOnlyList<string> responses =
-                        await DisabledCaptureRuntime.RunClaimedFixtureAsync(
-                            adapter,
-                            transcript.Path,
-                            transcript.SourceStream,
-                            [queued],
-                            new Uri(endpoint, UriKind.Absolute),
-                            credential,
-                            safetyGate,
-                            (receipt, delivered, _) =>
-                            {
-                                receiptState = ValidateReceipt(receipt, delivered);
-                                return Task.CompletedTask;
-                            },
-                            token,
-                            transcript.TerminalAtEndOfFile,
-                            transcript.TranscriptIdentity);
-                    if (receiptState is null || responses.Count != 1)
-                    {
-                        throw new InvalidDataException(
-                            "Capture delivery did not return one conclusive receipt.");
-                    }
-                    return new CaptureRuntimeDeliveryResult<string>(
-                        receiptState, responses[0]);
-                },
-                cancellationToken);
-            Console.WriteLine(response);
-        }
-        catch (CapturePrefixChangedException)
-        {
-            await StopAndThrowAsync(
-                CaptureRuntimeStopCode.QueuedSourceEvidenceChanged,
-                queued.SourcePosition,
-                cancellationToken);
-        }
-        catch (CaptureDeliveryException ex) when (
-            ex.Reason is "blocked_by_earlier_gap" or "accepted_source_conflict")
-        {
-            await StopAndThrowAsync(
-                ex.Reason == "blocked_by_earlier_gap"
-                    ? CaptureRuntimeStopCode.BlockedByEarlierGap
-                    : CaptureRuntimeStopCode.AcceptedSourceConflict,
-                ex.SourcePosition,
-                cancellationToken);
-        }
-    }
-
-    async Task StopAndThrowAsync(
-        string code,
-        long sourcePosition,
-        CancellationToken token)
-    {
-        var stop = new CaptureRuntimeStopState(code, sourcePosition);
-        CaptureRuntimeStopState durableStop =
-            await runtimeState.StopAsync(
-                transcript.SourceStream, stop, CancellationToken.None);
-        throw new CaptureStreamStoppedException(transcript.SourceStream, durableStop);
+                    throw new InvalidDataException(
+                        "Capture delivery did not return one conclusive receipt.");
+                }
+                return new CaptureRuntimeDeliveryResult<string>(
+                    receiptState, responses[0]);
+            },
+            cancellationToken);
+        Console.WriteLine(response);
     }
 }
 

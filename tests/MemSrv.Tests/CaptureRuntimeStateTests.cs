@@ -269,6 +269,66 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task ClaimBuildsPrefixAndAdapterRecordsFromOneImmutableSourceSnapshot()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-snapshot-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        const string originalMarker = "immutable-original";
+        const string replacementMarker = "immutable-changed!";
+        Assert.Equal(originalMarker.Length, replacementMarker.Length);
+        string original = JsonSerializer.Serialize(new
+        {
+            type = "response_item",
+            payload = new
+            {
+                type = "message",
+                role = "user",
+                content = originalMarker
+            }
+        }) + "\n";
+        string replacement = original.Replace(
+            originalMarker, replacementMarker, StringComparison.Ordinal);
+        Assert.Equal(
+            Encoding.UTF8.GetByteCount(original),
+            Encoding.UTF8.GetByteCount(replacement));
+        await File.WriteAllTextAsync(transcript, original, new UTF8Encoding(false));
+
+        try
+        {
+            var inner = new FileCaptureRuntimeState(stateDirectory);
+            var replacingState = new SourceInspectionObservingRuntimeState(
+                inner,
+                () => File.WriteAllText(
+                    transcript, replacement, new UTF8Encoding(false)));
+
+            IReadOnlyList<CaptureRuntimeQueueItem> claims =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new CodexJsonlAdapter(),
+                    transcript,
+                    "stream",
+                    replacingState,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")));
+
+            CaptureRuntimeQueueItem claim = Assert.Single(claims);
+            Assert.Contains(originalMarker, claim.RedactedSafeCandidate);
+            Assert.DoesNotContain(replacementMarker, claim.RedactedSafeCandidate);
+            Assert.Contains(replacementMarker, await File.ReadAllTextAsync(transcript));
+            CaptureRuntimeStreamState persisted = Assert.Single(
+                (await inner.ReadAsync()).Streams);
+            Assert.Equal(0, persisted.EnqueuedThrough);
+            Assert.Equal(claim, Assert.Single(persisted.Queue));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ProcessTerminationAfterClaimAndRestartLeaveExactlyTheSameRetryableClaims()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -532,7 +592,127 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
-    public async Task DetectedPrefixConflictPersistsItsStopAfterCallerCancellationWhileLockIsHeld()
+    public async Task DetectedSourceConflictStopsBeforeACompetingClaimCanEnter()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-inspection-race-{Guid.NewGuid():N}");
+        try
+        {
+            var detectingState = new FileCaptureRuntimeState(directory);
+            var competingState = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem first = QueueItem("stream", 0, 10);
+            Assert.True(await detectingState.ClaimAsync(first, expectedPrefix: null));
+            var conflictDetected = new ManualResetEventSlim();
+            var allowStop = new ManualResetEventSlim();
+
+            Task detection = Task.Run(async () =>
+                await detectingState.InspectSourceAsync(
+                    "stream",
+                    _ =>
+                    {
+                        conflictDetected.Set();
+                        Assert.True(allowStop.Wait(TimeSpan.FromSeconds(5)));
+                        return new CaptureRuntimeStopState(
+                            CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                            null);
+                    }));
+            Assert.True(conflictDetected.Wait(TimeSpan.FromSeconds(5)));
+
+            bool competingClaimEntered = false;
+            Task competingClaim = Task.Run(async () =>
+            {
+                competingClaimEntered = true;
+                return await competingState.ClaimAsync(
+                    QueueItem("stream", 1, 20),
+                    first.DeterministicLocatorEvidence.PrefixEvidence);
+            });
+            await Task.Delay(100);
+            Assert.True(competingClaimEntered);
+            Assert.False(competingClaim.IsCompleted);
+
+            allowStop.Set();
+            await Assert.ThrowsAsync<CaptureStreamStoppedException>(() => detection);
+            await Assert.ThrowsAsync<CaptureStreamStoppedException>(() => competingClaim);
+            CaptureRuntimeStreamState stopped = Assert.Single(
+                (await detectingState.ReadAsync()).Streams);
+            Assert.Equal(
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                    null),
+                stopped.Stop);
+            Assert.Equal(0, stopped.EnqueuedThrough);
+            Assert.Single(stopped.Queue);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DetectedDeliveryConflictStopsBeforeACompetingCallbackCanEnter()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-delivery-conflict-race-{Guid.NewGuid():N}");
+        try
+        {
+            var detectingState = new FileCaptureRuntimeState(directory);
+            var competingState = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem queued = QueueItem("stream", 0, 10);
+            Assert.True(await detectingState.ClaimAsync(queued, expectedPrefix: null));
+            var conflictDetected = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var allowConflict = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            Task detection = detectingState.DeliverAuthorizedAsync<string>(
+                "stream",
+                queued,
+                async _ =>
+                {
+                    conflictDetected.SetResult();
+                    await allowConflict.Task;
+                    throw new CaptureRuntimeConflictException(
+                        new CaptureRuntimeStopState(
+                            CaptureRuntimeStopCode.AcceptedSourceConflict,
+                            queued.SourcePosition));
+                });
+            await conflictDetected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            bool competingCallbackEntered = false;
+            Task competingDelivery = competingState.DeliverAuthorizedAsync<string>(
+                "stream",
+                queued,
+                _ =>
+                {
+                    competingCallbackEntered = true;
+                    throw new InvalidOperationException("must remain unauthorized");
+                });
+            await Task.Delay(100);
+            Assert.False(competingDelivery.IsCompleted);
+            Assert.False(competingCallbackEntered);
+
+            allowConflict.SetResult();
+            await Assert.ThrowsAsync<CaptureStreamStoppedException>(() => detection);
+            await Assert.ThrowsAsync<CaptureStreamStoppedException>(() => competingDelivery);
+            Assert.False(competingCallbackEntered);
+            CaptureRuntimeStreamState stopped = Assert.Single(
+                (await detectingState.ReadAsync()).Streams);
+            Assert.Equal(
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.AcceptedSourceConflict,
+                    queued.SourcePosition),
+                stopped.Stop);
+            Assert.Single(stopped.Queue);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DetectedPrefixConflictPersistsItsStopAfterCallerCancellation()
     {
         string root = TestProcessRunner.RepoRoot;
         string directory = Path.Combine(
@@ -568,26 +748,11 @@ public sealed class CaptureRuntimeStateTests
                 (await fileState.ReadAsync()).Streams,
                 stream => stream.SourceStream == "stream").Queue[0];
 
-            var lockHeld = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var releaseLock = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            Task lockHolder = fileState.DeliverAuthorizedAsync<string>(
-                "stream",
-                staleQueued,
-                async _ =>
-                {
-                    lockHeld.SetResult();
-                    await releaseLock.Task;
-                    throw new HttpRequestException("synthetic stalled delivery");
-                });
-            await lockHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
-
             await File.WriteAllTextAsync(transcript, changed, new UTF8Encoding(false));
-            var stopEntered = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var observingState = new StopObservingRuntimeState(fileState, stopEntered);
             using var callerCancellation = new CancellationTokenSource();
+            var observingState = new ConflictObservingRuntimeState(
+                fileState,
+                callerCancellation.Cancel);
             Task conflict = CodexCaptureClaimer.ClaimCompletedAsync(
                 new CodexJsonlAdapter(),
                 transcript,
@@ -596,10 +761,6 @@ public sealed class CaptureRuntimeStateTests
                 new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
                 callerCancellation.Token);
 
-            await stopEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            callerCancellation.Cancel();
-            releaseLock.SetResult();
-            await Assert.ThrowsAsync<HttpRequestException>(() => lockHolder);
             CaptureStreamStoppedException stopped =
                 await Assert.ThrowsAsync<CaptureStreamStoppedException>(() => conflict);
 
@@ -1270,9 +1431,9 @@ public sealed class CaptureRuntimeStateTests
         return Encoding.UTF8.GetString(body);
     }
 
-    private sealed class StopObservingRuntimeState(
+    private sealed class ConflictObservingRuntimeState(
         ICaptureRuntimeState inner,
-        TaskCompletionSource stopEntered) : ICaptureRuntimeState
+        Action conflictDetected) : ICaptureRuntimeState
     {
         public Task<CaptureRuntimeSnapshot> ReadAsync(
             CancellationToken cancellationToken = default) =>
@@ -1283,6 +1444,23 @@ public sealed class CaptureRuntimeStateTests
             CapturePrefixEvidence? expectedPrefix,
             CancellationToken cancellationToken = default) =>
             inner.ClaimAsync(claim, expectedPrefix, cancellationToken);
+
+        public Task<CaptureRuntimeStreamState?> InspectSourceAsync(
+            string sourceStream,
+            Func<CaptureRuntimeStreamState, CaptureRuntimeStopState?> detectConflict,
+            CancellationToken cancellationToken = default) =>
+            inner.InspectSourceAsync(
+                sourceStream,
+                stream =>
+                {
+                    CaptureRuntimeStopState? stop = detectConflict(stream);
+                    if (stop is not null)
+                    {
+                        conflictDetected();
+                    }
+                    return stop;
+                },
+                cancellationToken);
 
         public Task RecordServerReceiptAsync(
             string sourceStream,
@@ -1301,11 +1479,52 @@ public sealed class CaptureRuntimeStateTests
         public Task<CaptureRuntimeStopState> StopAsync(
             string sourceStream,
             CaptureRuntimeStopState stop,
+            CancellationToken cancellationToken = default) =>
+            inner.StopAsync(sourceStream, stop, cancellationToken);
+    }
+
+    private sealed class SourceInspectionObservingRuntimeState(
+        ICaptureRuntimeState inner,
+        Action inspectionStarted) : ICaptureRuntimeState
+    {
+        public Task<CaptureRuntimeSnapshot> ReadAsync(
+            CancellationToken cancellationToken = default) =>
+            inner.ReadAsync(cancellationToken);
+
+        public Task<bool> ClaimAsync(
+            CaptureRuntimeQueueItem claim,
+            CapturePrefixEvidence? expectedPrefix,
+            CancellationToken cancellationToken = default) =>
+            inner.ClaimAsync(claim, expectedPrefix, cancellationToken);
+
+        public Task<CaptureRuntimeStreamState?> InspectSourceAsync(
+            string sourceStream,
+            Func<CaptureRuntimeStreamState, CaptureRuntimeStopState?> detectConflict,
             CancellationToken cancellationToken = default)
         {
-            Assert.False(cancellationToken.CanBeCanceled);
-            stopEntered.TrySetResult();
-            return inner.StopAsync(sourceStream, stop, cancellationToken);
+            inspectionStarted();
+            return inner.InspectSourceAsync(
+                sourceStream, detectConflict, cancellationToken);
         }
+
+        public Task RecordServerReceiptAsync(
+            string sourceStream,
+            CaptureServerReceiptState receipt,
+            CancellationToken cancellationToken = default) =>
+            inner.RecordServerReceiptAsync(sourceStream, receipt, cancellationToken);
+
+        public Task<TResult> DeliverAuthorizedAsync<TResult>(
+            string sourceStream,
+            CaptureRuntimeQueueItem queued,
+            Func<CancellationToken, Task<CaptureRuntimeDeliveryResult<TResult>>> deliverAsync,
+            CancellationToken cancellationToken = default) =>
+            inner.DeliverAuthorizedAsync(
+                sourceStream, queued, deliverAsync, cancellationToken);
+
+        public Task<CaptureRuntimeStopState> StopAsync(
+            string sourceStream,
+            CaptureRuntimeStopState stop,
+            CancellationToken cancellationToken = default) =>
+            inner.StopAsync(sourceStream, stop, cancellationToken);
     }
 }

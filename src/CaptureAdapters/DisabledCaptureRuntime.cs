@@ -44,10 +44,10 @@ public static class DisabledCaptureRuntime
         bool terminalAtEndOfFile = false,
         string? transcriptIdentity = null)
     {
-        var sourceRecords = await JsonlSourceReader.ReadAsync(
-            fixturePath, sourceSessionId, terminalAtEndOfFile, cancellationToken);
-        var recordsByPosition = sourceRecords.ToDictionary(record => record.SourcePosition);
         byte[] sourceBytes = await File.ReadAllBytesAsync(fixturePath, cancellationToken);
+        var sourceRecords = JsonlSourceReader.Read(
+            sourceBytes, sourceSessionId, terminalAtEndOfFile);
+        var recordsByPosition = sourceRecords.ToDictionary(record => record.SourcePosition);
         transcriptIdentity ??= Digest(
             Encoding.UTF8.GetBytes(Path.GetFullPath(fixturePath)));
         using var client = new HttpClient
@@ -81,18 +81,17 @@ public static class DisabledCaptureRuntime
                         0, checked((int)evidence.PrefixEvidence.ByteLength))),
                     StringComparison.Ordinal))
             {
-                throw new CapturePrefixChangedException(
-                    sourceSessionId,
-                    $"durable claim at source position {queued.SourcePosition} " +
-                    "does not match the completed source record");
+                throw new CaptureRuntimeConflictException(
+                    CaptureRuntimeConflictClassifier.QueuedSourceEvidenceChanged(
+                        queued.SourcePosition));
             }
 
             var outcome = adapter.Adapt(sourceRecord);
             if (outcome is CaptureSourcePositionOutcome.Incomplete)
             {
-                throw new CapturePrefixChangedException(
-                    sourceSessionId,
-                    $"durable claim at source position {queued.SourcePosition} is incomplete");
+                throw new CaptureRuntimeConflictException(
+                    CaptureRuntimeConflictClassifier.QueuedSourceEvidenceChanged(
+                        queued.SourcePosition));
             }
 
             var terminal = (CaptureSourcePositionOutcome.Terminal)outcome;
@@ -111,10 +110,9 @@ public static class DisabledCaptureRuntime
             if (!string.Equals(
                     candidateJson, queued.RedactedSafeCandidate, StringComparison.Ordinal))
             {
-                throw new CapturePrefixChangedException(
-                    sourceSessionId,
-                    $"durable candidate at source position {queued.SourcePosition} " +
-                    "does not match the completed source record");
+                throw new CaptureRuntimeConflictException(
+                    CaptureRuntimeConflictClassifier.QueuedSourceEvidenceChanged(
+                        queued.SourcePosition));
             }
             using var content = new StringContent(
                 observationJson, Encoding.UTF8, "application/json");
@@ -131,8 +129,16 @@ public static class DisabledCaptureRuntime
                     requestCancellation.Token);
                 if (!response.IsSuccessStatusCode)
                 {
+                    if (CaptureRuntimeConflictClassifier.FromHttpFailure(
+                            terminal.SourcePosition,
+                            response.StatusCode,
+                            responseText) is { } stop)
+                    {
+                        throw new CaptureRuntimeConflictException(stop);
+                    }
                     throw new CaptureDeliveryException(
-                        terminal.SourcePosition, response.StatusCode, responseText);
+                        terminal.SourcePosition,
+                        response.StatusCode);
                 }
                 await persistReceiptAsync(
                     responseText, queued, cancellationToken);
@@ -152,6 +158,49 @@ public static class DisabledCaptureRuntime
 
     private static string Digest(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+}
+
+public static class CaptureRuntimeConflictClassifier
+{
+    public static CaptureRuntimeStopState QueuedSourceEvidenceChanged(
+        long sourcePosition) =>
+        new(CaptureRuntimeStopCode.QueuedSourceEvidenceChanged, sourcePosition);
+
+    public static CaptureRuntimeStopState? FromHttpFailure(
+        long sourcePosition,
+        HttpStatusCode statusCode,
+        string responseText)
+    {
+        if (statusCode != HttpStatusCode.Conflict)
+        {
+            return null;
+        }
+
+        try
+        {
+            using JsonDocument response = JsonDocument.Parse(responseText);
+            if (response.RootElement.TryGetProperty("reason", out JsonElement reason)
+                && reason.ValueKind == JsonValueKind.String
+                && reason.GetString() is { } reasonCode)
+            {
+                return reasonCode switch
+                {
+                    "blocked_by_earlier_gap" => new CaptureRuntimeStopState(
+                        CaptureRuntimeStopCode.BlockedByEarlierGap,
+                        sourcePosition),
+                    "accepted_source_conflict" => new CaptureRuntimeStopState(
+                        CaptureRuntimeStopCode.AcceptedSourceConflict,
+                        sourcePosition),
+                    _ => null
+                };
+            }
+        }
+        catch (JsonException)
+        {
+        }
+        return null;
+    }
 }
 
 public sealed class CaptureDeliveryTimeoutException(
@@ -169,11 +218,10 @@ public sealed class CaptureDeliveryTimeoutException(
 
 public sealed class CaptureDeliveryException(
     long sourcePosition,
-    HttpStatusCode statusCode,
-    string responseBody)
+    HttpStatusCode statusCode)
     : Exception(
         $"Capture failed at source position {sourcePosition} " +
-        $"with HTTP {(int)statusCode}: {responseBody}")
+        $"with HTTP {(int)statusCode}.")
 {
     public long SourcePosition { get; } = sourcePosition;
     public HttpStatusCode StatusCode { get; } = statusCode;

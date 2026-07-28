@@ -13,6 +13,15 @@ public static class JsonlSourceReader
         CancellationToken cancellationToken = default)
     {
         byte[] bytes = await File.ReadAllBytesAsync(fixturePath, cancellationToken);
+        return Read(bytes, sourceSessionId, terminalAtEndOfFile);
+    }
+
+    public static IReadOnlyList<TrustedSourceObservation> Read(
+        ReadOnlyMemory<byte> sourceBytes,
+        string sourceSessionId,
+        bool terminalAtEndOfFile)
+    {
+        ReadOnlySpan<byte> bytes = sourceBytes.Span;
         var observations = new List<TrustedSourceObservation>();
         int lineStart = 0;
         for (int index = 0; index <= bytes.Length; index++)
@@ -33,7 +42,8 @@ public static class JsonlSourceReader
                 JsonElement payload;
                 try
                 {
-                    payload = JsonDocument.Parse(bytes.AsMemory(lineStart, contentLength))
+                    payload = JsonDocument.Parse(
+                            sourceBytes.Slice(lineStart, contentLength))
                         .RootElement.Clone();
                 }
                 catch (JsonException)
@@ -42,12 +52,12 @@ public static class JsonlSourceReader
                     {
                         type = "malformed",
                         opaqueText = System.Text.Encoding.UTF8.GetString(
-                            bytes, lineStart, contentLength)
+                            sourceBytes.Span.Slice(lineStart, contentLength))
                     });
                 }
 
                 string digest = Convert.ToHexString(
-                        SHA256.HashData(bytes.AsSpan(lineStart, recordLength)))
+                        SHA256.HashData(bytes.Slice(lineStart, recordLength)))
                     .ToLowerInvariant();
                 observations.Add(new TrustedSourceObservation(
                     sourceSessionId,

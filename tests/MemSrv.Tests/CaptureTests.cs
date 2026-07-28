@@ -1556,30 +1556,98 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(
             Encoding.UTF8.GetByteCount(firstBytes),
             Encoding.UTF8.GetByteCount(changedBytes));
+        int proxyPort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            proxyPort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+        using var proxy = new HttpListener();
+        proxy.Prefixes.Add($"http://127.0.0.1:{proxyPort}/");
+        proxy.Start();
 
         try
         {
             await File.WriteAllTextAsync(fixturePath, firstBytes, new UTF8Encoding(false));
-            var first = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(0, first.ExitCode);
-            var firstReceipt = JsonDocument.Parse(first.Stdout.Split(
-                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
+            Task forwardFirst = ForwardFirstThenFailSecondAsync(proxy, captureKey);
+            var first = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                new Dictionary<string, string>
+                {
+                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                    ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{proxyPort}",
+                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                    ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
+                });
+            await forwardFirst;
+            Assert.Equal(1, first.ExitCode);
+            JsonElement firstReceipt = Assert.Single(ParseReceiptLines(first.Stdout));
             Guid observationUuid = firstReceipt.GetProperty("observationUuid").GetGuid();
+            Guid sourceStreamUuid = firstReceipt.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid();
             string beforeConflict = await RunMemCtlAsync(
                 "capture", "receipt", observationUuid.ToString());
+            JsonElement canonicalBeforeConflict =
+                JsonDocument.Parse(beforeConflict).RootElement;
+            Assert.Equal(
+                "message",
+                canonicalBeforeConflict.GetProperty("event").GetProperty("kind").GetString());
+            Assert.Empty(
+                canonicalBeforeConflict.GetProperty("relationships").EnumerateArray());
+            CaptureLedgerMechanics mechanicsBeforeConflict =
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid);
+            Assert.Equal(
+                new CaptureLedgerMechanics(1, 1, 0, 0),
+                mechanicsBeforeConflict);
+            CaptureRuntimeStreamState retained = Assert.Single(
+                (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
+                    .ReadAsync()).Streams);
+            Assert.Equal([1L, 2L], retained.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(0, retained.LastServerReceipt?.SourcePosition);
 
             await File.WriteAllTextAsync(fixturePath, changedBytes, new UTF8Encoding(false));
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.Equal(4, conflict.ExitCode);
             Assert.Empty(conflict.Stdout);
-            Assert.Contains("previously verified prefix changed", conflict.Stderr);
+            Assert.Contains("verified_prefix_changed", conflict.Stderr);
+
+            var runtimeState =
+                new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath));
+            CaptureRuntimeSnapshot stopped = await runtimeState.ReadAsync();
+            CaptureRuntimeStreamState stoppedStream = Assert.Single(stopped.Streams);
+            Assert.Equal(
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                    null),
+                stoppedStream.Stop);
+            Assert.Equal([1L, 2L], stoppedStream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(2, stoppedStream.EnqueuedThrough);
+            Assert.Equal(0, stoppedStream.LastServerReceipt?.SourcePosition);
+            Assert.Equal(
+                beforeConflict,
+                await RunMemCtlAsync("capture", "receipt", observationUuid.ToString()));
+            Assert.Equal(
+                mechanicsBeforeConflict,
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
+
+            var repeated = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(4, repeated.ExitCode);
+            Assert.Empty(repeated.Stdout);
+            Assert.Contains("verified_prefix_changed", repeated.Stderr);
+            Assert.Equal(
+                JsonSerializer.Serialize(stopped),
+                JsonSerializer.Serialize(await runtimeState.ReadAsync()));
 
             string afterConflict = await RunMemCtlAsync(
                 "capture", "receipt", observationUuid.ToString());
             Assert.Equal(beforeConflict, afterConflict);
+            Assert.Equal(
+                mechanicsBeforeConflict,
+                await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
         }
         finally
         {
+            proxy.Stop();
             File.Delete(fixturePath);
             DeleteRuntimeState(fixturePath);
         }
@@ -1613,10 +1681,87 @@ public sealed class CaptureTests : HttpSeamTestBase
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.Equal(4, conflict.ExitCode);
             Assert.Empty(conflict.Stdout);
-            Assert.Contains("previously verified prefix changed", conflict.Stderr);
+            Assert.Contains("verified_prefix_changed", conflict.Stderr);
+            CaptureRuntimeStreamState stopped = Assert.Single(
+                (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
+                    .ReadAsync()).Streams);
+            Assert.Equal(
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                    null),
+                stopped.Stop);
+            Assert.Equal(2, stopped.EnqueuedThrough);
+            Assert.Empty(stopped.Queue);
+            Assert.Equal(2, stopped.LastServerReceipt?.SourcePosition);
             Assert.Equal(
                 beforeConflict,
                 await RunMemCtlAsync("capture", "receipt", observationUuid.ToString()));
+        }
+        finally
+        {
+            File.Delete(fixturePath);
+            DeleteRuntimeState(fixturePath);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerStopsAndBlocksLaterQueuedWorkBehindAnEarlierServerGap()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-runtime-gap-{Guid.NewGuid():N}", captureKey);
+        string fixturePath = Path.Combine(
+            Path.GetTempPath(), $"codex-runtime-gap-{Guid.NewGuid():N}.jsonl");
+        string stateDirectory = RuntimeStateDirectory(fixturePath);
+        File.Copy(Path.Combine(_root, "fixtures/codex-synthetic.jsonl"), fixturePath);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(stateDirectory);
+            IReadOnlyList<CaptureRuntimeQueueItem> claims =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new CodexJsonlAdapter(),
+                    fixturePath,
+                    "codex-synthetic-rollout-v1",
+                    state,
+                    new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
+            Assert.Equal([0L, 1L, 2L], claims.Select(item => item.SourcePosition));
+            CaptureRuntimeQueueItem first = claims[0];
+            await state.RecordServerReceiptAsync(
+                first.SourceStream,
+                new CaptureServerReceiptState(
+                    first.SourcePosition,
+                    first.DeterministicLocatorEvidence.Identity,
+                    "new",
+                    Guid.NewGuid(),
+                    Guid.NewGuid()));
+
+            var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(4, conflict.ExitCode);
+            Assert.Empty(conflict.Stdout);
+            Assert.Contains("blocked_by_earlier_gap", conflict.Stderr);
+            Assert.DoesNotContain(
+                "response_item",
+                conflict.Stderr,
+                StringComparison.Ordinal);
+
+            CaptureRuntimeSnapshot stopped = await state.ReadAsync();
+            CaptureRuntimeStreamState stoppedStream = Assert.Single(stopped.Streams);
+            Assert.Equal(
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.BlockedByEarlierGap,
+                    1),
+                stoppedStream.Stop);
+            Assert.Equal([1L, 2L], stoppedStream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(2, stoppedStream.EnqueuedThrough);
+            Assert.Equal(0, stoppedStream.LastServerReceipt?.SourcePosition);
+
+            var repeated = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(4, repeated.ExitCode);
+            Assert.Empty(repeated.Stdout);
+            Assert.Contains("blocked_by_earlier_gap", repeated.Stderr);
+            Assert.Equal(
+                JsonSerializer.Serialize(stopped),
+                JsonSerializer.Serialize(await state.ReadAsync()));
         }
         finally
         {
@@ -1670,7 +1815,13 @@ public sealed class CaptureTests : HttpSeamTestBase
         var gap = await client.PostAsJsonAsync(
             "/capture/v1/observations", Observation(sourceSessionId, 2, "prefix-2", "gap"));
         Assert.Equal(HttpStatusCode.Conflict, gap.StatusCode);
-        Assert.Contains("expected sourcePosition 1", await gap.Content.ReadAsStringAsync());
+        JsonElement gapReceipt = await gap.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            "blocked_by_earlier_gap",
+            gapReceipt.GetProperty("reason").GetString());
+        Assert.Contains(
+            "expected sourcePosition 1",
+            gapReceipt.GetProperty("error").GetString());
 
         var next = await client.PostAsJsonAsync(
             "/capture/v1/observations", Observation(sourceSessionId, 1, "prefix-1", "one"));
@@ -2350,6 +2501,35 @@ public sealed class CaptureTests : HttpSeamTestBase
             context.Response.Close();
         }
         return [.. receipts];
+    }
+
+    private async Task ForwardFirstThenFailSecondAsync(
+        HttpListener listener,
+        string captureKey)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        HttpListenerContext first = await listener.GetContextAsync()
+            .WaitAsync(timeout.Token);
+        using (var request = new StreamContent(first.Request.InputStream))
+        {
+            request.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            using var client = CaptureClient(captureKey);
+            using HttpResponseMessage response = await client.PostAsync(
+                "/capture/v1/observations", request, timeout.Token);
+            string body = await response.Content.ReadAsStringAsync(timeout.Token);
+            byte[] bytes = Encoding.UTF8.GetBytes(body);
+            first.Response.StatusCode = (int)response.StatusCode;
+            first.Response.ContentType = "application/json";
+            first.Response.ContentLength64 = bytes.Length;
+            await first.Response.OutputStream.WriteAsync(bytes, timeout.Token);
+            first.Response.Close();
+        }
+
+        HttpListenerContext second = await listener.GetContextAsync()
+            .WaitAsync(timeout.Token);
+        second.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+        second.Response.ContentLength64 = 0;
+        second.Response.Close();
     }
 
     private async Task<JsonElement> WithholdFirstAndForwardSecondAsync(

@@ -18,7 +18,7 @@ Source interpretation before this spine is described by the
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
-| `ICaptureRuntimeState` | `ReadAsync`, `ClaimAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
+| `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
 | `CodexTranscriptDiscovery` | `Enumerate(configuredLocation)` | `CodexCaptureTracer` |
 | `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
@@ -84,7 +84,11 @@ scanner configuration.
 
 **`ICaptureRuntimeState`** — one durable local progress boundary. A claim
 atomically records the verified transcript prefix, advances `enqueuedThrough`,
-and adds one retryable queue item. The item contains the capture source stream,
+and adds one retryable queue item. It revalidates the current durable prefix
+against the claimant's immutable byte snapshot under the same process-shared
+lock: a same-history concurrent advance converges without another queue item,
+while a changed prefix or transcript identity is durably stopped before the
+lock is released. The item contains the capture source stream,
 deterministic transcript/position/byte-range/prefix locator evidence, source
 position, and the redacted-safe candidate observation. It never stores the raw
 transcript record. Recording a server receipt atomically removes exactly the
@@ -95,11 +99,39 @@ and delivery-batch IDs do not appear. The first conclusive server receipt also
 establishes the server-derived canonical source-stream UUID in stream state.
 Every later conclusive receipt must return that same UUID, and its top-level and
 nested observation UUIDs must agree, before local responsibility can retire.
+Stopping a stream atomically records one finite, content-free reason code and,
+only when source evidence identifies one exact record, the affected source
+position without changing its verified prefix,
+`enqueuedThrough`, queued responsibility, last receipt, or canonical stream
+UUID. The first stop is sticky: later scans, claims, deliveries, receipts, and
+competing stop attempts cannot advance or replace it. A server response whose
+machine reason is `blocked_by_earlier_gap` stops at the earliest attempted
+position, so every later queued item remains visibly blocked behind it.
+Aggregate verified-prefix digest and transcript-identity conflicts prove that
+history changed but not which record changed, so those stop states omit
+`sourcePosition`; queued-record revalidation, earlier-gap, and accepted-source
+conflicts retain their exact position. Once any of these conflicts is detected,
+the local stop write completes independently of caller cancellation, including
+while waiting for the process-shared state lock.
+Delivery authorization, the bounded HTTP attempt, and conclusive receipt
+retirement form one process-shared state transaction. This serializes a durable
+stop against a delivery that began from an older queue snapshot: after the stop
+commits, that delivery cannot enter its external callback. A failed or
+cancelled callback leaves responsibility queued and releases the shared lock;
+the runtime's response timeout bounds a stalled endpoint, so authorization
+cannot become a fail-open lease or a durable lock.
+Source-prefix and transcript-identity inspection likewise run under that
+process-shared transaction: a detected conflict is durably stopped before the
+lock is released, and the stop write no longer observes caller cancellation.
+Delivery owns the content-free mapping from queued-evidence mismatches and the
+server's conflict reason values to the same durable stop codes; the packaged
+host does not interpret those rules.
 `FileCaptureRuntimeState` implements the transaction as a flushed complete
 snapshot followed by an atomic rename, under a process-shared lock file.
 
 **`CodexCaptureClaimer`** — verifies the previously recorded append-only prefix
-against the read-only transcript, defers an unterminated final JSONL record,
+against one immutable transcript byte snapshot, parses and adapts records from
+that same snapshot, defers an unterminated final JSONL record,
 and accepts that record only after newline completion or an explicit terminal
 flag from configured discovery. It adapts a terminal record, runs the local
 safety boundary, and only then calls the durable claim transaction. Its locator

@@ -6,7 +6,10 @@ using Npgsql;
 
 namespace MemSrv.Core;
 
-public sealed class CaptureConflictException(string message) : Exception(message);
+public sealed class CaptureConflictException(string reason, string message) : Exception(message)
+{
+    public string Reason { get; } = reason;
+}
 
 /// <summary>
 /// Authenticated capture ingestion: validate one observation against its
@@ -200,6 +203,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         {
             await transaction.RollbackAsync(cancellationToken);
             throw new CaptureConflictException(
+                "blocked_by_earlier_gap",
                 $"Capture stream expected sourcePosition {expectedPosition} but received " +
                 $"{command.SourcePosition}; gaps and backtracking are not accepted.");
         }
@@ -313,8 +317,9 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     }
 
     private static CaptureConflictException ConflictAt(CaptureObservationCommand command) =>
-        new($"Source position {command.SourcePosition} or locator '{command.Locator.Describe()}' " +
-            "was already accepted with different identity or content.");
+        new("accepted_source_conflict",
+            $"Source position {command.SourcePosition} was already accepted with " +
+            "different identity or content.");
 
     private static void Validate(CaptureBindingContext binding, CaptureObservationCommand command)
     {

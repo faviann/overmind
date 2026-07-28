@@ -19,12 +19,25 @@ public interface ICaptureRuntimeState
     Task<bool> ClaimAsync(
         CaptureRuntimeQueueItem claim,
         CapturePrefixEvidence? expectedPrefix,
+        Func<CapturePrefixEvidence?, bool> verifiedPrefixMatchesSnapshot,
+        CancellationToken cancellationToken = default);
+
+    Task<CaptureRuntimeStreamState?> InspectSourceAsync(
+        string sourceStream,
+        Func<CaptureRuntimeStreamState, CaptureRuntimeStopState?> detectConflict,
         CancellationToken cancellationToken = default);
 
     Task RecordServerReceiptAsync(
         string sourceStream,
         CaptureServerReceiptState receipt,
         CancellationToken cancellationToken = default);
+
+    Task<TResult> DeliverAuthorizedAsync<TResult>(
+        string sourceStream,
+        CaptureRuntimeQueueItem queued,
+        Func<CancellationToken, Task<CaptureRuntimeDeliveryResult<TResult>>> deliverAsync,
+        CancellationToken cancellationToken = default);
+
 }
 
 public sealed record CapturePrefixEvidence(long ByteLength, string Sha256);
@@ -131,6 +144,67 @@ public sealed record CaptureServerReceiptState(
     Guid ObservationUuid,
     Guid SourceStreamUuid);
 
+public sealed record CaptureRuntimeDeliveryResult<TResult>(
+    CaptureServerReceiptState Receipt,
+    TResult Result);
+
+public static class CaptureRuntimeStopCode
+{
+    public const string VerifiedPrefixChanged = "verified_prefix_changed";
+    public const string TranscriptIdentityChanged = "transcript_identity_changed";
+    public const string QueuedSourceEvidenceChanged = "queued_source_evidence_changed";
+    public const string BlockedByEarlierGap = "blocked_by_earlier_gap";
+    public const string AcceptedSourceConflict = "accepted_source_conflict";
+
+    internal static bool IsKnown(string code) =>
+        code is VerifiedPrefixChanged
+            or TranscriptIdentityChanged
+            or QueuedSourceEvidenceChanged
+            or BlockedByEarlierGap
+            or AcceptedSourceConflict;
+}
+
+/// <summary>
+/// Content-free durable reason that a capture source stream cannot advance.
+/// The finite code set prevents transcript or server-response content from
+/// entering operational state or diagnostics.
+/// </summary>
+public sealed record CaptureRuntimeStopState
+{
+    [JsonConstructor]
+    public CaptureRuntimeStopState(string code, long? sourcePosition)
+    {
+        if (!CaptureRuntimeStopCode.IsKnown(code))
+        {
+            throw new InvalidDataException("Capture runtime stop code is not recognized.");
+        }
+        bool locationIsUnknown =
+            code is CaptureRuntimeStopCode.VerifiedPrefixChanged
+                or CaptureRuntimeStopCode.TranscriptIdentityChanged;
+        if (locationIsUnknown && sourcePosition is not null)
+        {
+            throw new InvalidDataException(
+                "Aggregate capture runtime stops cannot identify a sourcePosition.");
+        }
+        if (!locationIsUnknown && sourcePosition is null)
+        {
+            throw new InvalidDataException(
+                "Record-specific capture runtime stops require a sourcePosition.");
+        }
+        if (sourcePosition < 0)
+        {
+            throw new InvalidDataException(
+                "Capture runtime stop sourcePosition cannot be negative.");
+        }
+        Code = code;
+        SourcePosition = sourcePosition;
+    }
+
+    public string Code { get; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? SourcePosition { get; }
+}
+
 public sealed record CaptureRuntimeStreamState(
     string SourceStream,
     string TranscriptIdentity,
@@ -138,7 +212,8 @@ public sealed record CaptureRuntimeStreamState(
     long? EnqueuedThrough,
     IReadOnlyList<CaptureRuntimeQueueItem> Queue,
     CaptureServerReceiptState? LastServerReceipt,
-    Guid? CanonicalSourceStreamUuid);
+    Guid? CanonicalSourceStreamUuid,
+    CaptureRuntimeStopState? Stop = null);
 
 public sealed record CaptureRuntimeSnapshot(
     int ContractVersion,
@@ -186,8 +261,10 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
     public async Task<bool> ClaimAsync(
         CaptureRuntimeQueueItem claim,
         CapturePrefixEvidence? expectedPrefix,
+        Func<CapturePrefixEvidence?, bool> verifiedPrefixMatchesSnapshot,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(verifiedPrefixMatchesSnapshot);
         Directory.CreateDirectory(_directory);
         await using FileStream stateLock = await AcquireLockAsync(cancellationToken);
         CaptureRuntimeSnapshot current = await ReadAsync(cancellationToken);
@@ -197,18 +274,44 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         CaptureRuntimeStreamState? stream =
             streamIndex >= 0 ? streams[streamIndex] : null;
 
+        if (stream?.Stop is { } stop)
+        {
+            throw new CaptureStreamStoppedException(claim.SourceStream, stop);
+        }
         if (stream is not null
             && !string.Equals(
                 stream.TranscriptIdentity,
                 claim.DeterministicLocatorEvidence.TranscriptIdentity,
                 StringComparison.Ordinal))
         {
-            throw new CapturePrefixChangedException(
-                claim.SourceStream, "transcript identity changed");
+            CaptureRuntimeStopState durableStop = await PersistStopAsync(
+                current,
+                streamIndex,
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.TranscriptIdentityChanged,
+                    null));
+            throw new CaptureStreamStoppedException(claim.SourceStream, durableStop);
         }
         if (!Equals(stream?.VerifiedPrefix, expectedPrefix))
         {
-            throw new CaptureRuntimeConcurrencyException(claim.SourceStream);
+            if (stream is null)
+            {
+                throw new CaptureRuntimeConcurrencyException(claim.SourceStream);
+            }
+            if (!verifiedPrefixMatchesSnapshot(stream.VerifiedPrefix))
+            {
+                CaptureRuntimeStopState durableStop = await PersistStopAsync(
+                    current,
+                    streamIndex,
+                    new CaptureRuntimeStopState(
+                        CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                        null));
+                throw new CaptureStreamStoppedException(claim.SourceStream, durableStop);
+            }
+        }
+        if (stream?.EnqueuedThrough >= claim.SourcePosition)
+        {
+            return false;
         }
         if (stream?.Queue.Any(item =>
                 string.Equals(
@@ -243,6 +346,37 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         return true;
     }
 
+    public async Task<CaptureRuntimeStreamState?> InspectSourceAsync(
+        string sourceStream,
+        Func<CaptureRuntimeStreamState, CaptureRuntimeStopState?> detectConflict,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(detectConflict);
+        Directory.CreateDirectory(_directory);
+        await using FileStream stateLock = await AcquireLockAsync(cancellationToken);
+        CaptureRuntimeSnapshot current = await ReadAsync(cancellationToken);
+        int streamIndex = current.Streams.ToList().FindIndex(stream =>
+            string.Equals(stream.SourceStream, sourceStream, StringComparison.Ordinal));
+        if (streamIndex < 0)
+        {
+            return null;
+        }
+
+        CaptureRuntimeStreamState stream = current.Streams[streamIndex];
+        if (stream.Stop is { } existingStop)
+        {
+            throw new CaptureStreamStoppedException(sourceStream, existingStop);
+        }
+        if (detectConflict(stream) is not { } detectedStop)
+        {
+            return stream;
+        }
+
+        CaptureRuntimeStopState durableStop = await PersistStopAsync(
+            current, streamIndex, detectedStop);
+        throw new CaptureStreamStoppedException(sourceStream, durableStop);
+    }
+
     public async Task RecordServerReceiptAsync(
         string sourceStream,
         CaptureServerReceiptState receipt,
@@ -260,7 +394,106 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
                 $"Capture source stream '{sourceStream}' has no durable claim.");
         }
 
+        streams[streamIndex] = ApplyReceipt(sourceStream, streams[streamIndex], receipt);
+        await WriteAtomicallyAsync(new CaptureRuntimeSnapshot(1, streams), cancellationToken);
+    }
+
+    public async Task<TResult> DeliverAuthorizedAsync<TResult>(
+        string sourceStream,
+        CaptureRuntimeQueueItem queued,
+        Func<CancellationToken, Task<CaptureRuntimeDeliveryResult<TResult>>> deliverAsync,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(deliverAsync);
+        Directory.CreateDirectory(_directory);
+        await using FileStream stateLock = await AcquireLockAsync(cancellationToken);
+        CaptureRuntimeSnapshot current = await ReadAsync(cancellationToken);
+        var streams = current.Streams.ToList();
+        int streamIndex = streams.FindIndex(stream =>
+            string.Equals(stream.SourceStream, sourceStream, StringComparison.Ordinal));
+        if (streamIndex < 0)
+        {
+            throw new InvalidOperationException(
+                $"Capture source stream '{sourceStream}' has no durable claim.");
+        }
+
         CaptureRuntimeStreamState stream = streams[streamIndex];
+        if (stream.Stop is { } stop)
+        {
+            throw new CaptureStreamStoppedException(sourceStream, stop);
+        }
+        CaptureRuntimeQueueItem? earliest = stream.Queue
+            .OrderBy(item => item.SourcePosition)
+            .FirstOrDefault();
+        if (earliest is null
+            || earliest.SourcePosition != queued.SourcePosition
+            || !string.Equals(
+                earliest.DeterministicLocatorEvidence.Identity,
+                queued.DeterministicLocatorEvidence.Identity,
+                StringComparison.Ordinal))
+        {
+            throw new CaptureRuntimeConcurrencyException(sourceStream);
+        }
+
+        CaptureRuntimeDeliveryResult<TResult> delivery;
+        try
+        {
+            delivery = await deliverAsync(cancellationToken);
+        }
+        catch (CaptureRuntimeConflictException conflict)
+        {
+            CaptureRuntimeStopState durableStop = await PersistStopAsync(
+                current, streamIndex, conflict.Stop);
+            throw new CaptureStreamStoppedException(sourceStream, durableStop);
+        }
+        streams[streamIndex] = ApplyReceipt(sourceStream, stream, delivery.Receipt);
+        await WriteAtomicallyAsync(new CaptureRuntimeSnapshot(1, streams), cancellationToken);
+        return delivery.Result;
+    }
+
+    private async Task<CaptureRuntimeStopState> PersistStopAsync(
+        CaptureRuntimeSnapshot current,
+        int streamIndex,
+        CaptureRuntimeStopState stop)
+    {
+        var streams = current.Streams.ToList();
+        if (streams[streamIndex].Stop is { } existingStop)
+        {
+            return existingStop;
+        }
+        streams[streamIndex] = streams[streamIndex] with { Stop = stop };
+        await WriteAtomicallyAsync(
+            new CaptureRuntimeSnapshot(1, streams), CancellationToken.None);
+        return stop;
+    }
+
+    private async Task<FileStream> AcquireLockAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(
+                    _lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None,
+                    bufferSize: 1, FileOptions.Asynchronous);
+            }
+            catch (IOException)
+            {
+                await Task.Delay(25, cancellationToken);
+            }
+        }
+    }
+
+    private static CaptureRuntimeStreamState ApplyReceipt(
+        string sourceStream,
+        CaptureRuntimeStreamState stream,
+        CaptureServerReceiptState receipt)
+    {
+        if (stream.Stop is { } stop)
+        {
+            throw new CaptureStreamStoppedException(sourceStream, stop);
+        }
         CaptureRuntimeQueueItem? earliest = stream.Queue
             .OrderBy(item => item.SourcePosition)
             .FirstOrDefault();
@@ -290,32 +523,13 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
 
         var remainingQueue = stream.Queue.ToList();
         remainingQueue.Remove(earliest);
-        streams[streamIndex] = stream with
+        return stream with
         {
             Queue = remainingQueue,
             LastServerReceipt = receipt,
             CanonicalSourceStreamUuid =
                 stream.CanonicalSourceStreamUuid ?? receipt.SourceStreamUuid
         };
-        await WriteAtomicallyAsync(new CaptureRuntimeSnapshot(1, streams), cancellationToken);
-    }
-
-    private async Task<FileStream> AcquireLockAsync(CancellationToken cancellationToken)
-    {
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                return new FileStream(
-                    _lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None,
-                    bufferSize: 1, FileOptions.Asynchronous);
-            }
-            catch (IOException)
-            {
-                await Task.Delay(25, cancellationToken);
-            }
-        }
     }
 
     private async Task WriteAtomicallyAsync(
@@ -365,23 +579,34 @@ public static class CodexCaptureClaimer
         bool terminalAtEndOfFile = false,
         string? transcriptIdentity = null)
     {
-        CaptureRuntimeSnapshot snapshot = await state.ReadAsync(cancellationToken);
-        CaptureRuntimeStreamState? stream = snapshot.Streams.SingleOrDefault(value =>
-            string.Equals(value.SourceStream, sourceStream, StringComparison.Ordinal));
         byte[] sourceBytes = await File.ReadAllBytesAsync(transcriptPath, cancellationToken);
-        VerifyKnownPrefix(sourceBytes, stream?.VerifiedPrefix, sourceStream);
-
-        var records = await JsonlSourceReader.ReadAsync(
-            transcriptPath, sourceStream, terminalAtEndOfFile, cancellationToken);
         transcriptIdentity ??= Digest(
             Encoding.UTF8.GetBytes(Path.GetFullPath(transcriptPath)));
-        if (stream is not null
-            && !string.Equals(
-                stream.TranscriptIdentity, transcriptIdentity, StringComparison.Ordinal))
-        {
-            throw new CapturePrefixChangedException(
-                sourceStream, "transcript identity changed");
-        }
+        string immutableTranscriptIdentity = transcriptIdentity;
+        CaptureRuntimeStreamState? stream = await state.InspectSourceAsync(
+            sourceStream,
+            current =>
+            {
+                if (!KnownPrefixMatches(sourceBytes, current.VerifiedPrefix))
+                {
+                    return new CaptureRuntimeStopState(
+                        CaptureRuntimeStopCode.VerifiedPrefixChanged,
+                        null);
+                }
+                if (!string.Equals(
+                        current.TranscriptIdentity,
+                        immutableTranscriptIdentity,
+                        StringComparison.Ordinal))
+                {
+                    return new CaptureRuntimeStopState(
+                        CaptureRuntimeStopCode.TranscriptIdentityChanged,
+                        null);
+                }
+                return null;
+            },
+            cancellationToken);
+        var records = JsonlSourceReader.Read(
+            sourceBytes, sourceStream, terminalAtEndOfFile);
         var claimed = new List<CaptureRuntimeQueueItem>();
         CapturePrefixEvidence? expectedPrefix = stream?.VerifiedPrefix;
 
@@ -422,7 +647,11 @@ public static class CodexCaptureClaimer
                 sourceStream,
                 locatorEvidence,
                 candidateJson);
-            if (await state.ClaimAsync(claim, expectedPrefix, cancellationToken))
+            if (await state.ClaimAsync(
+                    claim,
+                    expectedPrefix,
+                    evidence => KnownPrefixMatches(sourceBytes, evidence),
+                    cancellationToken))
             {
                 claimed.Add(claim);
             }
@@ -432,22 +661,19 @@ public static class CodexCaptureClaimer
         return claimed;
     }
 
-    private static void VerifyKnownPrefix(
-        byte[] bytes, CapturePrefixEvidence? evidence, string sourceStream)
+    private static bool KnownPrefixMatches(
+        byte[] bytes, CapturePrefixEvidence? evidence)
     {
         if (evidence is null)
         {
-            return;
+            return true;
         }
-        if (evidence.ByteLength < 0 || evidence.ByteLength > bytes.LongLength
-            || !string.Equals(
+        return evidence.ByteLength >= 0
+            && evidence.ByteLength <= bytes.LongLength
+            && string.Equals(
                 evidence.Sha256,
                 Digest(bytes.AsSpan(0, checked((int)evidence.ByteLength))),
-                StringComparison.Ordinal))
-        {
-            throw new CapturePrefixChangedException(
-                sourceStream, "the previously verified prefix changed");
-        }
+                StringComparison.Ordinal);
     }
 
     private static void VerifyRecord(
@@ -476,6 +702,25 @@ public static class CodexCaptureClaimer
 
 public sealed class CapturePrefixChangedException(string sourceStream, string reason)
     : Exception($"Capture source stream '{sourceStream}' stopped: {reason}.");
+
+public sealed class CaptureRuntimeConflictException(CaptureRuntimeStopState stop)
+    : Exception($"Capture runtime detected {stop.Code}.")
+{
+    public CaptureRuntimeStopState Stop { get; } = stop;
+}
+
+public sealed class CaptureStreamStoppedException(
+    string sourceStream,
+    CaptureRuntimeStopState stop)
+    : Exception(
+        stop.SourcePosition is long sourcePosition
+            ? $"Capture source stream '{sourceStream}' is stopped at source position " +
+                $"{sourcePosition}: {stop.Code}."
+            : $"Capture source stream '{sourceStream}' is stopped at an unknown source " +
+                $"position: {stop.Code}.")
+{
+    public CaptureRuntimeStopState Stop { get; } = stop;
+}
 
 public sealed class CaptureRuntimeConcurrencyException(string sourceStream)
     : Exception($"Capture source stream '{sourceStream}' changed during its claim transaction.");

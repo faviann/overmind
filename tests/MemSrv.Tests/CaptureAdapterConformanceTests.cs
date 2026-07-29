@@ -131,6 +131,99 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
     }
 
     [Fact]
+    public void CodexUiViewsWithoutExplicitStringMessagesRemainOpaqueEvidence()
+    {
+        string[] views = ["user_message", "agent_message"];
+        string[] messageShapes =
+        [
+            "",
+            ""","message":{"future":"object"}""",
+            ""","message":42""",
+            ""","message":true""",
+            ""","message":["future"]""",
+            ""","message":null"""
+        ];
+        JsonValueKind?[] expectedKinds =
+        [
+            null,
+            JsonValueKind.Object,
+            JsonValueKind.Number,
+            JsonValueKind.True,
+            JsonValueKind.Array,
+            JsonValueKind.Null
+        ];
+        var adapter = new CodexJsonlAdapter();
+
+        foreach (string view in views)
+        {
+            for (int shapeIndex = 0; shapeIndex < messageShapes.Length; shapeIndex++)
+            {
+                string messageShape = messageShapes[shapeIndex];
+                string record =
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\""
+                    + view
+                    + "\""
+                    + messageShape
+                    + ",\"futureViewField\":\"retained\"}}";
+                var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(Source(record, isTerminal: true)));
+                CaptureEvent evidence = Assert.Single(terminal.Observation.Events);
+
+                Assert.Equal("opaque/0", evidence.PartKey);
+                Assert.Equal(0, evidence.PartOrder);
+                Assert.Equal("opaque", evidence.Kind);
+                Assert.Equal("unknown", evidence.Actor);
+                Assert.Equal(
+                    "event_msg",
+                    evidence.Payload.GetProperty("recordType").GetString());
+                Assert.Equal(
+                    view,
+                    evidence.Payload.GetProperty("payloadType").GetString());
+                Assert.Equal(
+                    "retained",
+                    evidence.Payload.GetProperty("source")
+                        .GetProperty("futureViewField").GetString());
+                JsonElement source = evidence.Payload.GetProperty("source");
+                if (expectedKinds[shapeIndex] is { } expectedKind)
+                {
+                    Assert.Equal(expectedKind, source.GetProperty("message").ValueKind);
+                }
+                else
+                {
+                    Assert.False(source.TryGetProperty("message", out _));
+                }
+                if (shapeIndex == 1)
+                {
+                    Assert.Equal(
+                        "object",
+                        source.GetProperty("message").GetProperty("future").GetString());
+                }
+                if (shapeIndex == 2)
+                {
+                    Assert.Equal(42, source.GetProperty("message").GetInt32());
+                }
+                if (shapeIndex == 3)
+                {
+                    Assert.True(source.GetProperty("message").GetBoolean());
+                }
+                if (shapeIndex == 4)
+                {
+                    Assert.Equal(
+                        "future",
+                        Assert.Single(source.GetProperty("message").EnumerateArray()).GetString());
+                }
+                Assert.False(evidence.Payload.TryGetProperty("text", out _));
+
+                var retry = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(Source(record, isTerminal: true)));
+                Assert.Equal(
+                    JsonSerializer.Serialize(terminal.Observation.Events, WebJson),
+                    JsonSerializer.Serialize(retry.Observation.Events, WebJson));
+            }
+        }
+    }
+
+    [Fact]
     public async Task CodexModelFacingMessagesFanOutInSourceOrderWhileUiViewsRemainAnnotations()
     {
         var adapter = new CodexJsonlAdapter();

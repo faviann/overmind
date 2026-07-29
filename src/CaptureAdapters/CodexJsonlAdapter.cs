@@ -84,7 +84,8 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         {
             return payloadType switch
             {
-                "user_message" or "agent_message" => [MessageView(payload, payloadType)],
+                "user_message" or "agent_message" =>
+                    [MessageView(payload, payloadType, position)],
                 "error" or "turn_aborted" => [Error(payload, position)],
                 "subagent_start" => [Subagent(payload, position)],
                 _ => [Opaque(recordType, payloadType, payload, position)]
@@ -164,18 +165,20 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             : events;
     }
 
-    private static CaptureEvent MessageView(JsonElement payload, string view) =>
-        Event(
+    private static CaptureEvent MessageView(JsonElement payload, string view, long position)
+    {
+        if (!payload.TryGetProperty("message", out var message)
+            || message.ValueKind != JsonValueKind.String)
+        {
+            return Opaque("event_msg", view, payload, position);
+        }
+
+        return Event(
             $"view:{view}",
             "annotation",
             "harness",
-            new
-            {
-                view,
-                text = payload.TryGetProperty("message", out var message)
-                    ? JsonAdapterHelpers.Text(message)
-                    : null
-            });
+            new { view, text = message.GetString() });
+    }
 
     private static string MessageActor(string? role) =>
         role is "user" or "assistant" or "developer" or "system"

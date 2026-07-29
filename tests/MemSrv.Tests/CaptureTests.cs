@@ -767,6 +767,38 @@ public sealed class CaptureTests : HttpSeamTestBase
                 .ToArray();
         }
 
+        static void AssertViewEnvelope(
+            JsonElement envelope,
+            string expectedView,
+            string expectedText)
+        {
+            JsonElement observation = envelope.GetProperty("observation");
+            JsonElement safePayload = observation.GetProperty("safeSourcePayload")
+                .GetProperty("payload");
+            JsonElement capturedEvent = envelope.GetProperty("event");
+            JsonElement payload = capturedEvent.GetProperty("payload");
+
+            Assert.Equal("annotation", capturedEvent.GetProperty("kind").GetString());
+            Assert.Equal("harness", capturedEvent.GetProperty("actor").GetString());
+            Assert.Equal(
+                $"view:{expectedView}",
+                capturedEvent.GetProperty("partKey").GetString());
+            Assert.Equal(
+                ["text", "view"],
+                payload.EnumerateObject().Select(property => property.Name));
+            Assert.Equal(expectedView, payload.GetProperty("view").GetString());
+            Assert.Equal(expectedText, payload.GetProperty("text").GetString());
+            Assert.Equal(
+                "retained",
+                safePayload.GetProperty("futureViewField").GetString());
+            Assert.Equal(
+                "[REDACTED:aws-access-key-id]",
+                safePayload.GetProperty("futureSensitiveViewField").GetString());
+            Assert.False(payload.TryGetProperty("futureViewField", out _));
+            Assert.False(payload.TryGetProperty("futureSensitiveViewField", out _));
+            Assert.Empty(envelope.GetProperty("relationships").EnumerateArray());
+        }
+
         try
         {
             JsonElement[] accepted = await CaptureOnceAsync(firstStateDirectory, "new");
@@ -804,9 +836,22 @@ public sealed class CaptureTests : HttpSeamTestBase
                     .GetProperty("retained").GetBoolean());
 
             JsonElement[] userEnvelopes = await ReadOperatorReceiptAsync(accepted[0]);
+            JsonElement userViewEnvelope = Assert.Single(
+                await ReadOperatorReceiptAsync(accepted[1]));
             JsonElement[] developerEnvelopes = await ReadOperatorReceiptAsync(accepted[2]);
             JsonElement[] systemEnvelopes = await ReadOperatorReceiptAsync(accepted[3]);
             JsonElement[] assistantEnvelopes = await ReadOperatorReceiptAsync(accepted[4]);
+            JsonElement agentViewEnvelope = Assert.Single(
+                await ReadOperatorReceiptAsync(accepted[5]));
+
+            AssertViewEnvelope(
+                userViewEnvelope,
+                "user_message",
+                "First user part.\nSecond user part.");
+            AssertViewEnvelope(
+                agentViewEnvelope,
+                "agent_message",
+                "First assistant part.\nSecond assistant part.");
 
             Assert.Equal(2, userEnvelopes.Length);
             Assert.Equal(

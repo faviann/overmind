@@ -42,11 +42,14 @@ public static class DisabledCaptureRuntime
         Func<string, CaptureRuntimeQueueItem, CancellationToken, Task> persistReceiptAsync,
         CancellationToken cancellationToken = default,
         bool terminalAtEndOfFile = false,
-        string? transcriptIdentity = null)
+        string? transcriptIdentity = null,
+        CaptureSourceIdentity? sourceIdentity = null)
     {
         byte[] sourceBytes = await File.ReadAllBytesAsync(fixturePath, cancellationToken);
         var sourceRecords = JsonlSourceReader.Read(
-            sourceBytes, sourceSessionId, terminalAtEndOfFile);
+            sourceBytes,
+            sourceIdentity ?? new CaptureSourceIdentity(sourceSessionId),
+            terminalAtEndOfFile);
         var recordsByPosition = sourceRecords.ToDictionary(record => record.SourcePosition);
         transcriptIdentity ??= Digest(
             Encoding.UTF8.GetBytes(Path.GetFullPath(fixturePath)));

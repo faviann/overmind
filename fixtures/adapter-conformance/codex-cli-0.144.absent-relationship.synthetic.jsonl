@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-05T00:00:00Z","type":"session_meta","payload":{"session_id":"01970000-0000-7000-8000-000000000040","id":"01970000-0000-7000-8000-000000000041","cli_version":"0.144.synthetic","source":{"subagent":{"other":"synthetic-child"}},"thread_source":"subagent","agent_path":"/root/orphan"}}
+{"timestamp":"2026-07-05T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":"child with no relationship fact"}}

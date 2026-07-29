@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using MemSrv.Core;
 
 namespace CaptureAdapters;
 
@@ -7,7 +9,9 @@ public sealed record CodexTranscriptStream(
     string Path,
     string SourceStream,
     bool TerminalAtEndOfFile = false,
-    string? TranscriptIdentity = null);
+    string? TranscriptIdentity = null,
+    CaptureSourceIdentity? SourceIdentity = null,
+    Exception? IdentityFailure = null);
 
 /// <summary>
 /// Enumerates the configured synthetic Codex transcript location afresh for
@@ -42,6 +46,7 @@ public static class CodexTranscriptDiscovery
             .Select(path => Describe(fullLocation, path))
             .ToArray();
         if (streams
+            .Where(stream => stream.TranscriptIdentity is not null)
             .GroupBy(stream => stream.TranscriptIdentity, StringComparer.Ordinal)
             .Any(group => group.Count() > 1))
         {
@@ -78,13 +83,138 @@ public static class CodexTranscriptDiscovery
             }
         }
 
-        string digest = Digest(identityPath);
+        CaptureSourceIdentity? sourceIdentity;
+        try
+        {
+            sourceIdentity = ReadSourceIdentity(path);
+        }
+        catch (Exception ex)
+            when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            // One unreadable or self-contradictory rollout is that stream's
+            // failure, carried to its own scan rather than guessing an identity
+            // or cancelling the whole cycle.
+            return new CodexTranscriptStream(path, UnresolvedSourceStream, IdentityFailure: ex);
+        }
+
+        string digest = sourceIdentity is null
+            ? Digest(identityPath)
+            : Digest(JsonSerializer.Serialize(new
+            {
+                version = "codex-source-identity/v1",
+                sourceIdentity.ExternalSessionId,
+                sourceIdentity.ChildId
+            }));
         return new CodexTranscriptStream(
             path,
             $"codex-synthetic-{digest[..24]}",
             terminalAtEndOfFile,
-            digest);
+            digest,
+            sourceIdentity);
     }
+
+    private const string UnresolvedSourceStream = "codex-synthetic-unresolved";
+
+    private static CaptureSourceIdentity? ReadSourceIdentity(string path)
+    {
+        using var reader = new StreamReader(path, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        while (reader.ReadLine() is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            JsonElement record;
+            try
+            {
+                record = JsonDocument.Parse(line).RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+            if (record.ValueKind != JsonValueKind.Object
+                || !record.TryGetProperty("type", out JsonElement type)
+                || !string.Equals(type.GetString(), "session_meta", StringComparison.Ordinal)
+                || !record.TryGetProperty("payload", out JsonElement payload)
+                || payload.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            string? threadId = NullableString(payload, "id");
+            string? externalSessionId = NullableString(payload, "session_id") ?? threadId;
+            if (string.IsNullOrWhiteSpace(externalSessionId))
+            {
+                throw new InvalidDataException(
+                    $"Codex session metadata in '{path}' has no external session identity.");
+            }
+
+            bool? sourceClass = SourceClass(payload);
+            bool? threadClass = ThreadClass(payload);
+            if (sourceClass is not null && threadClass is not null
+                && sourceClass != threadClass)
+            {
+                throw new InvalidDataException(
+                    $"Codex session metadata in '{path}' has contradictory child classification.");
+            }
+            bool isChild = sourceClass == true || threadClass == true;
+            if (isChild && string.IsNullOrWhiteSpace(threadId))
+            {
+                throw new InvalidDataException(
+                    $"Codex child session metadata in '{path}' has no observed thread identity.");
+            }
+            return new CaptureSourceIdentity(externalSessionId, isChild ? threadId : null);
+        }
+        return null;
+    }
+
+    private static bool? SourceClass(JsonElement payload)
+    {
+        if (!payload.TryGetProperty("source", out JsonElement source)
+            || source.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+        if (source.ValueKind == JsonValueKind.String)
+        {
+            return string.Equals(source.GetString(), "subagent", StringComparison.OrdinalIgnoreCase);
+        }
+        if (source.ValueKind == JsonValueKind.Object)
+        {
+            if (source.TryGetProperty("subagent", out _)
+                || source.TryGetProperty("sub_agent", out _))
+            {
+                return true;
+            }
+            if (source.TryGetProperty("internal", out _)
+                || source.TryGetProperty("custom", out _))
+            {
+                return false;
+            }
+            return null;
+        }
+        return null;
+    }
+
+    private static bool? ThreadClass(JsonElement payload)
+    {
+        if (!payload.TryGetProperty("thread_source", out JsonElement source)
+            || source.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+        return source.ValueKind == JsonValueKind.String
+            ? string.Equals(source.GetString(), "subagent", StringComparison.OrdinalIgnoreCase)
+            : null;
+    }
+
+    private static string? NullableString(JsonElement value, string name) =>
+        value.TryGetProperty(name, out JsonElement property)
+        && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
 
     private static string Digest(string identityPath)
         => Convert.ToHexString(
@@ -112,6 +242,12 @@ public static class CodexTranscriptScanCycle
         foreach (CodexTranscriptStream stream in streams)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (stream.IdentityFailure is not null)
+            {
+                reportFailure(stream.IdentityFailure);
+                continue;
+            }
+
             try
             {
                 await scanStream(stream, cancellationToken);

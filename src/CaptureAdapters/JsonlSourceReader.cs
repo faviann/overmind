@@ -19,6 +19,15 @@ public static class JsonlSourceReader
     public static IReadOnlyList<TrustedSourceObservation> Read(
         ReadOnlyMemory<byte> sourceBytes,
         string sourceSessionId,
+        bool terminalAtEndOfFile) =>
+        Read(
+            sourceBytes,
+            new CaptureSourceIdentity(sourceSessionId),
+            terminalAtEndOfFile);
+
+    public static IReadOnlyList<TrustedSourceObservation> Read(
+        ReadOnlyMemory<byte> sourceBytes,
+        CaptureSourceIdentity sourceIdentity,
         bool terminalAtEndOfFile)
     {
         ReadOnlySpan<byte> bytes = sourceBytes.Span;
@@ -60,7 +69,7 @@ public static class JsonlSourceReader
                         SHA256.HashData(bytes.Slice(lineStart, recordLength)))
                     .ToLowerInvariant();
                 observations.Add(new TrustedSourceObservation(
-                    sourceSessionId,
+                    sourceIdentity,
                     observations.Count,
                     new CaptureSourceLocator.ByteRange(lineStart, recordLength, digest),
                     CaptureSourceMaterialKind.PersistedRecord,

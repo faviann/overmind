@@ -23,7 +23,7 @@ public sealed record CaptureLocator(
 
 public sealed record CaptureObservationRequest(
     int ContractVersion,
-    string SourceSessionId,
+    string? SourceSessionId,
     long SourcePosition,
     CaptureLocator Locator,
     CaptureSourceTimestamp? SourceTimestamp,
@@ -31,7 +31,16 @@ public sealed record CaptureObservationRequest(
     CaptureAdapter Adapter,
     JsonElement SourcePayload,
     IReadOnlyList<CaptureEvent> Events,
-    CaptureRouteEvidence? RouteEvidence = null);
+    CaptureRouteEvidence? RouteEvidence = null,
+    CaptureSourceIdentity? SourceIdentity = null);
+
+/// <summary>
+/// Harness-native identity facts used with the authenticated capture binding to
+/// establish one capture stream. Relationship facts are deliberately excluded.
+/// </summary>
+public sealed record CaptureSourceIdentity(
+    string ExternalSessionId,
+    string? ChildId = null);
 
 // ---------------------------------------------------------------------------
 // Shared source facts.
@@ -214,7 +223,7 @@ internal sealed class CaptureSourceLocatorConverter : JsonConverter<CaptureSourc
 /// </summary>
 public sealed record CaptureObservationCommand(
     int ContractVersion,
-    string SourceSessionId,
+    CaptureSourceIdentity SourceIdentity,
     long SourcePosition,
     CaptureSourceLocator Locator,
     CaptureSourceTimestamp? SourceTimestamp,
@@ -224,10 +233,23 @@ public sealed record CaptureObservationCommand(
     IReadOnlyList<CaptureEvent> Events,
     CaptureRouteEvidence? RouteEvidence)
 {
-    public static CaptureObservationCommand FromRequest(CaptureObservationRequest request) =>
-        new(
+    public static CaptureObservationCommand FromRequest(CaptureObservationRequest request)
+    {
+        if (request.SourceIdentity is not null
+            && !string.IsNullOrWhiteSpace(request.SourceSessionId)
+            && !string.Equals(
+                request.SourceSessionId,
+                request.SourceIdentity.ExternalSessionId,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "sourceSessionId must match sourceIdentity.externalSessionId when both are supplied.");
+        }
+
+        return new(
             request.ContractVersion,
-            request.SourceSessionId,
+            request.SourceIdentity
+                ?? new CaptureSourceIdentity(request.SourceSessionId ?? ""),
             request.SourcePosition,
             CaptureSourceLocator.Parse(request.Locator),
             request.SourceTimestamp,
@@ -236,6 +258,7 @@ public sealed record CaptureObservationCommand(
             request.SourcePayload,
             request.Events,
             request.RouteEvidence);
+    }
 }
 
 /// <summary>
@@ -276,6 +299,7 @@ public sealed record CaptureScanReceipt(
 public sealed record CaptureObservationReceipt(
     Guid ObservationUuid,
     Guid SourceStreamUuid,
+    CaptureSourceIdentity SourceIdentity,
     CaptureSource Source,
     CaptureSourceLocator Locator,
     CaptureSourceTimestamp? SourceTimestamp,

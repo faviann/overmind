@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "4");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "5");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -59,7 +59,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             : Interpret(record, recordType, payload, source.SourcePosition);
         var request = new CaptureObservationRequest(
             ContractVersion: 1,
-            source.SourceSessionId,
+            source.SourceIdentity.ExternalSessionId,
             source.SourcePosition,
             ToWireLocator(source.Locator),
             isObjectRecord ? JsonAdapterHelpers.SourceTimestamp(record) : null,
@@ -72,7 +72,8 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 MaterialKind(source.MaterialKind)),
             Identity,
             record.Clone(),
-            events);
+            events,
+            SourceIdentity: source.SourceIdentity);
         return new CaptureSourcePositionOutcome.Terminal(source.SourcePosition, request);
     }
 

@@ -29,8 +29,8 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             [
                 "tool_call", "tool_call", "tool_result", "tool_result",
                 "tool_call", "tool_result", "tool_call", "annotation",
-                "tool_call", "annotation", "tool_result", "tool_result",
-                "error", "error",
+                "tool_call", "annotation", "annotation", "tool_result",
+                "annotation", "tool_result", "error", "error",
                 "tool_call", "tool_result", "tool_call", "tool_result",
                 "tool_call", "tool_result", "tool_call", "tool_result",
                 "tool_result", "tool_call"
@@ -43,8 +43,9 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                 "tool_call:custom-gamma", "tool_result:custom-gamma",
                 "tool_call:exec-delta", "view:exec_command_begin",
                 "tool_call:patch-epsilon", "view:patch_apply_begin",
-                "tool_result:patch-epsilon", "tool_result:exec-delta",
-                "error/12", "error/13", "tool_call:local-zeta",
+                "view:patch_apply_end", "tool_result:patch-epsilon",
+                "view:exec_command_end", "tool_result:exec-delta",
+                "error/14", "error/15", "tool_call:local-zeta",
                 "tool_result:local-zeta", "tool_call:search-eta",
                 "tool_result:search-eta", "tool_call:web-theta",
                 "tool_result:web-theta", "tool_call:image-iota",
@@ -72,7 +73,10 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         Assert.Equal("alpha output", events[3].Payload.GetProperty("output").GetString());
         Assert.Equal(JsonValueKind.Array, events[5].Payload.GetProperty("output").ValueKind);
         Assert.Equal(
-            ["exec_command_begin", "patch_apply_begin"],
+            [
+                "exec_command_begin", "patch_apply_begin",
+                "patch_apply_end", "exec_command_end"
+            ],
             events.Where(item => item.Kind == "annotation")
                 .Select(item => item.Payload.GetProperty("view").GetString()));
         Assert.Equal(
@@ -88,21 +92,34 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
              "succeeded", "succeeded", "succeeded", "failed", "interrupted"],
             new[]
             {
-                events[2], events[3], events[5], events[10], events[11],
-                events[15], events[17], events[19], events[21], events[22]
+                events[2], events[3], events[5], events[11], events[13],
+                events[17], events[19], events[21], events[23], events[24]
             }
                 .Select(item => item.Payload.GetProperty("outcome").GetString()));
         Assert.All(
             new[]
             {
-                events[2], events[3], events[5], events[10], events[11],
-                events[15], events[17], events[19], events[21], events[22]
+                events[2], events[3], events[5], events[11], events[13],
+                events[17], events[19], events[21], events[23], events[24]
             },
             result => Assert.Equal(
                 result.Payload.GetProperty("callId").GetString(),
                 Assert.Single(result.Relationships!).Target.NativeId));
-        Assert.Contains("interruption", events[12].Payload.GetProperty("error").GetString());
-        Assert.Equal("synthetic terminal error", events[13].Payload
+        Assert.All(
+            events.Where(item => item.Kind is "tool_call" or "tool_result"),
+            item => Assert.Equal("unknown", item.Actor));
+        Assert.Equal(
+            JsonValueKind.Null,
+            events[22].Payload.GetProperty("arguments").ValueKind);
+        Assert.Equal(
+            JsonValueKind.Null,
+            events[21].Payload.GetProperty("output").ValueKind);
+        Assert.True(
+            source[20].SourcePayload.GetProperty("payload")
+                .GetProperty("__missing_arguments")
+                .GetProperty("must_not_be_promoted").GetBoolean());
+        Assert.Contains("interruption", events[14].Payload.GetProperty("error").GetString());
+        Assert.Equal("synthetic terminal error", events[15].Payload
             .GetProperty("error").GetString());
 
         string first = JsonSerializer.Serialize(events, WebJson);
@@ -1238,12 +1255,6 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             "message", "message", "tool_call", "tool_result", "tool_result",
             "error", "compaction", "lifecycle", "opaque"
         ];
-        string[] expectedActors =
-        [
-            "user", "assistant", "assistant", "tool", "tool",
-            "harness", "harness", "harness", "unknown"
-        ];
-
         foreach (var (adapter, fixture) in cases)
         {
             var source = await JsonlSourceReader.ReadAsync(
@@ -1259,6 +1270,17 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             Assert.Equal(
                 expectedKinds,
                 terminal.Select(outcome => Assert.Single(outcome.Observation.Events).Kind));
+            string[] expectedActors = adapter.Harness == "codex"
+                ?
+                [
+                    "user", "assistant", "unknown", "unknown", "unknown",
+                    "harness", "harness", "harness", "unknown"
+                ]
+                :
+                [
+                    "user", "assistant", "assistant", "tool", "tool",
+                    "harness", "harness", "harness", "unknown"
+                ];
             Assert.Equal(
                 expectedActors,
                 terminal.Select(outcome => Assert.Single(outcome.Observation.Events).Actor));

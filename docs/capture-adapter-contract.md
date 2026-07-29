@@ -97,11 +97,11 @@ Adapters are versioned tolerant tagged unions:
 - Codex `function_call`/`function_call_output`,
   `custom_tool_call`/`custom_tool_call_output`, specialized model-facing
   `local_shell_call`, `tool_search_call`/`tool_search_output`,
-  `web_search_call`, and `image_generation_call` response items, plus the
-  persisted exec-command and patch-apply `event_msg` terminal result records
-  retain `call_id` (falling back to an explicitly stated item `id`) in both the
-  event payload and deterministic part key. Duplicate begin/lifecycle views
-  remain annotations rather than second canonical calls.
+  `web_search_call`, and `image_generation_call` response items retain
+  `call_id` (falling back to an explicitly stated item `id`) in both the event
+  payload and deterministic part key. Persisted exec-command and patch-apply
+  `event_msg` begin/end records remain evidence-bearing annotations rather than
+  duplicate canonical calls or results.
   Results carry a `result_for` relationship to that same native identity, so
   parallel and out-of-order observations never pair by adjacency. Arguments
   and input accept structured values or JSON-encoded strings and normalize to

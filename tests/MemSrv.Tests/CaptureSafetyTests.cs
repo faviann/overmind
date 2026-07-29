@@ -454,6 +454,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     [InlineData("3")]
     [InlineData("4")]
     [InlineData("5")]
+    [InlineData("6")]
     public async Task OversizedCodexAdapterUpgradeRetryUsesTheOriginalContentSignature(
         string acceptedAdapterVersion)
     {
@@ -491,7 +492,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             binding,
             accepted with
             {
-                Adapter = accepted.Adapter with { Version = "6" }
+                Adapter = accepted.Adapter with { Version = "7" }
             });
 
         Assert.Equal("new", first.Status);
@@ -502,7 +503,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 binding,
                 accepted with
                 {
-                    Adapter = accepted.Adapter with { Version = "6" },
+                    Adapter = accepted.Adapter with { Version = "7" },
                     SourcePayload = JsonSerializer.SerializeToElement(new
                     {
                         message = "changed source record",

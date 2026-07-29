@@ -142,14 +142,12 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
     }
 
     [Fact]
-    public async Task CodexCompactionPathsUseTheirPublicApiAndOperatorReceiptSeams()
+    public async Task CodexCompactionHooksUseTheirPublicApiAndOperatorReceiptSeams()
     {
         string credential = $"mcap_{Guid.NewGuid():N}";
         string stableName = $"codex-compaction-{Guid.NewGuid():N}";
         string credentialPath = Path.Combine(
             Path.GetTempPath(), $"codex-compaction-key-{Guid.NewGuid():N}");
-        string stateDirectory = Path.Combine(
-            Path.GetTempPath(), $"codex-compaction-state-{Guid.NewGuid():N}");
         await File.WriteAllTextAsync(credentialPath, credential);
         try
         {
@@ -218,157 +216,10 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                 Assert.Equal(observationUuid, retry.GetProperty("observationUuid").GetGuid());
             }
 
-            var rolloutCases = new[]
-            {
-                (
-                    Fixture: "codex-cli-0.77.compaction.synthetic.jsonl",
-                    History: "Canonical history before old-shape compaction.",
-                    Summary:
-                        """{"role":"user","content":"Old-shape compacted summary."}""",
-                    ReplacementHistory:
-                        """[{"type":"message","role":"user","content":"Old-shape replacement evidence."}]""",
-                    OldShape: true),
-                (
-                    Fixture: "codex-cli-0.144.compaction.synthetic.jsonl",
-                    History: "Canonical history before new-shape compaction.",
-                    Summary:
-                        """{"role":"user","content":[{"type":"input_text","text":"New-shape compacted summary."}]}""",
-                    ReplacementHistory:
-                        """[{"type":"message","role":"developer","content":"New-shape replacement evidence."}]""",
-                    OldShape: false)
-            };
-            var state = new FileCaptureRuntimeState(stateDirectory);
-            foreach (var item in rolloutCases)
-            {
-                string rolloutFixture = Path.Combine(
-                    _root, "fixtures/adapter-conformance", item.Fixture);
-                string sourceStream = $"codex-rollout-{Guid.NewGuid():N}";
-                await CodexCaptureClaimer.ClaimCompletedAsync(
-                    adapter,
-                    rolloutFixture,
-                    sourceStream,
-                    state,
-                    SafetyGate());
-                CaptureRuntimeStreamState stream = Assert.Single(
-                    (await state.ReadAsync()).Streams,
-                    candidate => candidate.SourceStream == sourceStream);
-                var receipts = await DisabledCaptureRuntime.RunClaimedFixtureAsync(
-                    adapter,
-                    rolloutFixture,
-                    sourceStream,
-                    stream.Queue,
-                    new Uri(_baseUrl),
-                    credential,
-                    SafetyGate(),
-                    (_, _, _) => Task.CompletedTask);
-
-                Assert.Equal(3, receipts.Count);
-                var canonical = receipts.Select(receipt =>
-                        JsonDocument.Parse(receipt).RootElement.Clone())
-                    .ToArray();
-                Assert.All(
-                    canonical,
-                    receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
-                Assert.Equal(
-                    [0L, 1L, 2L],
-                    canonical.Select(item =>
-                        item.GetProperty("sourcePosition").GetInt64()));
-                Assert.All(canonical, receipt =>
-                {
-                    JsonElement source = receipt.GetProperty("observation")
-                        .GetProperty("source");
-                    Assert.Equal(JsonValueKind.Null, source.GetProperty("harnessVersion").ValueKind);
-                    Assert.Equal(
-                        "4",
-                        receipt.GetProperty("observation").GetProperty("adapter")
-                            .GetProperty("version").GetString());
-                });
-
-                JsonElement historyEnvelope = await ReadOperatorReceiptAsync(canonical[0]);
-                Assert.Equal(
-                    item.History,
-                    historyEnvelope.GetProperty("event").GetProperty("payload")
-                        .GetProperty("text").GetString());
-
-                JsonElement completionEnvelope = await ReadOperatorReceiptAsync(canonical[1]);
-                JsonElement completion = completionEnvelope.GetProperty("event")
-                    .GetProperty("payload");
-                Assert.Equal("completion", completion.GetProperty("phase").GetString());
-                Assert.True(completion.GetProperty("contextBoundary").GetBoolean());
-                AssertJsonShape(item.Summary, completion.GetProperty("summary"));
-                AssertJsonShape(
-                    item.ReplacementHistory,
-                    completion.GetProperty("replacementHistory"));
-                JsonElement windowMetrics = completion.GetProperty("windowMetrics");
-                if (item.OldShape)
-                {
-                    Assert.Equal(7, windowMetrics.GetProperty("windowId").GetInt32());
-                    Assert.Equal(
-                        ["windowId"],
-                        windowMetrics.EnumerateObject()
-                            .Select(property => property.Name)
-                            .Order());
-                }
-                else
-                {
-                    Assert.Equal(
-                        new[] { "firstWindowId", "previousWindowId", "windowId", "windowNumber" }
-                            .Order(),
-                        windowMetrics.EnumerateObject()
-                            .Select(property => property.Name)
-                            .Order());
-                    Assert.Equal(
-                        "window-first",
-                        windowMetrics.GetProperty("firstWindowId").GetString());
-                    Assert.Equal(
-                        "window-previous",
-                        windowMetrics.GetProperty("previousWindowId").GetString());
-                    Assert.Equal(
-                        "window-current",
-                        windowMetrics.GetProperty("windowId").GetString());
-                    Assert.Equal(4, windowMetrics.GetProperty("windowNumber").GetInt32());
-                }
-
-                JsonElement annotationEnvelope = await ReadOperatorReceiptAsync(canonical[2]);
-                Assert.Equal(
-                    "annotation",
-                    annotationEnvelope.GetProperty("event").GetProperty("kind").GetString());
-                Assert.Equal(
-                    "context_compacted",
-                    annotationEnvelope.GetProperty("event").GetProperty("payload")
-                        .GetProperty("view").GetString());
-
-                var retries = await DisabledCaptureRuntime.RunClaimedFixtureAsync(
-                    adapter,
-                    rolloutFixture,
-                    sourceStream,
-                    stream.Queue,
-                    new Uri(_baseUrl),
-                    credential,
-                    SafetyGate(),
-                    (_, _, _) => Task.CompletedTask);
-                var retryReceipts = retries.Select(retry =>
-                        JsonDocument.Parse(retry).RootElement.Clone())
-                    .ToArray();
-                Assert.All(
-                    retryReceipts,
-                    retry => Assert.Equal(
-                        "already_accepted",
-                        retry.GetProperty("status").GetString()));
-                Assert.Equal(
-                    canonical.Select(receipt =>
-                        receipt.GetProperty("observationUuid").GetGuid()),
-                    retryReceipts.Select(receipt =>
-                        receipt.GetProperty("observationUuid").GetGuid()));
-            }
         }
         finally
         {
             File.Delete(credentialPath);
-            if (Directory.Exists(stateDirectory))
-            {
-                Directory.Delete(stateDirectory, recursive: true);
-            }
         }
     }
 
@@ -1162,14 +1013,6 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             CaptureSourceMaterialKind.PersistedRecord,
             JsonDocument.Parse(json).RootElement.Clone(),
             isTerminal);
-
-    private async Task<JsonElement> ReadOperatorReceiptAsync(JsonElement receipt)
-    {
-        Guid observationUuid = receipt.GetProperty("observationUuid").GetGuid();
-        return JsonDocument.Parse(
-            await RunMemCtlAsync("capture", "receipt", observationUuid.ToString()))
-            .RootElement.Clone();
-    }
 
     private static void AssertJsonShape(string expectedJson, JsonElement actual)
     {

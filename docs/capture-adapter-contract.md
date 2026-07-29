@@ -44,7 +44,25 @@ Adapters are versioned tolerant tagged unions:
 - known discriminators map to canonical message, tool call/result, error,
   compaction, lifecycle, and other earned event kinds;
 - unsupported record or content variants become `opaque` events and retain
-  their scanned source representation;
+  their complete scanned source representation, including discriminators,
+  additive fields, and safety-redacted sensitive evidence after ingestion;
+- Codex response items explicitly tagged `reasoning` preserve explicitly tagged
+  `summary_text` and `reasoning_text` blocks as canonical `reasoning`; encrypted
+  content and signatures remain source evidence and are never interpreted as
+  reasoning. Event kind and actor are independent: the reasoning discriminator
+  earns kind `reasoning`; a recognized explicit source-stated `user`,
+  `assistant`, `developer`, or `system` role supplies the actor for canonical
+  reasoning parts and opaque section evidence, while an absent or unrecognized
+  role remains `unknown`;
+- a present non-array Codex reasoning `summary` or `content` section remains a
+  deterministic `opaque` event with its complete source shape and discriminator,
+  even when the other section yields canonical reasoning; a missing section
+  yields no event;
+- Codex `event_msg/context_compacted` is the duplicate lifecycle boundary view
+  paired with one canonical `compacted` summary/history record, so it remains
+  one evidence-bearing `annotation` with actor `harness`, not a second
+  compaction event or an opaque record; both observations preserve their
+  complete scanned source evidence;
 - unknown additive fields remain in `sourcePayload`;
 - content and output accept string or array forms;
 - message content objects become canonical parts only when a known text-part
@@ -85,6 +103,9 @@ The synthetic, version-labelled families are:
 - `fixtures/adapter-conformance/codex-cli-0.144.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.messages.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.context.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.145.reasoning.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.145.opaque.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.145.annotations.synthetic.jsonl`
 - `fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl`
 
 The Codex and Claude general families pass through the same conformance
@@ -96,7 +117,12 @@ messages, deterministic content-part fan-out, and duplicate UI-view
 annotations. The Codex context family covers session/turn scope, complete
 additive setting preservation, explicitly exposed base-instruction evidence,
 observation-local model/provider and CLI-version provenance, and the three
-non-fallback clocks.
+non-fallback clocks. The Codex 0.145 additive families cover source-exposed
+reasoning, mixed supported and present-but-non-array reasoning sections,
+complete opaque signature/encrypted/additive metadata, complete unsupported
+record and content evidence, and evidence-bearing duplicate lifecycle/reasoning
+views retained as annotations, including the `event_msg/context_compacted`
+boundary view paired with canonical `compacted` summary/history evidence.
 
 `CodexJsonlAdapter` is the only adapter referenced by the separately built
 disabled tracer image. `DisposableClaudeJsonlAdapter` is defined in the test

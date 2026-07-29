@@ -1,0 +1,4 @@
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"turn_started","turn_id":"synthetic-turn-1","context_window":200000,"futureLifecycleField":{"retained":true}}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"agent_reasoning","text":"Synthetic duplicate reasoning view.","futureReasoningViewField":{"retained":true}}}
+{"cli_version":"0.145.synthetic","type":"compacted","payload":{"type":"compacted","trigger":"auto","outcome":"succeeded","summary":[{"text":"Synthetic paired compacted summary.","futureSummaryEvidence":{"retained":true}}],"history":[{"role":"user","content":"Synthetic retained pre-compaction history.","futureHistoryEvidence":{"retained":true}}],"metrics":{"beforeTokens":144,"afterTokens":45},"futureCompactionField":{"retained":true}}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"context_compacted","futureCompactionBoundaryField":{"retained":true,"nested":{"boundary":"synthetic"}}}}

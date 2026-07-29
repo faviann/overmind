@@ -124,7 +124,7 @@ case "$AFK_TEST_SCENARIO" in
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     fi
     ;;
-  live-add|static-blocked|dependency-unreadable|blocked-then-unblocked|dependency-drain|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing|closeout-progresses)
+  live-add|static-blocked|dependency-unreadable|blocked-then-unblocked|dependency-drain|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing|closeout-progresses|closeout-validator-unavailable|closeout-body-unreadable)
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   drain|force)
     if grep -qx claim-42 "$AFK_TEST_STATE"; then
@@ -265,7 +265,7 @@ case "$AFK_TEST_SCENARIO" in
     else
       kill -TERM "$PPID"
     fi ;;
-  static-blocked|dependency-unreadable|dependency-race|claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing|closeout-progresses)
+  static-blocked|dependency-unreadable|dependency-race|claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing|closeout-progresses|closeout-validator-unavailable|closeout-body-unreadable)
     kill -TERM "$PPID" ;;
   chain|paused-lane|paused-only|idle-artifact|idle-artifact-label-fail|idle-discovery-uncertain|ci-retry-pass|ci-repeat-lane|ci-timeout-only|nonblocking-discovery|blocking-discovery-lane|uncertain-discovery-only)
     kill -TERM "$PPID" ;;
@@ -381,7 +381,9 @@ case "$*" in
     fi ;;
   pr\ view\ *\ --json\ body\ --jq\ .body)
     pr="${3}"; issue="$((pr - 100))"
-    if [[ "$AFK_TEST_SCENARIO" == closeout-pr160 ]]; then
+    if [[ "$AFK_TEST_SCENARIO" == closeout-body-unreadable ]]; then
+      exit 1
+    elif [[ "$AFK_TEST_SCENARIO" == closeout-pr160 ]]; then
       printf 'Closes #%s\n\n## Acceptance closure\n\n| Criterion | Production path | Exact artifact/mode/seam | Evidence | Status |\n|---|---|---|---|---|\n| Scripted criterion | runner | public CLI | output | tested |\n\n## Workflow telemetry\n\n- Final workflow outcome: Closes\n' "$issue"
     elif [[ "$AFK_TEST_SCENARIO" == closeout-pr162 ]]; then
       printf 'Closes #%s\n\n## Closure gate\n\n| Mechanism | Acceptance criterion |\n|---|---|\n| Renderer | Scripted criterion |\n\n| Final workflow outcome | Closes |\n' "$issue"
@@ -447,6 +449,7 @@ chmod +x "$root/tools/"*.sh "$root/node_modules/.bin/tsx" "$adapters/"* \
 setup_scenario() {
   rm -rf "$repo" "$remote"
   mkdir -p "$repo"
+  chmod +x "$skills/work-on/scripts/validate-closeout-body.sh"
   git init --bare --quiet "$remote"
   git -C "$repo" init --quiet --initial-branch=main
   git -C "$repo" config user.email watcher-test@example.invalid
@@ -487,6 +490,9 @@ run_watcher() {
 run_foreground() {
   local scenario="$1"
   setup_scenario
+  if [[ "$scenario" == closeout-validator-unavailable ]]; then
+    chmod -x "$skills/work-on/scripts/validate-closeout-body.sh"
+  fi
   if ! (run_watcher "$@") >"$fixture/$scenario.out" 2>&1; then
     printf 'FAIL[%s]\n' "$scenario" >&2
     cat "$fixture/$scenario.out" >&2
@@ -583,6 +589,24 @@ grep -q \
 [[ "$(grep -c '^gh pr view 142 --json body --jq .body$' "$events")" == 1 ]]
 ! grep -q '^gh pr merge 142 --merge$' "$events"
 ! grep -q '^gh pr checks 142 ' "$events"
+
+run_foreground closeout-validator-unavailable
+[[ "$(grep -c '^gh pr edit 142 --add-label afk-review$' "$events")" == 1 ]]
+grep -Fq \
+  "AFK issue #42 closeout read-back refused: shared validator is unavailable or not executable: $skills/work-on/scripts/validate-closeout-body.sh; pull request #142 preserved with afk-review" \
+  "$fixture/closeout-validator-unavailable.out"
+! grep -q '^gh pr view 142 --json body --jq .body$' "$events"
+! grep -q '^gh pr checks 142 ' "$events"
+! grep -q '^gh pr merge 142 --merge$' "$events"
+
+run_foreground closeout-body-unreadable
+[[ "$(grep -c '^gh pr edit 142 --add-label afk-review$' "$events")" == 1 ]]
+grep -Fq \
+  'AFK issue #42 closeout read-back refused: could not read pull request #142 body; pull request preserved with afk-review' \
+  "$fixture/closeout-body-unreadable.out"
+[[ "$(grep -c '^gh pr view 142 --json body --jq .body$' "$events")" == 1 ]]
+! grep -q '^gh pr checks 142 ' "$events"
+! grep -q '^gh pr merge 142 --merge$' "$events"
 
 run_foreground chain
 [[ "$(grep -c '^agent ' "$events")" == 2 ]] || {

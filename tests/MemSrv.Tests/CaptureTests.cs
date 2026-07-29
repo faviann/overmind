@@ -143,7 +143,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     envelope.GetProperty("observation").GetProperty("observationUuid").GetGuid());
                 Assert.Equal(
                     [
-                        "observationUuid", "sourceStreamUuid", "source", "locator",
+                        "observationUuid", "sourceStreamUuid", "sourceIdentity", "source", "locator",
                         "sourceTimestamp", "routeEvidence", "adapter",
                         "safeSourcePayload", "scan", "capturedAt"
                     ],
@@ -517,6 +517,180 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ExplicitChildIdentityIsCanonicalOnHttpAndMemCtlAndRejectsAContradictoryLegacyClaim()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        await EnrollAsync($"codex-explicit-identity-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var contradictory = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                "different-legacy-session",
+                externalSessionId,
+                childId,
+                0,
+                $"identity-{Guid.NewGuid():N}",
+                "4",
+                null,
+                "canonical"));
+        Assert.Equal(HttpStatusCode.BadRequest, contradictory.StatusCode);
+
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                null,
+                externalSessionId,
+                childId,
+                0,
+                $"identity-{Guid.NewGuid():N}",
+                "5",
+                "0.144.synthetic",
+                "canonical"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var receipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            externalSessionId,
+            receipt.GetProperty("observation")
+                .GetProperty("sourceIdentity").GetProperty("externalSessionId").GetString());
+        Assert.Equal(
+            childId,
+            receipt.GetProperty("observation")
+                .GetProperty("sourceIdentity").GetProperty("childId").GetString());
+
+        var envelope = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "receipt",
+            receipt.GetProperty("observationUuid").GetGuid().ToString())).RootElement;
+        Assert.Equal(
+            externalSessionId,
+            envelope.GetProperty("observation")
+                .GetProperty("sourceIdentity").GetProperty("externalSessionId").GetString());
+        Assert.Equal(
+            childId,
+            envelope.GetProperty("observation")
+                .GetProperty("sourceIdentity").GetProperty("childId").GetString());
+    }
+
+    [Fact]
+    public async Task CodexAdapterUpgradeRetryConvergesButChangedSourceContentStillConflicts()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-upgrade-{Guid.NewGuid():N}";
+        await EnrollAsync($"codex-adapter-upgrade-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "4",
+                "0.144.synthetic",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var acceptedReceipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        var falseProvenanceRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "5",
+                "false-version",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.Conflict, falseProvenanceRetry.StatusCode);
+
+        var upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "5",
+                "0.144.synthetic",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        var retryReceipt = await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+
+        var changedSource = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "5",
+                "0.144.synthetic",
+                "changed source record"));
+        Assert.Equal(HttpStatusCode.Conflict, changedSource.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("3")]
+    [InlineData("4")]
+    public async Task CodexAdapterUpgradeRetryConvergesFromEveryPreUpgradeAdapterVersion(
+        string preUpgradeAdapterVersion)
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-upgrade-version-{Guid.NewGuid():N}";
+        await EnrollAsync(
+            $"codex-adapter-upgrade-version-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                preUpgradeAdapterVersion,
+                "0.144.synthetic",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var acceptedReceipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        var upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "5",
+                "0.144.synthetic",
+                "same source record"));
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        var retryReceipt = await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Fact]
     public async Task DisabledTracerImportsSyntheticCodexMessageAndToolExchange()
     {
         var captureKey = CaptureCredential();
@@ -695,6 +869,117 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task PackagedTracerChildHistoryConvergesOnBindingDerivedCanonicalIdentities()
+    {
+        string stableName = $"codex-child-history-{Guid.NewGuid():N}";
+        string captureKey = CaptureCredential();
+        await EnrollAsync(stableName, captureKey);
+        string root = Path.Combine(
+            Path.GetTempPath(), $"codex-child-history-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "07", "29");
+        string transcript = Path.Combine(sessions, "nested-child.jsonl");
+        string firstState = Path.Combine(root, "first-state");
+        string replayState = Path.Combine(root, "replay-state");
+        Directory.CreateDirectory(sessions);
+        File.Copy(
+            Path.Combine(
+                _root,
+                "fixtures",
+                "adapter-conformance",
+                "codex-cli-0.144.nested-child.synthetic.jsonl"),
+            transcript);
+
+        Dictionary<string, string> EnvironmentFor(string stateDirectory) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = root,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        try
+        {
+            JsonElement[] first;
+            using (var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(firstState)))
+            {
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+                first =
+                [
+                    await ReadTracerReceiptAsync(process),
+                    await ReadTracerReceiptAsync(process)
+                ];
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+                await stderr;
+            }
+
+            JsonElement[] replay;
+            using (var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(replayState)))
+            {
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+                replay =
+                [
+                    await ReadTracerReceiptAsync(process),
+                    await ReadTracerReceiptAsync(process)
+                ];
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+                await stderr;
+            }
+
+            Assert.Equal(["new", "new"], first.Select(ItemStatus));
+            Assert.Equal(
+                ["already_accepted", "already_accepted"],
+                replay.Select(ItemStatus));
+            Assert.Equal(
+                first.Select(CanonicalIdentity),
+                replay.Select(CanonicalIdentity));
+
+            JsonElement envelope = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                first[0].GetProperty("observationUuid").GetGuid().ToString()))
+                .RootElement;
+            Assert.Equal(
+                $"capture:{stableName}",
+                envelope.GetProperty("event").GetProperty("agentId").GetString());
+            Assert.Equal(
+                first[0].GetProperty("events")[0].GetProperty("sessionId").GetString(),
+                envelope.GetProperty("event").GetProperty("sessionId").GetString());
+            Assert.StartsWith(
+                "capture:v1:",
+                envelope.GetProperty("event").GetProperty("sessionId").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+
+        static string? ItemStatus(JsonElement receipt) =>
+            receipt.GetProperty("status").GetString();
+
+        static string CanonicalIdentity(JsonElement receipt)
+        {
+            JsonElement observation = receipt.GetProperty("observation");
+            JsonElement capturedEvent = receipt.GetProperty("events")[0];
+            return string.Join(
+                ":",
+                observation.GetProperty("sourceStreamUuid").GetGuid(),
+                receipt.GetProperty("observationUuid").GetGuid(),
+                capturedEvent.GetProperty("traceUuid").GetGuid(),
+                capturedEvent.GetProperty("sessionId").GetString());
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerAndOperatorExposeVersionedCodexMessagePartsAndRetryIdentities()
     {
         const string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
@@ -841,7 +1126,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "4",
+                    "5",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -869,7 +1154,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "4",
+                    "5",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -1032,7 +1317,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 Assert.Equal("new", receipt.GetProperty("status").GetString());
                 Assert.Equal(
-                    "4",
+                    "5",
                     receipt.GetProperty("observation").GetProperty("adapter")
                         .GetProperty("version").GetString());
             });
@@ -1571,7 +1856,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 JsonElement observation = receipt.GetProperty("observation");
                 Assert.Equal(
-                    "4",
+                    "5",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
                 JsonElement capturedEvent =
                     Assert.Single(receipt.GetProperty("events").EnumerateArray());
@@ -3674,6 +3959,54 @@ public sealed class CaptureTests : HttpSeamTestBase
                     }
                 } }
         }
+        };
+
+    private static object ExplicitIdentityObservation(
+        string? sourceSessionId,
+        string externalSessionId,
+        string childId,
+        long position,
+        string nativeId,
+        string adapterVersion,
+        string? harnessVersion,
+        string message) => new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourceIdentity = new { externalSessionId, childId },
+            sourcePosition = position,
+            locator = new { kind = "native_id", nativeId },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion,
+                recordType = "session_meta",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload = new
+            {
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = childId,
+                    thread_source = "subagent",
+                    cli_version = "0.144.synthetic",
+                    message
+                }
+            },
+            events = new[]
+            {
+                new
+                {
+                    partKey = "metadata/0",
+                    partOrder = 0,
+                    kind = "lifecycle",
+                    actor = "harness",
+                    payload = new { message }
+                }
+            }
         };
 
     private static object RoutedObservation(

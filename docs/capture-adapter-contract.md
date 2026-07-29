@@ -9,7 +9,7 @@ server.
 
 `TrustedSourceObservation` identifies one source record or hook fact with:
 
-- the source session and numeric source position;
+- an explicit source identity tuple and numeric source position;
 - a native-id or verified byte-range locator;
 - `persisted_record` or `hook_fact` material provenance;
 - the source payload;
@@ -36,6 +36,35 @@ are never filled from adjacent records or harness stereotypes. Nullable
 provenance stays null, unavailable actors use the canonical `unknown` role,
 unavailable tool outcomes use `unknown`, and absent relationships remain an
 empty list.
+
+`CaptureSourceIdentity` contains the harness-native external session identity
+and an optional observed child identity. It deliberately excludes parent and
+fork facts. The server combines this tuple with the authenticated capture
+binding to derive the canonical capture stream and trace session; imported
+content never supplies the represented agent identity.
+
+The HTTP compatibility field `sourceSessionId` may be omitted when
+`sourceIdentity` is present. When both are present and nonblank,
+`sourceSessionId` must equal `sourceIdentity.externalSessionId`; contradictory
+identity claims are rejected before ingestion.
+
+For Codex rollouts, discovery reads `session_meta.payload.session_id` (falling
+back to the legacy `id` compatibility shape) as the external session identity.
+`payload.id` becomes `childId` only when tagged `source` and/or
+`thread_source: "subagent"` explicitly classifies the rollout as a child.
+`parent_thread_id` and `forked_from_id` remain independent source provenance
+and never classify or mint identity. Contradictory explicit classifiers never
+produce a guessed identity: that rollout carries its identity failure into its
+own scan, where it is reported and skipped, and every other enumerated stream
+still runs.
+
+The canonical import receipt and `memctl capture receipt` expose the source
+identity loaded from the durable stream. An adapter upgrade may normalize
+adapter/source provenance without changing the immutable source record; the
+server recognizes the Codex v3/v4→v5 signature transition narrowly — those
+adapters derive identical source provenance, so only the adapter version and
+the signature's identity shape changed — while a changed locator or changed
+source content remains a conflict.
 
 ## Tolerant parsing
 
@@ -106,6 +135,11 @@ The synthetic, version-labelled families are:
 - `fixtures/adapter-conformance/codex-cli-0.145.reasoning.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.opaque.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.annotations.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.77.parent-only.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.90.fork-only.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.120.parent-fork.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.144.nested-child.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.144.absent-relationship.synthetic.jsonl`
 - `fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl`
 
 The Codex and Claude general families pass through the same conformance

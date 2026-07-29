@@ -61,7 +61,8 @@ async Task ScanAndDeliverAsync(
         safetyGate,
         cancellationToken,
         transcript.TerminalAtEndOfFile,
-        transcript.TranscriptIdentity);
+        transcript.TranscriptIdentity,
+        transcript.SourceIdentity);
 
     CaptureRuntimeStreamState? stream = (await runtimeState.ReadAsync(cancellationToken))
         .Streams.SingleOrDefault(value =>
@@ -97,7 +98,8 @@ async Task ScanAndDeliverAsync(
                         },
                         token,
                         transcript.TerminalAtEndOfFile,
-                        transcript.TranscriptIdentity);
+                        transcript.TranscriptIdentity,
+                        transcript.SourceIdentity);
                 if (receiptState is null || responses.Count != 1)
                 {
                     throw new InvalidDataException(

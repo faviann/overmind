@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-01T00:00:00Z","type":"session_meta","payload":{"session_id":"01970000-0000-7000-8000-000000000001","id":"01970000-0000-7000-8000-000000000001","parent_thread_id":"01970000-0000-7000-8000-000000000000","cli_version":"0.77.synthetic","source":{"subagent":{"other":"legacy-child"}}}}
+{"timestamp":"2026-07-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":"parent-only child"}}

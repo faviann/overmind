@@ -35,6 +35,12 @@ with a compact whole-observation omission, that representation is scanned and
 persisted, and the checkpoint advances. `NeverStoreGate` still enforces the
 limit through `AssertObservationWithinBudget`: it protects the compact
 representation inside ingestion and remains fail closed for direct callers.
+The compact form retains only the authenticated harness and the source
+identity/position/locator needed for canonical identity and keyed retry
+semantics, plus fixed omission provenance. Optional timestamp, descriptive
+source/adapter metadata, route evidence, source payload, and original semantic events
+cannot keep the omission above the limit. Required identity and locator values
+are neither truncated nor replaced by unkeyed content fingerprints.
 Operational scanner failures while processing either representation still
 persist nothing and do not advance the checkpoint.
 

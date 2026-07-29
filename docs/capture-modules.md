@@ -208,7 +208,15 @@ history or replace an earlier queued or canonical record.
 The Codex claimer applies the fixed 1,000,000-byte production transport bound
 before a candidate enters the local durable queue. A runtime observation above
 that bound becomes a compact whole-observation omission before durable queueing
-or transmission, and the claimer scans that bounded representation. An
+or transmission, and the claimer mechanically verifies that the omission
+itself fits the active bound before it can be claimed. The omission retains the
+authenticated harness, source identity, source position, and locator required
+for ingestion and idempotency. Its source timestamp, source/adapter descriptive
+metadata, route evidence, and original semantic content are absent; the
+policy-owned omission provenance repeats the required source-identity tuple but
+contains no source-content digest or excerpt. A mandatory identity or locator
+that cannot fit is refused rather than truncated or fingerprinted. The claimer
+then scans that bounded representation. An
 observation within the bound retains its original payload and is scanned as
 such. The existing disabled delivery runtime reconstructs the same bounded
 representation, scans it again before it leaves the tracer process, and the

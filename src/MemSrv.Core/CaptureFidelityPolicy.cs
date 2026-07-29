@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace MemSrv.Core;
@@ -8,7 +9,7 @@ namespace MemSrv.Core;
 /// </summary>
 public static class CaptureFidelityPolicy
 {
-    public const string CurrentVersion = "capture-fidelity/2026-07-29.1";
+    public const string CurrentVersion = "capture-fidelity/2026-07-29.2";
     public const int ProductionTransportBytes = 1_000_000;
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
@@ -16,10 +17,26 @@ public static class CaptureFidelityPolicy
     public static CaptureObservationRequest ApplyTransportLimit(
         CaptureObservationRequest observation,
         long originalByteCount,
-        int maxTransportBytes = ProductionTransportBytes) =>
-        originalByteCount > maxTransportBytes
-            ? Omit(observation, TransportLimitReason, originalByteCount)
-            : observation;
+        int maxTransportBytes = ProductionTransportBytes)
+    {
+        if (originalByteCount <= maxTransportBytes)
+        {
+            return observation;
+        }
+
+        CaptureObservationRequest omitted = Omit(
+            observation, TransportLimitReason, originalByteCount);
+        int omittedByteCount = Encoding.UTF8.GetByteCount(
+            JsonSerializer.Serialize(omitted, CaptureLedger.JsonOptions));
+        if (omittedByteCount > maxTransportBytes)
+        {
+            throw new InvalidOperationException(
+                "The required capture source identity and locator cannot fit " +
+                $"within the {maxTransportBytes}-byte transport limit " +
+                $"({omittedByteCount} bytes required).");
+        }
+        return omitted;
+    }
 
     public static CaptureObservationCommand OmitForContentLimit(
         CaptureObservationCommand observation,
@@ -33,8 +50,11 @@ public static class CaptureFidelityPolicy
             observation.Locator.Kind);
         return observation with
         {
+            SourceTimestamp = null,
+            Source = CompactSource(observation.Source.Harness),
+            Adapter = CompactAdapter(),
             SourcePayload = provenance,
-            Events = [OmissionEvent(provenance)],
+            Events = [OmissionEvent()],
             RouteEvidence = null
         };
     }
@@ -53,8 +73,12 @@ public static class CaptureFidelityPolicy
             observation.Locator.Kind);
         return observation with
         {
+            SourceSessionId = null,
+            SourceTimestamp = null,
+            Source = CompactSource(observation.Source.Harness),
+            Adapter = CompactAdapter(),
             SourcePayload = provenance,
-            Events = [OmissionEvent(provenance)],
+            Events = [OmissionEvent()],
             RouteEvidence = null
         };
     }
@@ -84,13 +108,21 @@ public static class CaptureFidelityPolicy
             },
             CaptureLedger.JsonOptions);
 
-    private static CaptureEvent OmissionEvent(JsonElement provenance) =>
+    private static CaptureSource CompactSource(string harness) =>
+        new(harness, null, null, null, null, null);
+
+    private static CaptureAdapter CompactAdapter() =>
+        new("capture-fidelity-policy", CurrentVersion);
+
+    private static CaptureEvent OmissionEvent() =>
         new(
             "observation/omitted",
             0,
             "opaque",
             "harness",
-            provenance,
+            JsonSerializer.SerializeToElement(
+                new { },
+                CaptureLedger.JsonOptions),
             null,
             []);
 }

@@ -176,6 +176,86 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task RetainedMetadataBeyondInjectedContentLimitAdvancesAsABoundedOmission()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"codex-content-metadata-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        const string rawSentinel = "RAW-RETAINED-METADATA-MUST-NOT-BE-CANONICAL";
+        string oversized = string.Concat(Enumerable.Repeat(rawSentinel, 100));
+        JsonElement safePayload = JsonSerializer.SerializeToElement(new { safe = true });
+        var request = new CaptureObservationRequest(
+            1,
+            sourceSessionId,
+            0,
+            new CaptureLocator(
+                "native_id",
+                $"content-metadata-{Guid.NewGuid():N}",
+                null,
+                null,
+                null),
+            new CaptureSourceTimestamp(oversized, null),
+            new CaptureSource(
+                "codex",
+                oversized,
+                oversized,
+                oversized,
+                oversized,
+                oversized),
+            new CaptureAdapter(oversized, oversized),
+            safePayload,
+            [
+                new CaptureEvent(
+                    "metadata/0",
+                    0,
+                    "opaque",
+                    "harness",
+                    safePayload,
+                    null,
+                    [])
+            ],
+            SourceIdentity: new CaptureSourceIdentity(sourceSessionId));
+        CaptureObservationCommand command = CaptureObservationCommand.FromRequest(request);
+        const int contentBound = 2_048;
+        Assert.True(
+            Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(
+                command,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))) > contentBound);
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxObservationBytes = contentBound }));
+
+        CaptureImportReceipt receipt = await ingestion.ImportAsync(binding, command);
+
+        Assert.Equal("new", receipt.Status);
+        string canonical = JsonSerializer.Serialize(
+            receipt,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.True(Encoding.UTF8.GetByteCount(canonical) <= contentBound);
+        Assert.DoesNotContain(rawSentinel, canonical);
+        Assert.Equal(
+            "observation_exceeds_content_limit",
+            receipt.Observation.SafeSourcePayload.GetProperty("omission")
+                .GetProperty("reason").GetString());
+        CaptureImportReceipt retry = await ingestion.ImportAsync(binding, command);
+        Assert.Equal("already_accepted", retry.Status);
+        Assert.Equal(receipt.ObservationUuid, retry.ObservationUuid);
+        CaptureConflictException conflict = await Assert.ThrowsAsync<CaptureConflictException>(
+            () => ingestion.ImportAsync(
+                binding,
+                command with
+                {
+                    Source = command.Source with { Model = oversized + "-changed" }
+                }));
+        Assert.Equal("accepted_source_conflict", conflict.Reason);
+    }
+
+    [Fact]
     public async Task BudgetExhaustionPersistsNothingAndLeavesThePositionForTheNextRecord()
     {
         string captureKey = CaptureCredential();

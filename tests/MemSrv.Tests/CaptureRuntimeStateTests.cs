@@ -380,6 +380,89 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task RetainedMetadataBeyondTransportLimitIsCompactedWithinTheBoundBeforeClaim()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-metadata-omission-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        const string rawSentinel = "RAW-RETAINED-METADATA-MUST-NOT-BE-QUEUED";
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(stateDirectory);
+            const int transportBound = 1_024;
+            const string transcriptIdentity = "metadata-heavy-transcript";
+            IReadOnlyList<CaptureRuntimeQueueItem> claims =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new RetainedMetadataAdapter(rawSentinel),
+                    transcript,
+                    "metadata-heavy-stream",
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    transcriptIdentity: transcriptIdentity,
+                    maxTransportBytes: transportBound);
+
+            CaptureRuntimeQueueItem claim = Assert.Single(claims);
+            Assert.True(
+                Encoding.UTF8.GetByteCount(claim.RedactedSafeCandidate) <= transportBound);
+            Assert.DoesNotContain(rawSentinel, claim.RedactedSafeCandidate);
+            string durableState = await File.ReadAllTextAsync(
+                Path.Combine(stateDirectory, "capture-state.json"));
+            Assert.DoesNotContain(rawSentinel, durableState);
+            Assert.Equal(
+                claim.RedactedSafeCandidate,
+                Assert.Single(Assert.Single((await state.ReadAsync()).Streams).Queue)
+                    .RedactedSafeCandidate);
+
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            Task<string> received = Task.Run(async () =>
+            {
+                using TcpClient delivery =
+                    await listener.AcceptTcpClientAsync(timeout.Token);
+                await using NetworkStream stream = delivery.GetStream();
+                string requestBody = await ReadRequestAsync(stream, timeout.Token);
+                byte[] response = Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+                await stream.WriteAsync(response, timeout.Token);
+                return requestBody;
+            });
+
+            await DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                new RetainedMetadataAdapter(rawSentinel),
+                transcript,
+                "metadata-heavy-stream",
+                claims,
+                new Uri($"http://127.0.0.1:{port}"),
+                $"mcap_{Guid.NewGuid():N}",
+                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                (_, _, _) => Task.CompletedTask,
+                transcriptIdentity: transcriptIdentity,
+                maxTransportBytes: transportBound);
+            string request = await received.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(Encoding.UTF8.GetByteCount(request) <= transportBound);
+            Assert.DoesNotContain(rawSentinel, request);
+            Assert.Equal(
+                claim.RedactedSafeCandidate,
+                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"))
+                    .ScanJson(request).Redacted);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ClaimBuildsPrefixAndAdapterRecordsFromOneImmutableSourceSnapshot()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -1989,5 +2072,53 @@ public sealed class CaptureRuntimeStateTests
             CancellationToken cancellationToken = default) =>
             inner.DeliverAuthorizedAsync(
                 sourceStream, queued, deliverAsync, cancellationToken);
+    }
+
+    private sealed class RetainedMetadataAdapter(string rawSentinel) : ICaptureSourceAdapter
+    {
+        private readonly string _oversized = string.Concat(
+            Enumerable.Repeat(rawSentinel, 100));
+
+        public string Harness => "codex";
+        public CaptureAdapter Identity => new(_oversized, _oversized);
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var locator = Assert.IsType<CaptureSourceLocator.ByteRange>(source.Locator);
+            JsonElement payload = JsonSerializer.SerializeToElement(new { safe = true });
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    source.SourceIdentity.ExternalSessionId,
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        locator.Kind,
+                        null,
+                        locator.Offset,
+                        locator.Length,
+                        locator.SourceContentSha256),
+                    new CaptureSourceTimestamp(_oversized, null),
+                    new CaptureSource(
+                        Harness,
+                        _oversized,
+                        _oversized,
+                        _oversized,
+                        _oversized,
+                        _oversized),
+                    Identity,
+                    payload,
+                    [
+                        new CaptureEvent(
+                            "synthetic/0",
+                            0,
+                            "opaque",
+                            "harness",
+                            payload,
+                            null,
+                            [])
+                    ],
+                    SourceIdentity: source.SourceIdentity));
+        }
     }
 }

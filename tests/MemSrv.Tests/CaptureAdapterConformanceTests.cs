@@ -10,6 +10,111 @@ namespace MemSrv.Tests;
 public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 {
     [Fact]
+    public async Task CodexToolFamiliesRetainNativeIdentityContentAndExplicitOutcomes()
+    {
+        var adapter = new CodexJsonlAdapter();
+        string fixture = Path.Combine(
+            _root,
+            "fixtures/adapter-conformance/codex-cli-0.145.tools.synthetic.jsonl");
+        var source = await JsonlSourceReader.ReadAsync(
+            fixture, "synthetic-codex-tools", terminalAtEndOfFile: true);
+
+        CaptureEvent[] events = source
+            .Select(adapter.Adapt)
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .SelectMany(outcome => outcome.Observation.Events)
+            .ToArray();
+
+        Assert.Equal(
+            [
+                "tool_call", "tool_call", "tool_result", "tool_result",
+                "tool_call", "tool_result", "tool_call", "annotation",
+                "tool_call", "annotation", "tool_result", "tool_result",
+                "error", "error",
+                "tool_call", "tool_result", "tool_call", "tool_result",
+                "tool_call", "tool_result", "tool_call", "tool_result",
+                "tool_result", "tool_call"
+            ],
+            events.Select(item => item.Kind));
+        Assert.Equal(
+            [
+                "tool_call:function-alpha", "tool_call:function-beta",
+                "tool_result:function-beta", "tool_result:function-alpha",
+                "tool_call:custom-gamma", "tool_result:custom-gamma",
+                "tool_call:exec-delta", "view:exec_command_begin",
+                "tool_call:patch-epsilon", "view:patch_apply_begin",
+                "tool_result:patch-epsilon", "tool_result:exec-delta",
+                "error/12", "error/13", "tool_call:local-zeta",
+                "tool_result:local-zeta", "tool_call:search-eta",
+                "tool_result:search-eta", "tool_call:web-theta",
+                "tool_result:web-theta", "tool_call:image-iota",
+                "tool_result:image-iota", "tool_result:function-beta",
+                "tool_call:function-orphan"
+            ],
+            events.Select(item => item.PartKey));
+
+        Assert.Equal(
+            ["function-alpha", "function-beta", "function-beta", "function-alpha",
+             "custom-gamma", "custom-gamma", "exec-delta", "patch-epsilon",
+             "patch-epsilon", "exec-delta", "local-zeta", "local-zeta",
+             "search-eta", "search-eta", "web-theta", "web-theta",
+             "image-iota", "image-iota", "function-beta", "function-orphan"],
+            events.Where(item => item.Kind is "tool_call" or "tool_result").Select(item =>
+                item.Payload.GetProperty("callId").GetString()));
+        Assert.Equal("alpha", events[0].Payload.GetProperty("arguments")
+            .GetProperty("command").GetString());
+        Assert.Equal("beta", events[1].Payload.GetProperty("arguments")
+            .GetProperty("command").GetString());
+        Assert.Equal(JsonValueKind.Null, events[1].Payload.GetProperty("tool").ValueKind);
+        Assert.Equal("gamma", events[4].Payload.GetProperty("arguments")
+            .GetProperty("query").GetString());
+        Assert.Equal(JsonValueKind.Array, events[2].Payload.GetProperty("output").ValueKind);
+        Assert.Equal("alpha output", events[3].Payload.GetProperty("output").GetString());
+        Assert.Equal(JsonValueKind.Array, events[5].Payload.GetProperty("output").ValueKind);
+        Assert.Equal(
+            ["exec_command_begin", "patch_apply_begin"],
+            events.Where(item => item.Kind == "annotation")
+                .Select(item => item.Payload.GetProperty("view").GetString()));
+        Assert.Equal(
+            1,
+            events.Count(item => item.Kind == "tool_call"
+                && item.Payload.GetProperty("callId").GetString() == "exec-delta"));
+        Assert.Equal(
+            1,
+            events.Count(item => item.Kind == "tool_call"
+                && item.Payload.GetProperty("callId").GetString() == "patch-epsilon"));
+        Assert.Equal(
+            ["unknown", "succeeded", "failed", "denied", "succeeded",
+             "succeeded", "succeeded", "succeeded", "failed", "interrupted"],
+            new[]
+            {
+                events[2], events[3], events[5], events[10], events[11],
+                events[15], events[17], events[19], events[21], events[22]
+            }
+                .Select(item => item.Payload.GetProperty("outcome").GetString()));
+        Assert.All(
+            new[]
+            {
+                events[2], events[3], events[5], events[10], events[11],
+                events[15], events[17], events[19], events[21], events[22]
+            },
+            result => Assert.Equal(
+                result.Payload.GetProperty("callId").GetString(),
+                Assert.Single(result.Relationships!).Target.NativeId));
+        Assert.Contains("interruption", events[12].Payload.GetProperty("error").GetString());
+        Assert.Equal("synthetic terminal error", events[13].Payload
+            .GetProperty("error").GetString());
+
+        string first = JsonSerializer.Serialize(events, WebJson);
+        string retry = JsonSerializer.Serialize(
+            source.Select(adapter.Adapt)
+                .Cast<CaptureSourcePositionOutcome.Terminal>()
+                .SelectMany(outcome => outcome.Observation.Events),
+            WebJson);
+        Assert.Equal(first, retry);
+    }
+
+    [Fact]
     public async Task CodexVersionedCompactionFamiliesPreserveOperationsBoundaryAndEvidence()
     {
         var adapter = new CodexJsonlAdapter();
@@ -266,7 +371,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         Assert.Equal("turn_context", turnContext.Source.RecordType);
         Assert.Equal("gpt-5.6-terra", turnContext.Source.Model);
         Assert.Null(turnContext.Source.Provider);
-        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "6"), adapter.Identity);
+        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "7"), adapter.Identity);
     }
 
     [Fact]
@@ -622,7 +727,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         });
         Assert.All(
             terminal,
-            outcome => Assert.Equal("6", outcome.Observation.Adapter.Version));
+            outcome => Assert.Equal("7", outcome.Observation.Adapter.Version));
 
         CaptureObservationRequest session = terminal[0].Observation;
         CaptureEvent sessionContext = Assert.Single(session.Events);
@@ -1040,7 +1145,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .ToArray();
 
         Assert.Equal(6, terminal.Length);
-        Assert.Equal("6", terminal[0].Observation.Adapter.Version);
+        Assert.Equal("7", terminal[0].Observation.Adapter.Version);
         Assert.Equal(
             [2, 1, 1, 1, 2, 1],
             terminal.Select(outcome => outcome.Observation.Events.Count));
@@ -1196,9 +1301,18 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                 "pwd",
                 terminal[2].Observation.Events[0].Payload
                     .GetProperty("arguments").GetProperty("command").GetString());
-            Assert.Equal(
-                "/synthetic/workspace",
-                terminal[3].Observation.Events[0].Payload.GetProperty("output").GetString());
+            JsonElement successfulOutput =
+                terminal[3].Observation.Events[0].Payload.GetProperty("output");
+            if (adapter.Harness == "codex")
+            {
+                Assert.Equal(
+                    "/synthetic/workspace",
+                    successfulOutput[0].GetProperty("text").GetString());
+            }
+            else
+            {
+                Assert.Equal("/synthetic/workspace", successfulOutput.GetString());
+            }
             JsonElement unknownSource = terminal[8].Observation.SourcePayload;
             JsonElement unknownEvidence = unknownSource.TryGetProperty(
                 "syntheticValue", out var topLevelUnknown)

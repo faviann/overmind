@@ -647,6 +647,7 @@ public sealed class CaptureTests : HttpSeamTestBase
     [InlineData("3")]
     [InlineData("4")]
     [InlineData("5")]
+    [InlineData("6")]
     public async Task CodexAdapterUpgradeRetryConvergesFromEveryPreUpgradeAdapterVersion(
         string preUpgradeAdapterVersion)
     {
@@ -680,7 +681,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "6",
+                "7",
                 "0.144.synthetic",
                 "same source record"));
 
@@ -732,7 +733,11 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.All(receipts, receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
             Assert.Equal([0L, 1L, 2L], receipts.Select(receipt => receipt.GetProperty("sourcePosition").GetInt64()));
             Assert.Equal(
-                ["content/0:message", "tool/1", "tool/2"],
+                [
+                    "content/0:message",
+                    $"tool_call:{fixtureCallId}",
+                    $"tool_result:{fixtureCallId}"
+                ],
                 receipts.Select(receipt => Assert.Single(receipt.GetProperty("events").EnumerateArray())
                     .GetProperty("partKey").GetString()));
             Assert.Equal(
@@ -1922,6 +1927,248 @@ public sealed class CaptureTests : HttpSeamTestBase
                     .GetProperty("safeSourcePayload").GetProperty("payload")
                     .GetProperty("futureCompactionBoundaryField")
                     .GetProperty("nested").GetProperty("boundary").GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerAndOperatorExposeCodexToolFamiliesWithoutDuplicateLifecycleCalls()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"codex-tools-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-tools-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string transcriptPath = Path.Combine(transcriptRoot, "tools.jsonl");
+        Directory.CreateDirectory(transcriptRoot);
+        File.Copy(
+            Path.Combine(
+                _root,
+                "fixtures/adapter-conformance/codex-cli-0.145.tools.synthetic.jsonl"),
+            transcriptPath);
+
+        Dictionary<string, string> EnvironmentFor(string stateDirectory) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        async Task<JsonElement[]> CaptureOnceAsync(
+            string stateDirectory,
+            string expectedStatus)
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(stateDirectory));
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            try
+            {
+                var receipts = new JsonElement[21];
+                for (int index = 0; index < receipts.Length; index++)
+                {
+                    receipts[index] = await ReadTracerReceiptAsync(process);
+                }
+                Assert.All(receipts, receipt =>
+                {
+                    Assert.Equal(expectedStatus, receipt.GetProperty("status").GetString());
+                    Assert.Equal(
+                        "7",
+                        receipt.GetProperty("observation").GetProperty("adapter")
+                            .GetProperty("version").GetString());
+                });
+                return receipts;
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                await stderr;
+            }
+        }
+
+        async Task<JsonElement[]> ReadOperatorEventsAsync(JsonElement receipt)
+        {
+            string shown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipt.GetProperty("observationUuid").GetGuid().ToString());
+            return shown.Split(
+                    Environment.NewLine,
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .ToArray();
+        }
+
+        static JsonElement Event(JsonElement envelope) =>
+            envelope.GetProperty("event");
+
+        static void AssertNativePair(
+            IReadOnlyList<JsonElement[]> envelopes,
+            int callPosition,
+            int resultPosition,
+            string nativeId)
+        {
+            JsonElement call = Assert.Single(envelopes[callPosition]);
+            JsonElement result = Assert.Single(envelopes[resultPosition]);
+            Assert.Equal("tool_call", Event(call).GetProperty("kind").GetString());
+            Assert.Equal("tool_result", Event(result).GetProperty("kind").GetString());
+            Assert.Equal(
+                $"tool_call:{nativeId}",
+                Event(call).GetProperty("partKey").GetString());
+            Assert.Equal(
+                $"tool_result:{nativeId}",
+                Event(result).GetProperty("partKey").GetString());
+            Assert.Equal(
+                nativeId,
+                Event(call).GetProperty("payload").GetProperty("callId").GetString());
+            Assert.Equal(
+                nativeId,
+                Event(result).GetProperty("payload").GetProperty("callId").GetString());
+            Assert.Equal(
+                nativeId,
+                Assert.Single(result.GetProperty("relationships").EnumerateArray())
+                    .GetProperty("target").GetProperty("nativeId").GetString());
+        }
+
+        try
+        {
+            JsonElement[] accepted = await CaptureOnceAsync(
+                Path.Combine(directory, "state-first"),
+                "new");
+            Assert.Equal(
+                Enumerable.Range(0, accepted.Length).Select(index => (long)index),
+                accepted.Select(receipt =>
+                    receipt.GetProperty("sourcePosition").GetInt64()));
+
+            var envelopes = new List<JsonElement[]>();
+            foreach (JsonElement receipt in accepted)
+            {
+                envelopes.Add(await ReadOperatorEventsAsync(receipt));
+            }
+
+            AssertNativePair(envelopes, 0, 3, "function-alpha");
+            AssertNativePair(envelopes, 1, 2, "function-beta");
+            AssertNativePair(envelopes, 4, 5, "custom-gamma");
+            AssertNativePair(envelopes, 6, 11, "exec-delta");
+            AssertNativePair(envelopes, 8, 10, "patch-epsilon");
+            AssertNativePair(envelopes, 15, 16, "search-eta");
+
+            Assert.Equal(
+                "alpha",
+                Event(Assert.Single(envelopes[0])).GetProperty("payload")
+                    .GetProperty("arguments").GetProperty("command").GetString());
+            Assert.Equal(
+                "gamma",
+                Event(Assert.Single(envelopes[4])).GetProperty("payload")
+                    .GetProperty("arguments").GetProperty("query").GetString());
+            Assert.Equal(
+                JsonValueKind.Array,
+                Event(Assert.Single(envelopes[2])).GetProperty("payload")
+                    .GetProperty("output").ValueKind);
+            Assert.Equal(
+                JsonValueKind.String,
+                Event(Assert.Single(envelopes[3])).GetProperty("payload")
+                    .GetProperty("output").ValueKind);
+
+            foreach ((int position, string view) in new[]
+            {
+                (7, "exec_command_begin"),
+                (9, "patch_apply_begin")
+            })
+            {
+                JsonElement lifecycle = Event(Assert.Single(envelopes[position]));
+                Assert.Equal("annotation", lifecycle.GetProperty("kind").GetString());
+                Assert.Equal($"view:{view}", lifecycle.GetProperty("partKey").GetString());
+                Assert.Equal(view, lifecycle.GetProperty("payload")
+                    .GetProperty("view").GetString());
+            }
+
+            JsonElement[] allEvents = envelopes.SelectMany(items => items)
+                .Select(Event)
+                .ToArray();
+            Assert.Equal(
+                1,
+                allEvents.Count(item => item.GetProperty("kind").GetString() == "tool_call"
+                    && item.GetProperty("payload").GetProperty("callId").GetString()
+                        == "exec-delta"));
+            Assert.Equal(
+                1,
+                allEvents.Count(item => item.GetProperty("kind").GetString() == "tool_call"
+                    && item.GetProperty("payload").GetProperty("callId").GetString()
+                        == "patch-epsilon"));
+
+            foreach ((int position, string nativeId, string outcome) in new[]
+            {
+                (14, "local-zeta", "succeeded"),
+                (17, "web-theta", "succeeded"),
+                (18, "image-iota", "failed")
+            })
+            {
+                Assert.Equal(
+                    ["tool_call", "tool_result"],
+                    envelopes[position].Select(item =>
+                        Event(item).GetProperty("kind").GetString()));
+                Assert.All(envelopes[position], item => Assert.Equal(
+                    nativeId,
+                    Event(item).GetProperty("payload").GetProperty("callId").GetString()));
+                Assert.Equal(
+                    outcome,
+                    Event(envelopes[position][1]).GetProperty("payload")
+                        .GetProperty("outcome").GetString());
+            }
+
+            Assert.Equal(
+                ["unknown", "succeeded", "failed", "denied", "succeeded", "interrupted"],
+                new[] { 2, 3, 5, 10, 11, 19 }.Select(position =>
+                    Event(Assert.Single(envelopes[position])).GetProperty("payload")
+                        .GetProperty("outcome").GetString()));
+            Assert.Equal(
+                ["synthetic interruption", "synthetic terminal error"],
+                new[] { 12, 13 }.Select(position =>
+                    Event(Assert.Single(envelopes[position])).GetProperty("payload")
+                        .GetProperty("error").GetString()));
+            Assert.Equal(
+                "function-beta",
+                Assert.Single(Assert.Single(envelopes[19])
+                        .GetProperty("relationships").EnumerateArray())
+                    .GetProperty("target").GetProperty("nativeId").GetString());
+            JsonElement orphan = Event(Assert.Single(envelopes[20]));
+            Assert.Equal("tool_call", orphan.GetProperty("kind").GetString());
+            Assert.Equal(
+                "function-orphan",
+                orphan.GetProperty("payload").GetProperty("callId").GetString());
+            Assert.DoesNotContain(
+                allEvents,
+                item => item.GetProperty("kind").GetString() == "tool_result"
+                    && item.GetProperty("payload").GetProperty("callId").GetString()
+                        == "function-orphan");
+
+            JsonElement[] retried = await CaptureOnceAsync(
+                Path.Combine(directory, "state-retry"),
+                "already_accepted");
+            Assert.Equal(
+                accepted.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()),
+                retried.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()));
+            for (int index = 0; index < retried.Length; index++)
+            {
+                Assert.True(
+                    JsonElement.DeepEquals(
+                        JsonSerializer.SerializeToElement(envelopes[index]),
+                        JsonSerializer.SerializeToElement(
+                            await ReadOperatorEventsAsync(retried[index]))));
+            }
         }
         finally
         {

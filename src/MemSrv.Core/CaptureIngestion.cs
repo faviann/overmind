@@ -423,6 +423,23 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             return [];
         }
 
+        string? expectedHarnessVersion = CodexV3VersionString(
+                command.SourcePayload, "cli_version")
+            ?? CodexV3VersionString(command.SourcePayload, "version");
+        if (expectedHarnessVersion is null
+            && command.SourcePayload.ValueKind == JsonValueKind.Object
+            && command.SourcePayload.TryGetProperty("payload", out JsonElement payload)
+            && payload.ValueKind == JsonValueKind.Object)
+        {
+            expectedHarnessVersion = CodexV3VersionString(payload, "cli_version")
+                ?? CodexV3VersionString(payload, "version");
+        }
+        if (!string.Equals(
+                command.Source.HarnessVersion, expectedHarnessVersion, StringComparison.Ordinal))
+        {
+            return [];
+        }
+
         var legacySource = command.Source with
         {
             HarnessVersion = TopLevelString(command.SourcePayload, "cli_version")
@@ -454,6 +471,23 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 command.RouteEvidence),
             CaptureLedger.JsonOptions);
         return [Sign(currentIdentityV2, key), Sign(historicalV2, key)];
+    }
+
+    private static string? CodexV3VersionString(JsonElement value, string propertyName)
+    {
+        if (value.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty(propertyName, out JsonElement property))
+        {
+            return null;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.String => property.GetString(),
+            JsonValueKind.Object when property.TryGetProperty("name", out JsonElement nested)
+                && nested.ValueKind == JsonValueKind.String => nested.GetString(),
+            _ => null
+        };
     }
 
     private static string? TopLevelString(JsonElement value, string propertyName)

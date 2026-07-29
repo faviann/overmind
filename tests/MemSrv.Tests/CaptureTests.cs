@@ -597,6 +597,19 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         var acceptedReceipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
 
+        var falseProvenanceRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "3",
+                "false-version",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.Conflict, falseProvenanceRetry.StatusCode);
+
         var upgradedRetry = await client.PostAsJsonAsync(
             "/capture/v1/observations",
             ExplicitIdentityObservation(

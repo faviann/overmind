@@ -1,0 +1,2 @@
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"turn_started","turn_id":"synthetic-turn-1","context_window":200000,"futureLifecycleField":{"retained":true}}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"agent_reasoning","text":"Synthetic duplicate reasoning view.","futureReasoningViewField":{"retained":true}}}

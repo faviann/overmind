@@ -43,7 +43,8 @@ public static class DisabledCaptureRuntime
         CancellationToken cancellationToken = default,
         bool terminalAtEndOfFile = false,
         string? transcriptIdentity = null,
-        CaptureSourceIdentity? sourceIdentity = null)
+        CaptureSourceIdentity? sourceIdentity = null,
+        int maxTransportBytes = CaptureFidelityPolicy.ProductionTransportBytes)
     {
         byte[] sourceBytes = await File.ReadAllBytesAsync(fixturePath, cancellationToken);
         var sourceRecords = JsonlSourceReader.Read(
@@ -98,8 +99,18 @@ public static class DisabledCaptureRuntime
             }
 
             var terminal = (CaptureSourcePositionOutcome.Terminal)outcome;
-            string observationJson = JsonSerializer.Serialize(
+            string originalJson = JsonSerializer.Serialize(
                 terminal.Observation, JsonDefaults.Options);
+            long originalByteCount = Encoding.UTF8.GetByteCount(originalJson);
+            CaptureObservationRequest boundedObservation =
+                CaptureFidelityPolicy.ApplyTransportLimit(
+                    terminal.Observation,
+                    originalByteCount,
+                    maxTransportBytes);
+            string observationJson = ReferenceEquals(
+                    boundedObservation, terminal.Observation)
+                ? originalJson
+                : JsonSerializer.Serialize(boundedObservation, JsonDefaults.Options);
             // Fail closed before the observation leaves the process: the scan
             // runs here, and a scan FAILURE — an exhausted budget, a matcher
             // timeout, an internal scanner error, or an unusable rule set —
@@ -107,7 +118,10 @@ public static class DisabledCaptureRuntime
             // cannot map to an exact span is not a failure: it becomes an
             // explicit omission the server persists as one, so this call does
             // not refuse on omissions. The scan result itself is deliberately
-            // discarded — the wire carries the original bytes.
+            // discarded. In-limit observations retain their original payload
+            // on the wire; observations already compacted for the transport
+            // limit carry that omission instead. The server remains the sole
+            // author of canonical scan provenance in either case.
             safetyGate.AssertObservationWithinBudget(observationJson);
             string candidateJson = safetyGate.ScanJson(observationJson).Redacted;
             if (!string.Equals(

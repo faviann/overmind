@@ -127,6 +127,55 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ObservationBeyondInjectedContentLimitAdvancesAsAWholePayloadOmission()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"codex-content-limit-{Guid.NewGuid():N}", captureKey);
+        var binding = await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey);
+        Assert.NotNull(binding);
+        const string rawPayload = "RAW-PAYLOAD-MUST-BE-WHOLLY-OMITTED";
+        object request = Observation(
+            sourceSessionId,
+            0,
+            $"content-limit-{Guid.NewGuid():N}",
+            string.Concat(Enumerable.Repeat(rawPayload, 30)));
+        var command = CaptureObservationCommand.FromRequest(
+            JsonSerializer.Deserialize<CaptureObservationRequest>(
+                JsonSerializer.Serialize(
+                    request,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!);
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxObservationBytes = 2_048 }));
+
+        CaptureImportReceipt receipt = await ingestion.ImportAsync(binding!, command);
+
+        Assert.Equal("new", receipt.Status);
+        Assert.Equal(0, receipt.SourcePosition);
+        Assert.DoesNotContain(rawPayload, receipt.Observation.SafeSourcePayload.GetRawText());
+        JsonElement omission = receipt.Observation.SafeSourcePayload.GetProperty("omission");
+        Assert.Equal(
+            "observation_exceeds_content_limit",
+            omission.GetProperty("reason").GetString());
+        Assert.Equal(
+            CaptureFidelityPolicy.CurrentVersion,
+            omission.GetProperty("policyVersion").GetString());
+        Assert.True(omission.GetProperty("originalByteCount").GetInt64() > 2_048);
+        var capturedEvent = Assert.Single(receipt.Events).Event;
+        Assert.Equal("observation/omitted", capturedEvent.PartKey);
+        Assert.DoesNotContain(rawPayload, capturedEvent.Payload.GetRawText());
+
+        CaptureImportReceipt retry = await ingestion.ImportAsync(binding!, command);
+        Assert.Equal("already_accepted", retry.Status);
+        Assert.Equal(receipt.ObservationUuid, retry.ObservationUuid);
+    }
+
+    [Fact]
     public async Task BudgetExhaustionPersistsNothingAndLeavesThePositionForTheNextRecord()
     {
         string captureKey = CaptureCredential();

@@ -15,7 +15,7 @@ of operator literals — never their values).
 
 | Budget | Default | Unit | Exceeded → |
 | --- | ---: | --- | --- |
-| `MaxObservationBytes` | 134,217,728 (128 MiB) | UTF-8 bytes per source observation | fail closed |
+| `MaxObservationBytes` | 134,217,728 (128 MiB) | UTF-8 bytes per source observation | whole observation omitted by `CaptureIngestion`; assertion fails closed for direct gate callers |
 | `MaxLeafBytes` | 67,108,864 (64 MiB) | UTF-8 bytes per decoded structured leaf | leaf wholly omitted (fail closed if the value is a required identity) |
 | `MaxScanTime` | 30 | seconds per scan call | fail closed |
 | `MaxRuleTime` | 5 | seconds per rule matcher | fail closed |
@@ -24,9 +24,19 @@ of operator literals — never their values).
 | `MaxDecoderCandidateLength` | 65,536 (64 KiB) | characters | run is not decoded; see the residual risk below |
 | `MaxDecodedBytes` | 16,777,216 (16 MiB) | decoded bytes per scan call | fail closed |
 
-"Fail closed" means the scan throws `SafetyScanException`, ingestion persists
-nothing, and the stream checkpoint does not advance. The next legitimate record
-is still accepted at the same source position.
+An operational "fail closed" outcome means the scan throws
+`SafetyScanException`, ingestion persists nothing, and the stream checkpoint
+does not advance. The next legitimate record is still accepted at the same
+source position.
+
+`MaxObservationBytes` has a separate deterministic fidelity outcome at the
+`CaptureIngestion` interface. An original observation above 128 MiB is replaced
+with a compact whole-observation omission, that representation is scanned and
+persisted, and the checkpoint advances. `NeverStoreGate` still enforces the
+limit through `AssertObservationWithinBudget`: it protects the compact
+representation inside ingestion and remains fail closed for direct callers.
+Operational scanner failures while processing either representation still
+persist nothing and do not advance the checkpoint.
 
 ### `MaxDecoderCandidateLength` is an accepted residual risk
 

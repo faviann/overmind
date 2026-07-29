@@ -28,24 +28,39 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureLedger.RequireSafetyConfigured(neverStore);
         Validate(binding, command);
         string inputJson = JsonSerializer.Serialize(command, CaptureLedger.JsonOptions);
-        // The versioned observation ceiling. The Kestrel transport cap on this
-        // route is deliberately far below it (see docs/capture-safety-budgets.md).
-        neverStore.AssertObservationWithinBudget(inputJson);
+        long originalByteCount = Encoding.UTF8.GetByteCount(inputJson);
+        CaptureObservationCommand originalCommand = command;
 
         string signatureContent = JsonSerializer.Serialize(
             new CaptureSignatureContent(
-                command.ContractVersion,
-                command.SourceIdentity,
-                command.Locator,
-                command.SourceTimestamp,
-                command.Source,
-                command.Adapter,
-                command.SourcePayload,
-                command.Events,
-                command.RouteEvidence),
+                originalCommand.ContractVersion,
+                originalCommand.SourceIdentity,
+                originalCommand.Locator,
+                originalCommand.SourceTimestamp,
+                originalCommand.Source,
+                originalCommand.Adapter,
+                originalCommand.SourcePayload,
+                originalCommand.Events,
+                originalCommand.RouteEvidence),
             CaptureLedger.JsonOptions);
         string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
+        bool observationWasOmitted =
+            originalByteCount > neverStore.Budgets.MaxObservationBytes;
+        if (observationWasOmitted)
+        {
+            command = CaptureFidelityPolicy.OmitForContentLimit(
+                originalCommand, originalByteCount);
+            inputJson = JsonSerializer.Serialize(command, CaptureLedger.JsonOptions);
+        }
+        // The omitted representation itself must remain bounded. The Kestrel
+        // transport cap on this route is deliberately far below the production
+        // content limit (see docs/capture-safety-budgets.md).
+        neverStore.AssertObservationWithinBudget(inputJson);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
+        if (observationWasOmitted)
+        {
+            scan.Omit(CaptureFidelityPolicy.ContentLimitReason);
+        }
         AssertSafe(command.SourceIdentity.ExternalSessionId, scan);
         if (command.SourceIdentity.ChildId is not null)
         {
@@ -602,6 +617,12 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 Omissions.Add(reason);
                 RuleIds.Add($"omission:{reason}");
             }
+        }
+
+        public void Omit(string reason)
+        {
+            Omissions.Add(reason);
+            RuleIds.Add($"omission:{reason}");
         }
     }
 }

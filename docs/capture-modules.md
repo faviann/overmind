@@ -68,8 +68,9 @@ binding-scoped routing policy, and the per-binding content-signature key.
 `null` means "reject before reading the body".
 
 **`CaptureIngestion`** — contract version, binding/harness agreement, unique
-part keys, relationship shape, the versioned 128 MiB observation ceiling, the
-never-store gate, the binding-keyed retry signature (which covers the
+part keys, relationship shape, deterministic whole-payload omission above the
+versioned 128 MiB observation ceiling, the never-store gate, the binding-keyed
+retry signature (which covers the
 `byte_range` source content digest that is signed but never persisted),
 evidence-driven route derivation and fixation on first import, contiguous
 checkpoint advance, locator idempotency and conflict, and the single
@@ -204,31 +205,39 @@ history or replace an earlier queued or canonical record.
 
 ## Where the gate runs
 
-The Codex claimer crosses the same `NeverStoreGate` before a candidate enters
-the local durable queue. The existing disabled delivery runtime scans the
-original observation again before it leaves the tracer process, and the server
-crosses the gate independently before canonical append. All three use the same
-governed rule semantics because they construct the same gate implementation;
-there is no second scanner implementation. Local candidate sanitization
-evidence is not canonical server scan provenance: the server remains the sole
-author of the canonical `scan_*` columns when delivery occurs.
+The Codex claimer applies the fixed 1,000,000-byte production transport bound
+before a candidate enters the local durable queue. A runtime observation above
+that bound becomes a compact whole-observation omission before durable queueing
+or transmission, and the claimer scans that bounded representation. An
+observation within the bound retains its original payload and is scanned as
+such. The existing disabled delivery runtime reconstructs the same bounded
+representation, scans it again before it leaves the tracer process, and the
+server crosses the gate independently before canonical append. All three use
+the same governed rule semantics because they construct the same gate
+implementation; there is no second scanner implementation. Local candidate
+sanitization evidence is not canonical server scan provenance: whether the wire
+carries the in-limit original observation or the compact transport omission,
+the server remains the sole author of the canonical `scan_*` columns when
+delivery occurs.
 
 The two sides do different things with the result. The runtime calls exactly two
 gate methods — `AssertObservationWithinBudget` and `ScanJson` — and **refuses on
-scan failure**: a budget exhaustion, a matcher timeout, an internal scanner
-error, or an unusable rule set throws out of `ScanJson`, so it emits nothing
-and says why on stderr. The one-shot compatibility mode exits non-zero; the
-scheduled synthetic mode retains responsibility and retries a later cycle. An
-omission is not a refusal — a leaf
+operational scan failure**: a budget exhausted while scanning the bounded
+representation, a matcher timeout, an internal scanner error, or an unusable
+rule set throws, so it emits nothing and says why on stderr. The one-shot
+compatibility mode exits non-zero; the scheduled synthetic mode retains
+responsibility and retries a later cycle. An omission is not a refusal — a leaf
 past its byte limit, a sensitive property name carrying a subtree, or a
 redaction-caused name collision is a recorded fidelity outcome that the server
 persists *as* an omission, not an unscanned tail, so the runtime still sends
-those observations. The runtime discards the scan result and does **not**
-rewrite the payload it transmits. If it did, the server would scan
-already-sanitized bytes and record `scan_status = "clean"` with no rule ids for
-content that was in fact redacted. Imported content supplies evidence only and
-cannot assert its own scan provenance, so the server — which sanitizes what it
-appends — remains the sole author of the canonical `scan_*` columns.
+those observations. Apart from the deterministic whole-observation transport
+omission, the runtime discards the scan result and does **not** rewrite the
+payload it transmits. Replacing an in-limit original payload with its scan
+result would make the server scan already-sanitized bytes and record
+`scan_status = "clean"` with no rule ids for content that was in fact redacted.
+Imported content supplies evidence only and cannot assert its own canonical
+scan provenance, so the server — which sanitizes what it appends — remains the
+sole author of the canonical `scan_*` columns.
 
 `AssertAllowed`/`AssertAllowedObject` are **server-side only**: they are the
 reject door, and rejecting is something only the side that owns the durable

@@ -302,6 +302,84 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task RecordBeyondTransportLimitIsDurablyClaimedAsContentFreeObservationOmission()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-omission-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        const string rawPayload = "RAW-PAYLOAD-MUST-NOT-ENTER-DURABLE-STATE";
+        string record = JsonSerializer.Serialize(new
+        {
+            type = "response_item",
+            payload = new
+            {
+                type = "message",
+                role = "user",
+                content = string.Concat(Enumerable.Repeat(rawPayload, 100))
+            }
+        });
+        await File.WriteAllTextAsync(transcript, record + "\n", new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            var claims = await CodexCaptureClaimer.ClaimCompletedAsync(
+                new CodexJsonlAdapter(),
+                transcript,
+                "codex-runtime-transport-omission",
+                state,
+                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                maxTransportBytes: 1_024);
+
+            var claim = Assert.Single(claims);
+            Assert.DoesNotContain(rawPayload, claim.RedactedSafeCandidate);
+            using var candidate = JsonDocument.Parse(claim.RedactedSafeCandidate);
+            JsonElement omission = candidate.RootElement
+                .GetProperty("sourcePayload")
+                .GetProperty("omission");
+            Assert.Equal(
+                "observation_exceeds_transport_limit",
+                omission.GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureFidelityPolicy.CurrentVersion,
+                omission.GetProperty("policyVersion").GetString());
+            var originalOutcome = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                new CodexJsonlAdapter().Adapt(
+                    Assert.Single(JsonlSourceReader.Read(
+                        Encoding.UTF8.GetBytes(record + "\n"),
+                        "codex-runtime-transport-omission",
+                        terminalAtEndOfFile: false))));
+            Assert.Equal(
+                Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(
+                    originalOutcome.Observation,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web))),
+                omission.GetProperty("originalByteCount").GetInt64());
+            JsonElement sourceIdentity = omission.GetProperty("sourceIdentity");
+            Assert.Equal(
+                "codex-runtime-transport-omission",
+                sourceIdentity.GetProperty("externalSessionId").GetString());
+            Assert.Equal(
+                0,
+                sourceIdentity.GetProperty("sourcePosition").GetInt64());
+            Assert.Equal(
+                "byte_range",
+                sourceIdentity.GetProperty("locatorKind").GetString());
+            Assert.Single(candidate.RootElement.GetProperty("events").EnumerateArray());
+
+            string durableState = await File.ReadAllTextAsync(
+                Path.Combine(directory, "state", "capture-state.json"));
+            Assert.DoesNotContain(rawPayload, durableState);
+            Assert.Contains("observation_exceeds_transport_limit", durableState);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ClaimBuildsPrefixAndAdapterRecordsFromOneImmutableSourceSnapshot()
     {
         string root = TestProcessRunner.RepoRoot;

@@ -89,13 +89,13 @@ public sealed class CaptureScheduleTests
     }
 
     [Fact]
-    public void RootClassificationDoesNotMintAChildAndContradictoryClassifiersAreRejected()
+    public async Task RootClassificationMintsNoChildAndOneContradictoryRolloutFailsAlone()
     {
         string directory = Path.Combine(
             Path.GetTempPath(), $"capture-child-classification-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
-        string root = Path.Combine(directory, "root.jsonl");
-        string contradiction = Path.Combine(directory, "contradiction.jsonl");
+        string root = Path.GetFullPath(Path.Combine(directory, "root.jsonl"));
+        string contradiction = Path.GetFullPath(Path.Combine(directory, "contradiction.jsonl"));
         File.WriteAllText(
             root,
             """{"type":"session_meta","payload":{"session_id":"session","id":"thread","source":"cli","thread_source":"user"}}"""
@@ -107,11 +107,32 @@ public sealed class CaptureScheduleTests
 
         try
         {
+            IReadOnlyList<CodexTranscriptStream> streams =
+                CodexTranscriptDiscovery.Enumerate(directory);
             CodexTranscriptStream rootStream =
-                Assert.Single(CodexTranscriptDiscovery.Enumerate(root));
+                streams.Single(stream => stream.Path == root);
+            CodexTranscriptStream contradictionStream =
+                streams.Single(stream => stream.Path == contradiction);
+
             Assert.Equal(new CaptureSourceIdentity("session"), rootStream.SourceIdentity);
-            Assert.Throws<InvalidDataException>(
-                () => CodexTranscriptDiscovery.Enumerate(contradiction));
+            Assert.Null(rootStream.IdentityFailure);
+            Assert.Null(contradictionStream.SourceIdentity);
+            Assert.Null(contradictionStream.TranscriptIdentity);
+            Assert.IsType<InvalidDataException>(contradictionStream.IdentityFailure);
+
+            var scanned = new List<string>();
+            var failures = new List<Exception>();
+            await CodexTranscriptScanCycle.RunAsync(
+                streams,
+                (stream, _) =>
+                {
+                    scanned.Add(stream.Path);
+                    return Task.CompletedTask;
+                },
+                failures.Add);
+
+            Assert.Equal([root], scanned);
+            Assert.IsType<InvalidDataException>(Assert.Single(failures));
         }
         finally
         {

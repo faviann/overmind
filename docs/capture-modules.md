@@ -153,10 +153,12 @@ without metadata. Simultaneous active/archive copies or two active
 rollouts with the same filename are rejected as ambiguous rather than silently
 conflated. The directory move is stable filesystem evidence; elapsed time and
 inactivity never establish terminality. Stream identity remains independent of
-enumeration order. The scan cycle isolates a stream that
-disappears or becomes unreadable after enumeration: that attempt advances
-nothing, later enumerated streams still run, and the next scheduled enumeration
-gets another chance. It does not catch cancellation. Configuration binds the
+enumeration order. A rollout whose identity cannot be resolved — unreadable, or
+self-contradictory about its own child classification — carries that failure
+instead of an identity, and never a guessed one. The scan cycle isolates such a
+stream, and one that disappears or becomes unreadable after enumeration: that
+attempt advances nothing, later enumerated streams still run, and the next
+scheduled enumeration gets another chance. It does not catch cancellation. Configuration binds the
 named interval and maximum-jitter environment inputs to one validated schedule.
 Startup enumeration runs immediately; only after a complete cycle does the
 scheduler choose a new bounded jitter sample and wait the configured interval

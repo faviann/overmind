@@ -410,6 +410,12 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 
+    // Adapters v3, v4 and v5 derive identical source provenance from the same
+    // immutable record; only the adapter version and the identity shape of the
+    // signature changed. A retry of an already-accepted position after the
+    // upgrade is therefore the same content under a pre-upgrade signature.
+    private static readonly string[] PreUpgradeCodexAdapterVersions = ["3", "4"];
+
     private static IReadOnlyList<string> CompatibleContentSignatures(
         CaptureObservationCommand command,
         string legacySourceSessionId,
@@ -423,79 +429,39 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             return [];
         }
 
-        JsonElement payload = default;
-        bool hasRecordPayload = command.SourcePayload.ValueKind == JsonValueKind.Object
-            && command.SourcePayload.TryGetProperty("payload", out payload)
-            && payload.ValueKind == JsonValueKind.Object;
-        string? topLevelVersion = CodexVersionString(command.SourcePayload, "cli_version")
-            ?? CodexVersionString(command.SourcePayload, "version");
-        string? expectedHarnessVersion = topLevelVersion;
-        if (expectedHarnessVersion is null && hasRecordPayload)
+        var signatures = new List<string>(PreUpgradeCodexAdapterVersions.Length * 2);
+        foreach (string version in PreUpgradeCodexAdapterVersions)
         {
-            expectedHarnessVersion = CodexVersionString(payload, "cli_version")
-                ?? CodexVersionString(payload, "version");
-        }
-        if (!string.Equals(
-                command.Source.HarnessVersion, expectedHarnessVersion, StringComparison.Ordinal))
-        {
-            return [];
-        }
-
-        // Adapter v4 read a payload CLI version only for session_meta records and
-        // never used a payload `version` fallback.
-        string? legacyHarnessVersion = topLevelVersion;
-        if (legacyHarnessVersion is null
-            && hasRecordPayload
-            && string.Equals(command.Source.RecordType, "session_meta", StringComparison.Ordinal))
-        {
-            legacyHarnessVersion = CodexVersionString(payload, "cli_version");
-        }
-
-        var legacySource = command.Source with { HarnessVersion = legacyHarnessVersion };
-        var legacyAdapter = command.Adapter with { Version = "4" };
-        string currentIdentityLegacy = JsonSerializer.Serialize(
-            new CaptureSignatureContent(
-                command.ContractVersion,
-                command.SourceIdentity,
-                command.Locator,
-                command.SourceTimestamp,
-                legacySource,
-                legacyAdapter,
-                command.SourcePayload,
-                command.Events,
-                command.RouteEvidence),
-            CaptureLedger.JsonOptions);
-        string historicalLegacy = JsonSerializer.Serialize(
-            new LegacyCaptureSignatureContent(
-                command.ContractVersion,
-                legacySourceSessionId,
-                command.Locator,
-                command.SourceTimestamp,
-                legacySource,
-                legacyAdapter,
-                command.SourcePayload,
-                command.Events,
-                command.RouteEvidence),
-            CaptureLedger.JsonOptions);
-        return [Sign(currentIdentityLegacy, key), Sign(historicalLegacy, key)];
-    }
-
-    private static string? CodexVersionString(JsonElement value, string propertyName)
-    {
-        if (value.ValueKind != JsonValueKind.Object
-            || !value.TryGetProperty(propertyName, out JsonElement property))
-        {
-            return null;
+            var legacyAdapter = command.Adapter with { Version = version };
+            string currentIdentityLegacy = JsonSerializer.Serialize(
+                new CaptureSignatureContent(
+                    command.ContractVersion,
+                    command.SourceIdentity,
+                    command.Locator,
+                    command.SourceTimestamp,
+                    command.Source,
+                    legacyAdapter,
+                    command.SourcePayload,
+                    command.Events,
+                    command.RouteEvidence),
+                CaptureLedger.JsonOptions);
+            string historicalLegacy = JsonSerializer.Serialize(
+                new LegacyCaptureSignatureContent(
+                    command.ContractVersion,
+                    legacySourceSessionId,
+                    command.Locator,
+                    command.SourceTimestamp,
+                    command.Source,
+                    legacyAdapter,
+                    command.SourcePayload,
+                    command.Events,
+                    command.RouteEvidence),
+                CaptureLedger.JsonOptions);
+            signatures.Add(Sign(currentIdentityLegacy, key));
+            signatures.Add(Sign(historicalLegacy, key));
         }
 
-        string? version = property.ValueKind switch
-        {
-            JsonValueKind.String => property.GetString(),
-            JsonValueKind.Object when property.TryGetProperty("name", out JsonElement nested)
-                && nested.ValueKind == JsonValueKind.String => nested.GetString(),
-            _ => null
-        };
-        return string.IsNullOrWhiteSpace(version) ? null : version;
+        return signatures;
     }
 
     private static string CanonicalSessionId(

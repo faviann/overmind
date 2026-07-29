@@ -1169,7 +1169,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         bool isTerminal,
         long sourcePosition = 0) =>
         new(
-            "synthetic-source-session",
+            new CaptureSourceIdentity("synthetic-source-session"),
             sourcePosition,
             new CaptureSourceLocator.NativeId("synthetic-native-record"),
             CaptureSourceMaterialKind.PersistedRecord,
@@ -1212,7 +1212,7 @@ internal sealed class DisposableClaudeJsonlAdapter : ICaptureSourceAdapter
 
         var request = new CaptureObservationRequest(
             ContractVersion: 1,
-            source.SourceSessionId,
+            source.SourceIdentity.ExternalSessionId,
             source.SourcePosition,
             WireLocator(source.Locator),
             Timestamp(record),

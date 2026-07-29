@@ -643,58 +643,44 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Theory]
-    [InlineData("object", "0.145.object", "0.145.object")]
-    [InlineData("blank", "0.145.top-level-fallback", "0.145.top-level-fallback")]
-    [InlineData("payload-only", null, "0.145.payload-fallback")]
-    public async Task CodexAdapterUpgradeRetryPreservesLegacyVersionEvidence(
-        string evidenceShape,
-        string? legacyHarnessVersion,
-        string currentHarnessVersion)
+    [InlineData("3")]
+    [InlineData("4")]
+    public async Task CodexAdapterUpgradeRetryConvergesFromEveryPreUpgradeAdapterVersion(
+        string preUpgradeAdapterVersion)
     {
         var captureKey = CaptureCredential();
         string externalSessionId = $"external-{Guid.NewGuid():N}";
         string childId = $"child-{Guid.NewGuid():N}";
         string locator = $"adapter-upgrade-version-{Guid.NewGuid():N}";
-        object? cliVersionEvidence = evidenceShape switch
-        {
-            "object" => new { name = currentHarnessVersion },
-            "blank" => "   ",
-            _ => null
-        };
-        string? topLevelVersion = evidenceShape == "payload-only"
-            ? null
-            : "0.145.top-level-fallback";
-        string? payloadVersion = evidenceShape == "payload-only"
-            ? currentHarnessVersion
-            : null;
         await EnrollAsync(
             $"codex-adapter-upgrade-version-{Guid.NewGuid():N}", captureKey);
         using var client = CaptureClient(captureKey);
 
-        object observation = CodexUpgradeObservation(
-            externalSessionId,
-            childId,
-            locator,
-            cliVersionEvidence,
-            topLevelVersion,
-            payloadVersion,
-            legacyHarnessVersion);
         var accepted = await client.PostAsJsonAsync(
-            "/capture/v1/observations", observation);
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                preUpgradeAdapterVersion,
+                "0.144.synthetic",
+                "same source record"));
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         var acceptedReceipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
 
-        object upgradedObservation = CodexUpgradeObservation(
-            externalSessionId,
-            childId,
-            locator,
-            cliVersionEvidence,
-            topLevelVersion,
-            payloadVersion,
-            currentHarnessVersion,
-            adapterVersion: "5");
         var upgradedRetry = await client.PostAsJsonAsync(
-            "/capture/v1/observations", upgradedObservation);
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "5",
+                "0.144.synthetic",
+                "same source record"));
 
         Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
         var retryReceipt = await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
@@ -4019,55 +4005,6 @@ public sealed class CaptureTests : HttpSeamTestBase
                     kind = "lifecycle",
                     actor = "harness",
                     payload = new { message }
-                }
-            }
-        };
-
-    private static object CodexUpgradeObservation(
-        string externalSessionId,
-        string childId,
-        string nativeId,
-        object? cliVersionEvidence,
-        string? topLevelVersion,
-        string? payloadVersion,
-        string? harnessVersion,
-        string adapterVersion = "4") => new
-        {
-            contractVersion = 1,
-            sourceSessionId = externalSessionId,
-            sourceIdentity = new { externalSessionId, childId },
-            sourcePosition = 0,
-            locator = new { kind = "native_id", nativeId },
-            source = new
-            {
-                harness = "codex",
-                harnessVersion,
-                recordType = "session_meta",
-                materialKind = "persisted_record"
-            },
-            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
-            sourcePayload = new
-            {
-                type = "session_meta",
-                cli_version = cliVersionEvidence,
-                version = topLevelVersion,
-                payload = new
-                {
-                    session_id = externalSessionId,
-                    id = childId,
-                    thread_source = "subagent",
-                    version = payloadVersion
-                }
-            },
-            events = new[]
-            {
-                new
-                {
-                    partKey = "metadata/0",
-                    partOrder = 0,
-                    kind = "lifecycle",
-                    actor = "harness",
-                    payload = new { message = "same source record" }
                 }
             }
         };

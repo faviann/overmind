@@ -13,27 +13,7 @@ public sealed record TrustedSourceObservation(
     CaptureSourceLocator Locator,
     CaptureSourceMaterialKind MaterialKind,
     JsonElement SourcePayload,
-    bool IsTerminal)
-{
-    public string SourceSessionId => SourceIdentity.ExternalSessionId;
-
-    public TrustedSourceObservation(
-        string sourceSessionId,
-        long sourcePosition,
-        CaptureSourceLocator locator,
-        CaptureSourceMaterialKind materialKind,
-        JsonElement sourcePayload,
-        bool IsTerminal)
-        : this(
-            new CaptureSourceIdentity(sourceSessionId),
-            sourcePosition,
-            locator,
-            materialKind,
-            sourcePayload,
-            IsTerminal)
-    {
-    }
-}
+    bool IsTerminal);
 
 public enum CaptureSourceMaterialKind
 {

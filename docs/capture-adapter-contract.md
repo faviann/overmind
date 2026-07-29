@@ -53,14 +53,18 @@ back to the legacy `id` compatibility shape) as the external session identity.
 `payload.id` becomes `childId` only when tagged `source` and/or
 `thread_source: "subagent"` explicitly classifies the rollout as a child.
 `parent_thread_id` and `forked_from_id` remain independent source provenance
-and never classify or mint identity. Contradictory explicit classifiers stop
-discovery rather than guessing.
+and never classify or mint identity. Contradictory explicit classifiers never
+produce a guessed identity: that rollout carries its identity failure into its
+own scan, where it is reported and skipped, and every other enumerated stream
+still runs.
 
 The canonical import receipt and `memctl capture receipt` expose the source
 identity loaded from the durable stream. An adapter upgrade may normalize
 adapter/source provenance without changing the immutable source record; the
-server recognizes the Codex v4→v5 signature transition narrowly, while a
-changed locator or changed source content remains a conflict.
+server recognizes the Codex v3/v4→v5 signature transition narrowly — those
+adapters derive identical source provenance, so only the adapter version and
+the signature's identity shape changed — while a changed locator or changed
+source content remains a conflict.
 
 ## Tolerant parsing
 

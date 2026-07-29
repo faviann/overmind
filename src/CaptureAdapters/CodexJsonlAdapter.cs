@@ -44,12 +44,14 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             || (hasPayload && payload.ValueKind != JsonValueKind.Object);
         if (!isUnsupportedShape)
         {
-            harnessVersion ??= UsableString(payload, "cli_version")
-                ?? UsableString(payload, "version");
             model ??= JsonAdapterHelpers.NullableString(payload, "model");
             provider ??=
                 JsonAdapterHelpers.NullableString(payload, "model_provider")
                 ?? JsonAdapterHelpers.NullableString(payload, "provider");
+            if (string.Equals(recordType, "session_meta", StringComparison.Ordinal))
+            {
+                harnessVersion ??= UsableString(payload, "cli_version");
+            }
         }
 
         IReadOnlyList<CaptureEvent> events = isUnsupportedShape

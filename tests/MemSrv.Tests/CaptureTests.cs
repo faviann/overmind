@@ -841,7 +841,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "3",
+                    "4",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -869,7 +869,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "3",
+                    "4",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -1020,7 +1020,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 JsonElement observation = receipt.GetProperty("observation");
                 Assert.Equal(
-                    "3",
+                    "4",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
                 JsonElement capturedEvent =
                     Assert.Single(receipt.GetProperty("events").EnumerateArray());

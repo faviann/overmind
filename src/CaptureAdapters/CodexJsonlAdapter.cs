@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "3");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "4");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -24,6 +24,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         bool isObjectRecord = record.ValueKind == JsonValueKind.Object;
         string? recordType = isObjectRecord
             ? JsonAdapterHelpers.NullableString(record, "type")
+                ?? JsonAdapterHelpers.NullableString(record, "hook_event_name")
             : null;
         string? harnessVersion = isObjectRecord
             ? UsableString(record, "cli_version")
@@ -104,10 +105,21 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             {
                 "user_message" or "agent_message" =>
                     [MessageView(payload, payloadType)],
+                "context_compacted" => [CompactionAnnotation(payload)],
                 "error" or "turn_aborted" => [Error(payload, position)],
                 "subagent_start" => [Subagent(payload, position)],
                 _ => [Opaque(recordType, payloadType, payload, position)]
             };
+        }
+
+        if (string.Equals(recordType, "PreCompact", StringComparison.Ordinal))
+        {
+            return [CompactionHook(payload, position, "request")];
+        }
+
+        if (string.Equals(recordType, "PostCompact", StringComparison.Ordinal))
+        {
+            return [CompactionHook(payload, position, "completion")];
         }
 
         if (string.Equals(recordType, "session_meta", StringComparison.Ordinal))
@@ -302,15 +314,77 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             "harness",
             new
             {
+                phase = "completion",
+                contextBoundary = true,
                 trigger = JsonAdapterHelpers.NullableString(payload, "trigger"),
                 outcome = JsonAdapterHelpers.NullableString(payload, "outcome") ?? "unknown",
-                summary = payload.TryGetProperty("summary", out var summary)
-                    ? JsonAdapterHelpers.Text(summary)
-                    : null,
+                instructions = Evidence(payload, "instructions"),
+                inputContext = Evidence(payload, "input_context"),
+                summary = Evidence(payload, "message") ?? Evidence(payload, "summary"),
+                replacementHistory = Evidence(payload, "replacement_history"),
                 metrics = payload.TryGetProperty("metrics", out var metrics)
                     ? metrics.Clone()
-                    : (JsonElement?)null
+                    : (JsonElement?)null,
+                windowMetrics = WindowMetrics(payload)
             });
+
+    private static CaptureEvent CompactionHook(
+        JsonElement payload, long position, string phase) =>
+        Event(
+            $"compaction/{position}",
+            "compaction",
+            "harness",
+            new
+            {
+                phase,
+                contextBoundary = phase == "completion",
+                trigger = JsonAdapterHelpers.NullableString(payload, "trigger"),
+                outcome = JsonAdapterHelpers.NullableString(payload, "outcome") ?? "unknown",
+                instructions = Evidence(payload, "instructions"),
+                inputContext = Evidence(payload, "input_context"),
+                summary = Evidence(payload, "summary"),
+                replacementHistory = Evidence(payload, "replacement_history"),
+                metrics = Evidence(payload, "metrics"),
+                windowMetrics = WindowMetrics(payload)
+            });
+
+    private static CaptureEvent CompactionAnnotation(JsonElement payload) =>
+        Event(
+            "view:context_compacted",
+            "annotation",
+            "harness",
+            new
+            {
+                view = "context_compacted",
+                evidence = payload.Clone()
+            });
+
+    private static JsonElement? Evidence(JsonElement payload, string propertyName) =>
+        payload.TryGetProperty(propertyName, out var value)
+            ? value.Clone()
+            : null;
+
+    private static JsonElement? WindowMetrics(JsonElement payload)
+    {
+        var values = new Dictionary<string, JsonElement>();
+        AddWindowMetric(payload, values, "first_window_id", "firstWindowId");
+        AddWindowMetric(payload, values, "previous_window_id", "previousWindowId");
+        AddWindowMetric(payload, values, "window_id", "windowId");
+        AddWindowMetric(payload, values, "window_number", "windowNumber");
+        return values.Count == 0 ? null : JsonAdapterHelpers.Json(values);
+    }
+
+    private static void AddWindowMetric(
+        JsonElement payload,
+        IDictionary<string, JsonElement> values,
+        string sourceName,
+        string canonicalName)
+    {
+        if (payload.TryGetProperty(sourceName, out var value))
+        {
+            values.Add(canonicalName, value.Clone());
+        }
+    }
 
     private static CaptureEvent Subagent(JsonElement payload, long position)
     {

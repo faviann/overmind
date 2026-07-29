@@ -78,11 +78,28 @@ missing or invalid payload timestamps remain null, and `turn_context` has no
 occurrence time. Neither clock falls back to the other or to server-authored
 capture time.
 
+Codex compaction uses separate immutable operation phases. A `PreCompact`
+hook fact is a `compaction` event with `phase: request`; `PostCompact` and
+persisted rollout `compacted` records are `phase: completion`, and every
+completion payload sets `contextBoundary: true`. Only source-stated facts are
+populated: current Codex hooks contribute their trigger but no success outcome
+or summary, while rollout completion contributes `message` summary,
+`replacement_history`, and available window-chain evidence. Older numeric and
+newer string window IDs retain their JSON type. Missing outcome remains
+`unknown`; missing evidence remains null. The separate rollout
+`event_msg/context_compacted` lifecycle signal is an `annotation` carrying its
+source payload, not another compaction or conversation event. Summary and
+replacement history remain derived evidence attached to the completion
+observation; adapters never reconstruct, replace, or mutate an earlier event.
+
 ## Conformance fixtures and disposable Claude spike
 
 The synthetic, version-labelled families are:
 
+- `fixtures/adapter-conformance/codex-cli-0.77.compaction.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.144.compaction.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.144.compaction-hooks.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.messages.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.context.synthetic.jsonl`
 - `fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl`
@@ -96,7 +113,10 @@ messages, deterministic content-part fan-out, and duplicate UI-view
 annotations. The Codex context family covers session/turn scope, complete
 additive setting preservation, explicitly exposed base-instruction evidence,
 observation-local model/provider and CLI-version provenance, and the three
-non-fallback clocks.
+non-fallback clocks. The Codex compaction families cover old numeric and new
+string window identities, the newer complete window chain, exact summary and
+replacement-history evidence, hook request/completion phases, explicit
+completion boundaries, and duplicate lifecycle annotation.
 
 `CodexJsonlAdapter` is the only adapter referenced by the separately built
 disabled tracer image. `DisposableClaudeJsonlAdapter` is defined in the test

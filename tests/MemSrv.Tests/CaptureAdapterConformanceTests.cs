@@ -1,3 +1,5 @@
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text.Json;
 using CaptureAdapters;
 using MemSrv.Core;
@@ -7,6 +9,369 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 {
+    [Fact]
+    public async Task CodexVersionedCompactionFamiliesPreserveOperationsBoundaryAndEvidence()
+    {
+        var adapter = new CodexJsonlAdapter();
+        var cases = new[]
+        {
+            (
+                Fixture: "codex-cli-0.77.compaction.synthetic.jsonl",
+                Actor: "user",
+                History: "Canonical history before old-shape compaction.",
+                Summary:
+                    """{"role":"user","content":"Old-shape compacted summary."}""",
+                ReplacementHistory:
+                    """[{"type":"message","role":"user","content":"Old-shape replacement evidence."}]"""),
+            (
+                Fixture: "codex-cli-0.144.compaction.synthetic.jsonl",
+                Actor: "assistant",
+                History: "Canonical history before new-shape compaction.",
+                Summary:
+                    """{"role":"user","content":[{"type":"input_text","text":"New-shape compacted summary."}]}""",
+                ReplacementHistory:
+                    """[{"type":"message","role":"developer","content":"New-shape replacement evidence."}]""")
+        };
+
+        foreach (var item in cases)
+        {
+            string fixture = Path.Combine(
+                _root, "fixtures/adapter-conformance", item.Fixture);
+            var source = await JsonlSourceReader.ReadAsync(
+                fixture, $"synthetic-{item.Fixture}-compaction", terminalAtEndOfFile: true);
+            var terminal = source.Select(adapter.Adapt)
+                .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+                .ToArray();
+
+            Assert.Equal([0L, 1L, 2L], terminal.Select(value => value.SourcePosition));
+            Assert.All(
+                terminal,
+                value => Assert.Null(value.Observation.Source.HarnessVersion));
+
+            CaptureEvent history = Assert.Single(terminal[0].Observation.Events);
+            Assert.Equal("message", history.Kind);
+            Assert.Equal(item.Actor, history.Actor);
+            Assert.Equal(item.History, history.Payload.GetProperty("text").GetString());
+
+            CaptureEvent completion = Assert.Single(terminal[1].Observation.Events);
+            Assert.Equal("compaction", completion.Kind);
+            Assert.Equal("completion", completion.Payload.GetProperty("phase").GetString());
+            Assert.True(completion.Payload.GetProperty("contextBoundary").GetBoolean());
+            Assert.Null(completion.Payload.GetProperty("trigger").GetString());
+            Assert.Equal("unknown", completion.Payload.GetProperty("outcome").GetString());
+            AssertJsonShape(item.Summary, completion.Payload.GetProperty("summary"));
+            AssertJsonShape(
+                item.ReplacementHistory,
+                completion.Payload.GetProperty("replacementHistory"));
+            Assert.Equal(JsonValueKind.Null, completion.Payload.GetProperty("instructions").ValueKind);
+            Assert.Equal(JsonValueKind.Null, completion.Payload.GetProperty("inputContext").ValueKind);
+
+            CaptureEvent lifecycle = Assert.Single(terminal[2].Observation.Events);
+            Assert.Equal("annotation", lifecycle.Kind);
+            Assert.Equal(
+                "context_compacted",
+                lifecycle.Payload.GetProperty("view").GetString());
+            Assert.Equal(
+                "context_compacted",
+                lifecycle.Payload.GetProperty("evidence").GetProperty("type").GetString());
+
+            if (item.Fixture.Contains("0.77", StringComparison.Ordinal))
+            {
+                Assert.Equal(
+                    7,
+                    completion.Payload.GetProperty("windowMetrics")
+                        .GetProperty("windowId").GetInt32());
+            }
+            else
+            {
+                JsonElement metrics = completion.Payload.GetProperty("windowMetrics");
+                Assert.Equal("window-first", metrics.GetProperty("firstWindowId").GetString());
+                Assert.Equal("window-previous", metrics.GetProperty("previousWindowId").GetString());
+                Assert.Equal("window-current", metrics.GetProperty("windowId").GetString());
+                Assert.Equal(4, metrics.GetProperty("windowNumber").GetInt32());
+            }
+
+            Assert.NotEqual(
+                terminal[0].Observation.SourcePayload.GetRawText(),
+                terminal[1].Observation.SourcePayload.GetRawText());
+        }
+    }
+
+    [Fact]
+    public async Task CodexCompactionHooksAreDistinctRequestAndCompletionOperations()
+    {
+        var adapter = new CodexJsonlAdapter();
+        string fixture = Path.Combine(
+            _root,
+            "fixtures/adapter-conformance/codex-cli-0.144.compaction-hooks.synthetic.jsonl");
+        var source = await JsonlSourceReader.ReadAsync(
+            fixture, "synthetic-codex-compaction-hooks", terminalAtEndOfFile: true);
+
+        var terminal = source.Select(item => adapter.Adapt(item with
+            {
+                MaterialKind = CaptureSourceMaterialKind.HookFact
+            }))
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .ToArray();
+
+        Assert.Equal(["PreCompact", "PostCompact"], terminal.Select(
+            item => item.Observation.Source.RecordType));
+        Assert.All(
+            terminal,
+            item => Assert.Equal("hook_fact", item.Observation.Source.MaterialKind));
+        Assert.All(
+            terminal,
+            item => Assert.Equal(
+                "codex-synthetic-model", item.Observation.Source.Model));
+
+        CaptureEvent request = Assert.Single(terminal[0].Observation.Events);
+        Assert.Equal("compaction", request.Kind);
+        Assert.Equal("request", request.Payload.GetProperty("phase").GetString());
+        Assert.False(request.Payload.GetProperty("contextBoundary").GetBoolean());
+        Assert.Equal("manual", request.Payload.GetProperty("trigger").GetString());
+        Assert.Equal("unknown", request.Payload.GetProperty("outcome").GetString());
+        Assert.Equal(JsonValueKind.Null, request.Payload.GetProperty("summary").ValueKind);
+
+        CaptureEvent completion = Assert.Single(terminal[1].Observation.Events);
+        Assert.Equal("compaction", completion.Kind);
+        Assert.Equal("completion", completion.Payload.GetProperty("phase").GetString());
+        Assert.True(completion.Payload.GetProperty("contextBoundary").GetBoolean());
+        Assert.Equal("manual", completion.Payload.GetProperty("trigger").GetString());
+        Assert.Equal("unknown", completion.Payload.GetProperty("outcome").GetString());
+        Assert.Equal(JsonValueKind.Null, completion.Payload.GetProperty("summary").ValueKind);
+    }
+
+    [Fact]
+    public async Task CodexCompactionPathsUseTheirPublicApiAndOperatorReceiptSeams()
+    {
+        string credential = $"mcap_{Guid.NewGuid():N}";
+        string stableName = $"codex-compaction-{Guid.NewGuid():N}";
+        string credentialPath = Path.Combine(
+            Path.GetTempPath(), $"codex-compaction-key-{Guid.NewGuid():N}");
+        string stateDirectory = Path.Combine(
+            Path.GetTempPath(), $"codex-compaction-state-{Guid.NewGuid():N}");
+        await File.WriteAllTextAsync(credentialPath, credential);
+        try
+        {
+            await RunMemCtlAsync(
+                "capture", "enroll", stableName,
+                "--harness", "codex",
+                "--agent-id", $"capture:{stableName}",
+                "--credential-file", credentialPath);
+
+            var adapter = new CodexJsonlAdapter();
+            using var client = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", credential);
+
+            string hookFixture = Path.Combine(
+                _root,
+                "fixtures/adapter-conformance/codex-cli-0.144.compaction-hooks.synthetic.jsonl");
+            TrustedSourceObservation[] hooks =
+            [
+                .. (await JsonlSourceReader.ReadAsync(
+                    hookFixture,
+                    $"codex-hook-{Guid.NewGuid():N}",
+                    terminalAtEndOfFile: true)).Select(source => source with
+                    {
+                        MaterialKind = CaptureSourceMaterialKind.HookFact
+                    })
+            ];
+            Assert.Equal(2, hooks.Length);
+            foreach ((TrustedSourceObservation hook, string phase, bool boundary)
+                in hooks.Zip(
+                    new[]
+                    {
+                        (Phase: "request", Boundary: false),
+                        (Phase: "completion", Boundary: true)
+                    },
+                    (hook, expected) => (hook, expected.Phase, expected.Boundary)))
+            {
+                var hookRequest = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(hook)).Observation;
+                using var response = await client.PostAsJsonAsync(
+                    "/capture/v1/observations", hookRequest);
+                response.EnsureSuccessStatusCode();
+                JsonElement receipt = JsonDocument.Parse(
+                    await response.Content.ReadAsStringAsync()).RootElement.Clone();
+                Assert.Equal("new", receipt.GetProperty("status").GetString());
+
+                Guid observationUuid = receipt.GetProperty("observationUuid").GetGuid();
+                JsonElement envelope = JsonDocument.Parse(
+                    await RunMemCtlAsync("capture", "receipt", observationUuid.ToString()))
+                    .RootElement;
+                JsonElement payload = envelope.GetProperty("event").GetProperty("payload");
+                Assert.Equal(phase, payload.GetProperty("phase").GetString());
+                Assert.Equal(boundary, payload.GetProperty("contextBoundary").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, payload.GetProperty("summary").ValueKind);
+                Assert.Equal(
+                    "hook_fact",
+                    envelope.GetProperty("observation").GetProperty("source")
+                        .GetProperty("materialKind").GetString());
+
+                using var retryResponse = await client.PostAsJsonAsync(
+                    "/capture/v1/observations", hookRequest);
+                retryResponse.EnsureSuccessStatusCode();
+                JsonElement retry = JsonDocument.Parse(
+                    await retryResponse.Content.ReadAsStringAsync()).RootElement;
+                Assert.Equal("already_accepted", retry.GetProperty("status").GetString());
+                Assert.Equal(observationUuid, retry.GetProperty("observationUuid").GetGuid());
+            }
+
+            var rolloutCases = new[]
+            {
+                (
+                    Fixture: "codex-cli-0.77.compaction.synthetic.jsonl",
+                    History: "Canonical history before old-shape compaction.",
+                    Summary:
+                        """{"role":"user","content":"Old-shape compacted summary."}""",
+                    ReplacementHistory:
+                        """[{"type":"message","role":"user","content":"Old-shape replacement evidence."}]""",
+                    OldShape: true),
+                (
+                    Fixture: "codex-cli-0.144.compaction.synthetic.jsonl",
+                    History: "Canonical history before new-shape compaction.",
+                    Summary:
+                        """{"role":"user","content":[{"type":"input_text","text":"New-shape compacted summary."}]}""",
+                    ReplacementHistory:
+                        """[{"type":"message","role":"developer","content":"New-shape replacement evidence."}]""",
+                    OldShape: false)
+            };
+            var state = new FileCaptureRuntimeState(stateDirectory);
+            foreach (var item in rolloutCases)
+            {
+                string rolloutFixture = Path.Combine(
+                    _root, "fixtures/adapter-conformance", item.Fixture);
+                string sourceStream = $"codex-rollout-{Guid.NewGuid():N}";
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    rolloutFixture,
+                    sourceStream,
+                    state,
+                    SafetyGate());
+                CaptureRuntimeStreamState stream = Assert.Single(
+                    (await state.ReadAsync()).Streams,
+                    candidate => candidate.SourceStream == sourceStream);
+                var receipts = await DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                    adapter,
+                    rolloutFixture,
+                    sourceStream,
+                    stream.Queue,
+                    new Uri(_baseUrl),
+                    credential,
+                    SafetyGate(),
+                    (_, _, _) => Task.CompletedTask);
+
+                Assert.Equal(3, receipts.Count);
+                var canonical = receipts.Select(receipt =>
+                        JsonDocument.Parse(receipt).RootElement.Clone())
+                    .ToArray();
+                Assert.All(
+                    canonical,
+                    receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
+                Assert.Equal(
+                    [0L, 1L, 2L],
+                    canonical.Select(item =>
+                        item.GetProperty("sourcePosition").GetInt64()));
+                Assert.All(canonical, receipt =>
+                {
+                    JsonElement source = receipt.GetProperty("observation")
+                        .GetProperty("source");
+                    Assert.Equal(JsonValueKind.Null, source.GetProperty("harnessVersion").ValueKind);
+                    Assert.Equal(
+                        "4",
+                        receipt.GetProperty("observation").GetProperty("adapter")
+                            .GetProperty("version").GetString());
+                });
+
+                JsonElement historyEnvelope = await ReadOperatorReceiptAsync(canonical[0]);
+                Assert.Equal(
+                    item.History,
+                    historyEnvelope.GetProperty("event").GetProperty("payload")
+                        .GetProperty("text").GetString());
+
+                JsonElement completionEnvelope = await ReadOperatorReceiptAsync(canonical[1]);
+                JsonElement completion = completionEnvelope.GetProperty("event")
+                    .GetProperty("payload");
+                Assert.Equal("completion", completion.GetProperty("phase").GetString());
+                Assert.True(completion.GetProperty("contextBoundary").GetBoolean());
+                AssertJsonShape(item.Summary, completion.GetProperty("summary"));
+                AssertJsonShape(
+                    item.ReplacementHistory,
+                    completion.GetProperty("replacementHistory"));
+                JsonElement windowMetrics = completion.GetProperty("windowMetrics");
+                if (item.OldShape)
+                {
+                    Assert.Equal(7, windowMetrics.GetProperty("windowId").GetInt32());
+                    Assert.Equal(
+                        ["windowId"],
+                        windowMetrics.EnumerateObject()
+                            .Select(property => property.Name)
+                            .Order());
+                }
+                else
+                {
+                    Assert.Equal(
+                        new[] { "firstWindowId", "previousWindowId", "windowId", "windowNumber" }
+                            .Order(),
+                        windowMetrics.EnumerateObject()
+                            .Select(property => property.Name)
+                            .Order());
+                    Assert.Equal(
+                        "window-first",
+                        windowMetrics.GetProperty("firstWindowId").GetString());
+                    Assert.Equal(
+                        "window-previous",
+                        windowMetrics.GetProperty("previousWindowId").GetString());
+                    Assert.Equal(
+                        "window-current",
+                        windowMetrics.GetProperty("windowId").GetString());
+                    Assert.Equal(4, windowMetrics.GetProperty("windowNumber").GetInt32());
+                }
+
+                JsonElement annotationEnvelope = await ReadOperatorReceiptAsync(canonical[2]);
+                Assert.Equal(
+                    "annotation",
+                    annotationEnvelope.GetProperty("event").GetProperty("kind").GetString());
+                Assert.Equal(
+                    "context_compacted",
+                    annotationEnvelope.GetProperty("event").GetProperty("payload")
+                        .GetProperty("view").GetString());
+
+                var retries = await DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                    adapter,
+                    rolloutFixture,
+                    sourceStream,
+                    stream.Queue,
+                    new Uri(_baseUrl),
+                    credential,
+                    SafetyGate(),
+                    (_, _, _) => Task.CompletedTask);
+                var retryReceipts = retries.Select(retry =>
+                        JsonDocument.Parse(retry).RootElement.Clone())
+                    .ToArray();
+                Assert.All(
+                    retryReceipts,
+                    retry => Assert.Equal(
+                        "already_accepted",
+                        retry.GetProperty("status").GetString()));
+                Assert.Equal(
+                    canonical.Select(receipt =>
+                        receipt.GetProperty("observationUuid").GetGuid()),
+                    retryReceipts.Select(receipt =>
+                        receipt.GetProperty("observationUuid").GetGuid()));
+            }
+        }
+        finally
+        {
+            File.Delete(credentialPath);
+            if (Directory.Exists(stateDirectory))
+            {
+                Directory.Delete(stateDirectory, recursive: true);
+            }
+        }
+    }
+
     [Fact]
     public async Task CodexContextRecordsPreserveScopedValuesInstructionsAndIndependentClocks()
     {
@@ -30,7 +395,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         });
         Assert.All(
             terminal,
-            outcome => Assert.Equal("3", outcome.Observation.Adapter.Version));
+            outcome => Assert.Equal("4", outcome.Observation.Adapter.Version));
 
         CaptureObservationRequest session = terminal[0].Observation;
         CaptureEvent sessionContext = Assert.Single(session.Events);
@@ -442,7 +807,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .ToArray();
 
         Assert.Equal(6, terminal.Length);
-        Assert.Equal("3", terminal[0].Observation.Adapter.Version);
+        Assert.Equal("4", terminal[0].Observation.Adapter.Version);
         Assert.Equal(
             [2, 1, 1, 1, 2, 1],
             terminal.Select(outcome => outcome.Observation.Events.Count));
@@ -797,6 +1162,22 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             CaptureSourceMaterialKind.PersistedRecord,
             JsonDocument.Parse(json).RootElement.Clone(),
             isTerminal);
+
+    private async Task<JsonElement> ReadOperatorReceiptAsync(JsonElement receipt)
+    {
+        Guid observationUuid = receipt.GetProperty("observationUuid").GetGuid();
+        return JsonDocument.Parse(
+            await RunMemCtlAsync("capture", "receipt", observationUuid.ToString()))
+            .RootElement.Clone();
+    }
+
+    private static void AssertJsonShape(string expectedJson, JsonElement actual)
+    {
+        using JsonDocument expected = JsonDocument.Parse(expectedJson);
+        Assert.True(
+            JsonElement.DeepEquals(expected.RootElement, actual),
+            $"Expected JSON {expected.RootElement.GetRawText()} but found {actual.GetRawText()}");
+    }
 
     private static JsonSerializerOptions WebJson { get; } =
         new(JsonSerializerDefaults.Web);

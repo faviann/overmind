@@ -8,6 +8,52 @@ namespace MemSrv.Tests;
 public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 {
     [Fact]
+    public void CodexChildRecordsRetainExplicitStreamIdentityAndRecordLocalProvenance()
+    {
+        string fixture = Path.Combine(
+            TestProcessRunner.RepoRoot,
+            "fixtures",
+            "adapter-conformance",
+            "codex-cli-0.144.nested-child.synthetic.jsonl");
+        CodexTranscriptStream stream =
+            Assert.Single(CodexTranscriptDiscovery.Enumerate(fixture));
+        string[] records = File.ReadAllLines(fixture);
+        var adapter = new CodexJsonlAdapter();
+
+        CaptureObservationRequest sessionMeta =
+            Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(new TrustedSourceObservation(
+                    stream.SourceIdentity!,
+                    0,
+                    new CaptureSourceLocator.NativeId("session-meta"),
+                    CaptureSourceMaterialKind.PersistedRecord,
+                    JsonDocument.Parse(records[0]).RootElement.Clone(),
+                    true))).Observation;
+        CaptureObservationRequest turnContext =
+            Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(new TrustedSourceObservation(
+                    stream.SourceIdentity!,
+                    1,
+                    new CaptureSourceLocator.NativeId("turn-context"),
+                    CaptureSourceMaterialKind.PersistedRecord,
+                    JsonDocument.Parse(records[1]).RootElement.Clone(),
+                    true))).Observation;
+
+        Assert.Equal(stream.SourceIdentity, sessionMeta.SourceIdentity);
+        Assert.Equal(stream.SourceIdentity, turnContext.SourceIdentity);
+        Assert.Equal("codex", sessionMeta.Source.Harness);
+        Assert.Equal("0.144.synthetic", sessionMeta.Source.HarnessVersion);
+        Assert.Equal("session_meta", sessionMeta.Source.RecordType);
+        Assert.Equal("openai", sessionMeta.Source.Provider);
+        Assert.Null(sessionMeta.Source.Model);
+        Assert.Equal("persisted_record", sessionMeta.Source.MaterialKind);
+        Assert.Equal("turn_context", turnContext.Source.RecordType);
+        Assert.Equal("gpt-5.6-terra", turnContext.Source.Model);
+        Assert.Null(turnContext.Source.Provider);
+        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "3"), adapter.Identity);
+    }
+
+    [Fact]
     public void CodexValidUnsupportedJsonShapesRemainDeterministicOpaqueEvidence()
     {
         string[] records =
@@ -305,7 +351,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .ToArray();
 
         Assert.Equal(6, terminal.Length);
-        Assert.Equal("2", terminal[0].Observation.Adapter.Version);
+        Assert.Equal("3", terminal[0].Observation.Adapter.Version);
         Assert.Equal(
             [2, 1, 1, 1, 2, 1],
             terminal.Select(outcome => outcome.Observation.Events.Count));

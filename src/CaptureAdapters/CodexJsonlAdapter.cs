@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "2");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "3");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -44,6 +44,9 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             || (hasPayload && payload.ValueKind != JsonValueKind.Object);
         if (!isUnsupportedShape)
         {
+            harnessVersion ??=
+                JsonAdapterHelpers.NullableString(payload, "cli_version")
+                ?? JsonAdapterHelpers.NullableString(payload, "version");
             model ??= JsonAdapterHelpers.NullableString(payload, "model");
             provider ??=
                 JsonAdapterHelpers.NullableString(payload, "model_provider")
@@ -55,7 +58,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             : Interpret(recordType, payload, source.SourcePosition);
         var request = new CaptureObservationRequest(
             ContractVersion: 1,
-            source.SourceSessionId,
+            source.SourceIdentity.ExternalSessionId,
             source.SourcePosition,
             ToWireLocator(source.Locator),
             isObjectRecord ? JsonAdapterHelpers.SourceTimestamp(record) : null,
@@ -68,7 +71,8 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 MaterialKind(source.MaterialKind)),
             Identity,
             record.Clone(),
-            events);
+            events,
+            SourceIdentity: source.SourceIdentity);
         return new CaptureSourcePositionOutcome.Terminal(source.SourcePosition, request);
     }
 

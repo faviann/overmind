@@ -8,12 +8,32 @@ namespace CaptureAdapters;
 /// A record and a hook fact use the same identity and position contract.
 /// </summary>
 public sealed record TrustedSourceObservation(
-    string SourceSessionId,
+    CaptureSourceIdentity SourceIdentity,
     long SourcePosition,
     CaptureSourceLocator Locator,
     CaptureSourceMaterialKind MaterialKind,
     JsonElement SourcePayload,
-    bool IsTerminal);
+    bool IsTerminal)
+{
+    public string SourceSessionId => SourceIdentity.ExternalSessionId;
+
+    public TrustedSourceObservation(
+        string sourceSessionId,
+        long sourcePosition,
+        CaptureSourceLocator locator,
+        CaptureSourceMaterialKind materialKind,
+        JsonElement sourcePayload,
+        bool IsTerminal)
+        : this(
+            new CaptureSourceIdentity(sourceSessionId),
+            sourcePosition,
+            locator,
+            materialKind,
+            sourcePayload,
+            IsTerminal)
+    {
+    }
+}
 
 public enum CaptureSourceMaterialKind
 {

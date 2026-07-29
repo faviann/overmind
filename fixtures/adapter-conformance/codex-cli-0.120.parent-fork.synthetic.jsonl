@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-03T00:00:00Z","type":"session_meta","payload":{"session_id":"01970000-0000-7000-8000-000000000020","id":"01970000-0000-7000-8000-000000000021","parent_thread_id":"01970000-0000-7000-8000-000000000019","forked_from_id":"01970000-0000-7000-8000-000000000018","cli_version":"0.120.synthetic","source":{"subagent":{"review":null}},"thread_source":"subagent"}}
+{"timestamp":"2026-07-03T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":"combined parent and fork child"}}

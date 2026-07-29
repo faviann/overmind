@@ -1,6 +1,9 @@
 using Dapper;
 using MemSrv.Core;
 using Npgsql;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace MemSrv.Tests;
 
@@ -400,6 +403,232 @@ public sealed class SchemaVerifierTests
                 await new OperatorCaptureReads(admin)
                     .ReadCapturedEventEnvelopesAsync(observationUuid));
             Assert.Null(envelope.Observation.RouteEvidence);
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            await ExecuteAsync(
+                MaintenanceConnection,
+                $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
+            Directory.Delete(migrations, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SourceIdentityUpgradeReusesThePopulatedStreamAndItsEstablishedTraceSession()
+    {
+        var migrations = Path.Combine(
+            Path.GetTempPath(), $"memsrv-source-identity-upgrade-{Guid.NewGuid():N}");
+        var database = $"memory_test_{Guid.NewGuid():N}_source_identity_upgrade";
+        var admin = TestDatabase.BuildAdminConnection(database);
+        Guid bindingUuid = Guid.NewGuid();
+        Guid streamUuid = Guid.NewGuid();
+        Guid observationUuid = Guid.NewGuid();
+        byte[] signatureKey = Enumerable.Range(1, 32).Select(value => (byte)value).ToArray();
+        const string legacyPathIdentity = "codex-rollout-legacy-path";
+        const string externalSessionId = "01970000-0000-7000-8000-000000000149";
+        const string childId = "01970000-0000-7000-8000-000000000150";
+        string establishedSessionId = $"capture:{bindingUuid}:{legacyPathIdentity}";
+        string legacySourcePayloadJson = JsonSerializer.Serialize(new
+        {
+            type = "session_meta",
+            payload = new
+            {
+                session_id = externalSessionId,
+                id = childId,
+                source = new { future_classifier = true },
+                thread_source = "subagent",
+                cli_version = "0.144.synthetic"
+            }
+        });
+        using var legacySourcePayload = JsonDocument.Parse(legacySourcePayloadJson);
+        using var legacyEventPayload = JsonDocument.Parse("""{"message":"legacy"}""");
+        var legacySource = new CaptureSource(
+            "codex", null, "session_meta", MaterialKind: "persisted_record");
+        var legacyEvent = new CaptureEvent(
+            "metadata/0", 0, "lifecycle", "harness",
+            legacyEventPayload.RootElement.Clone(), null, null);
+        string legacySignatureContent = JsonSerializer.Serialize(
+            new
+            {
+                contractVersion = 1,
+                sourceSessionId = legacyPathIdentity,
+                locator = (CaptureSourceLocator)new CaptureSourceLocator.NativeId(
+                    "legacy-session-meta"),
+                sourceTimestamp = (CaptureSourceTimestamp?)null,
+                source = legacySource,
+                adapter = new CaptureAdapter("codex-synthetic-jsonl", "2"),
+                sourcePayload = legacySourcePayload.RootElement.Clone(),
+                events = new[] { legacyEvent },
+                routeEvidence = (CaptureRouteEvidence?)null
+            },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        using var hmac = new HMACSHA256(signatureKey);
+        string legacySignature = Convert.ToHexString(
+            hmac.ComputeHash(Encoding.UTF8.GetBytes(legacySignatureContent)))
+            .ToLowerInvariant();
+        Directory.CreateDirectory(migrations);
+        foreach (string path in Directory.EnumerateFiles(
+                     Path.Combine(_root, "migrations"), "*.sql")
+                     .Where(path => string.Compare(
+                         Path.GetFileName(path),
+                         "0008_capture_source_identity.sql",
+                         StringComparison.Ordinal) < 0))
+        {
+            File.Copy(path, Path.Combine(migrations, Path.GetFileName(path)));
+        }
+
+        try
+        {
+            await ExecuteAsync(MaintenanceConnection, $"CREATE DATABASE \"{database}\"");
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                await connection.ExecuteAsync(
+                    """
+                    INSERT INTO capture_source_bindings
+                      (binding_uuid, stable_name, harness, agent_id, credential_hash,
+                       allowed_namespaces, content_signature_key)
+                    VALUES
+                      (@bindingUuid, 'legacy-source-identity-upgrade', 'codex',
+                       'capture:legacy-upgrade', 'legacy-upgrade-credential', '{}',
+                       @signatureKey);
+
+                    INSERT INTO capture_source_streams
+                      (stream_uuid, binding_uuid, source_session_id, effective_namespace,
+                       route_basis, checkpoint_position)
+                    VALUES
+                      (@streamUuid, @bindingUuid, @legacyPathIdentity, 'capture/unscoped',
+                       'fallback', 0);
+
+                    INSERT INTO capture_observations
+                      (observation_uuid, stream_uuid, source_position, locator_kind,
+                       locator_native_id, content_signature, effective_namespace, route_basis,
+                       source, adapter, safe_source_payload, scan_status)
+                    VALUES
+                      (@observationUuid, @streamUuid, 0, 'native_id', 'legacy-session-meta',
+                       @legacySignature, 'capture/unscoped', 'fallback',
+                       '{"harness":"codex","harnessVersion":null,"recordType":"session_meta","materialKind":"persisted_record"}'::jsonb,
+                       '{"name":"codex-synthetic-jsonl","version":"2"}'::jsonb,
+                       CAST(@sourcePayload AS jsonb), 'clean');
+
+                    INSERT INTO captured_events
+                      (observation_uuid, session_id, agent_id, namespace,
+                       part_key, part_order, kind, actor, payload)
+                    VALUES
+                      (@observationUuid, @establishedSessionId, 'capture:legacy-upgrade',
+                       'capture/unscoped', 'metadata/0', 0, 'lifecycle', 'harness',
+                       '{"message":"legacy"}'::jsonb);
+                    """,
+                    new
+                    {
+                        bindingUuid,
+                        streamUuid,
+                        observationUuid,
+                        signatureKey,
+                        legacyPathIdentity,
+                        establishedSessionId,
+                        legacySignature,
+                        sourcePayload = legacySourcePayloadJson
+                    });
+            }
+
+            string observationXmin;
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                observationXmin = await connection.ExecuteScalarAsync<string>(
+                    """
+                    SELECT xmin::text
+                    FROM capture_observations
+                    WHERE observation_uuid = @observationUuid
+                    """,
+                    new { observationUuid })
+                    ?? throw new InvalidOperationException("Legacy observation was not found.");
+            }
+
+            File.Copy(
+                Path.Combine(_root, "migrations", "0008_capture_source_identity.sql"),
+                Path.Combine(migrations, "0008_capture_source_identity.sql"));
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+
+            using var sourcePayload = JsonDocument.Parse(
+                """{"type":"turn_context","payload":{"message":"continued"}}""");
+            using var eventPayload = JsonDocument.Parse("""{"message":"continued"}""");
+            var command = CaptureObservationCommand.FromRequest(new CaptureObservationRequest(
+                1,
+                externalSessionId,
+                1,
+                new CaptureLocator("native_id", "continued-record", null, null, null),
+                null,
+                new CaptureSource(
+                    "codex", "0.144.synthetic", "turn_context",
+                    MaterialKind: "persisted_record"),
+                new CaptureAdapter("codex-synthetic-jsonl", "3"),
+                sourcePayload.RootElement.Clone(),
+                [
+                    new CaptureEvent(
+                        "message/0", 0, "message", "user",
+                        eventPayload.RootElement.Clone(), null, null)
+                ],
+                SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId)));
+            var ingestion = new CaptureIngestion(
+                admin,
+                new NeverStoreGate(Path.Combine(_root, "config", "never_store.yaml")));
+            var binding = new CaptureBindingContext(
+                bindingUuid,
+                "codex",
+                "capture:legacy-upgrade",
+                signatureKey,
+                CaptureRoutingPolicy.Empty);
+            var historicalRetry = await ingestion.ImportAsync(
+                binding,
+                CaptureObservationCommand.FromRequest(new CaptureObservationRequest(
+                    1,
+                    externalSessionId,
+                    0,
+                    new CaptureLocator(
+                        "native_id", "legacy-session-meta", null, null, null),
+                    null,
+                    legacySource with { HarnessVersion = "0.144.synthetic" },
+                    new CaptureAdapter("codex-synthetic-jsonl", "3"),
+                    legacySourcePayload.RootElement.Clone(),
+                    [legacyEvent],
+                    SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId))));
+            Assert.Equal("already_accepted", historicalRetry.Status);
+            Assert.Equal(observationUuid, historicalRetry.ObservationUuid);
+            Assert.Equal(streamUuid, historicalRetry.Observation.SourceStreamUuid);
+
+            var receipt = await ingestion.ImportAsync(
+                binding,
+                command);
+
+            Assert.Equal(streamUuid, receipt.Observation.SourceStreamUuid);
+            Assert.Equal(
+                new CaptureSourceIdentity(externalSessionId, childId),
+                receipt.Observation.SourceIdentity);
+            Assert.Equal(
+                establishedSessionId,
+                Assert.Single(receipt.Events).Event.SessionId);
+            var legacyEnvelope = Assert.Single(
+                await new OperatorCaptureReads(admin)
+                    .ReadCapturedEventEnvelopesAsync(observationUuid));
+            Assert.Equal(establishedSessionId, legacyEnvelope.Event.SessionId);
+            Assert.Equal(
+                new CaptureSourceIdentity(externalSessionId, childId),
+                legacyEnvelope.Observation.SourceIdentity);
+            await using var verification = new NpgsqlConnection(admin);
+            await verification.OpenAsync();
+            Assert.Equal(
+                observationXmin,
+                await verification.ExecuteScalarAsync<string>(
+                    """
+                    SELECT xmin::text
+                    FROM capture_observations
+                    WHERE observation_uuid = @observationUuid
+                    """,
+                    new { observationUuid }));
         }
         finally
         {

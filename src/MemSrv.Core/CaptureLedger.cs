@@ -47,6 +47,8 @@ internal static class CaptureLedger
             """
             SELECT o.observation_uuid AS ObservationUuid,
                    o.stream_uuid AS SourceStreamUuid,
+                   s.external_session_id AS ExternalSessionId,
+                   s.child_id AS ChildId,
                    o.locator_kind AS LocatorKind,
                    o.locator_native_id AS LocatorNativeId,
                    o.locator_byte_offset AS LocatorByteOffset,
@@ -64,6 +66,7 @@ internal static class CaptureLedger
                    o.scan_redaction_count AS ScanRedactionCount,
                    o.captured_at AS CapturedAt
             FROM capture_observations o
+            JOIN capture_source_streams s USING (stream_uuid)
             WHERE o.observation_uuid = @observationUuid
             """,
             new { observationUuid }, transaction);
@@ -75,6 +78,7 @@ internal static class CaptureLedger
         return new CaptureObservationReceipt(
             row.ObservationUuid,
             row.SourceStreamUuid,
+            new CaptureSourceIdentity(row.ExternalSessionId, row.ChildId),
             JsonSerializer.Deserialize<CaptureSource>(row.SourceJson, JsonOptions)!,
             CaptureSourceLocator.FromColumns(new CaptureSourceLocator.Columns(
                 row.LocatorKind, row.LocatorNativeId, row.LocatorByteOffset, row.LocatorByteLength)),
@@ -152,6 +156,8 @@ internal static class CaptureLedger
     {
         public Guid ObservationUuid { get; set; }
         public Guid SourceStreamUuid { get; set; }
+        public string ExternalSessionId { get; set; } = "";
+        public string? ChildId { get; set; }
         public string LocatorKind { get; set; } = "";
         public string? LocatorNativeId { get; set; }
         public long? LocatorByteOffset { get; set; }

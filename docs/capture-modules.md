@@ -20,7 +20,7 @@ Source interpretation before this spine is described by the
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
-| `CodexTranscriptDiscovery` | `Enumerate(configuredLocation)` | `CodexCaptureTracer` |
+| `CodexTranscriptDiscovery` | `Enumerate(configuredLocation)` → streams with explicit Codex source identity | `CodexCaptureTracer` |
 | `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
 | `CaptureRescanScheduler` | `RunAsync(scanCycle, schedule, jitterSource, delay)` | `CodexCaptureTracer` |
 | `CaptureRescanConfiguration` | `Load(readEnvironment)` → `CaptureRescanSchedule` | `CodexCaptureTracer` |
@@ -146,7 +146,10 @@ Under the Codex-shaped `sessions/` and `archived_sessions/` subtrees, discovery
 uses the rollout's unique filename to retain one logical identity when a nested
 `sessions/YYYY/MM/DD/<filename>` rollout moves to the flat
 `archived_sessions/<filename>` location, and marks only that flat archived
-location terminal at EOF. Simultaneous active/archive copies or two active
+location terminal at EOF. When a rollout contains `session_meta`, its explicit
+external-session/optional-child tuple replaces path identity; the filename
+behavior remains the compatibility fallback for synthetic or legacy inputs
+without metadata. Simultaneous active/archive copies or two active
 rollouts with the same filename are rejected as ambiguous rather than silently
 conflated. The directory move is stable filesystem evidence; elapsed time and
 inactivity never establish terminality. Stream identity remains independent of
@@ -161,6 +164,16 @@ plus that jitter. The scheduler awaits each whole
 enumeration/claim/delivery cycle, so a slow cycle cannot overlap another. The
 packaged tracer retains per-stream failures for a later cycle rather than
 letting one outage cancel responsibility for other configured streams.
+
+The server combines the discovered tuple with the authenticated binding,
+persists its components on `capture_source_streams`, and derives a deterministic
+stream UUID and canonical trace-session ID for a new stream. Migration recovers
+an accepted Codex tuple from its immutable `session_meta` observation and
+preserves the trace-session ID already carried by that stream's events; later
+positions reuse the durable ID rather than deriving a second identity.
+Parent/fork facts are excluded. Resume, retry, archive movement, and historical
+rediscovery therefore converge, while distinct child identities under one
+external session cannot collide.
 
 **`DisabledCaptureRuntime`** — orders durable responsibility by source
 position, revalidates each queued candidate against the source fixture, and

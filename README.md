@@ -119,8 +119,9 @@ checklist before authorizing any issue:
    AFK_REQUIRED_CHECKS='test test-compose reference-compose' make afk
    ```
 
-For each launch, choose exactly one open issue that is already
-`ready-for-agent`, review it, and add only the `Sandcastle` authorization:
+For each launch, choose one or more open issues that are already
+`ready-for-agent`, review each one, and add only the `Sandcastle`
+authorization:
 
 ```sh
 gh issue view <issue-number> --json state,labels
@@ -135,23 +136,27 @@ tmux new-session -s overmind-afk
 make afk
 ```
 
+Each launch mirrors its stdout and stderr to a private timestamped file under
+`.git/afk-logs/` while preserving live terminal output. Set `AFK_LOG_DIR` to
+store these logs elsewhere.
+
 Launch preflight is read-only: it checks policy and prerequisites but never
 creates labels, installs skills, or repairs configuration. After preflight, the
 watcher observes the live `ready-for-agent` + `Sandcastle` queue and claims the
 selected issue by removing `Sandcastle` before agent launch. It then runs the
 full `work-on` lifecycle on a named isolated branch/worktree and labels the
-resulting pull request `afk-review`. It processes one issue at a time and starts
-each selection from the latest verified default branch. An empty or unchanged
-ineligible queue is polled without invoking an agent or selector model. When a
-selection pass chooses no issue, the watcher mutates nothing, always reports
-that no issue was selected — including the selector's reason when one is
-available — and reconsiders the same unchanged authorized queue at the first
-poll after a fixed 900-second cooldown; any real queue, dependency, issue-state,
-or default-branch change is reconsidered on the next poll. A first termination
-signal drains an active issue (or exits immediately while idle); a second signal
-forces termination. The consumed `Sandcastle` authorization is one attempt: a
-retry requires an operator to review the issue again and explicitly re-add
-`Sandcastle`.
+resulting pull request `afk-review`. It processes authorized issues one at a
+time and starts each selection from the latest verified default branch. An
+empty or unchanged ineligible queue is polled without invoking an agent or
+selector model. When a selection pass chooses no issue, the watcher mutates
+nothing, always reports that no issue was selected — including the selector's
+reason when one is available — and reconsiders the same unchanged authorized
+queue at the first poll after a fixed 900-second cooldown; any real queue,
+dependency, issue-state, or default-branch change is reconsidered on the next
+poll. A first termination signal drains an active issue (or exits immediately
+while idle); a second signal forces termination. The consumed `Sandcastle`
+authorization is one attempt: a retry requires an operator to review the issue
+again and explicitly re-add `Sandcastle`.
 
 After tagging `afk-review`, the watcher hands the pull request to a guarded merge
 stage. It merges unattended only when every gate holds, and otherwise leaves the

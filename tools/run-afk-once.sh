@@ -6,7 +6,7 @@ fail() {
   exit 1
 }
 
-for command in git gh codex flock jq setsid sha256sum; do
+for command in git gh codex flock jq setsid sha256sum tee; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
 
@@ -15,6 +15,23 @@ cd "$repo_root"
 workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 git_dir="$(git rev-parse --git-common-dir)"
+log_dir="${AFK_LOG_DIR:-$git_dir/afk-logs}"
+mkdir -p -- "$log_dir" || fail "could not create AFK log directory: $log_dir"
+log_dir="$(cd -- "$log_dir" && pwd)" || fail "could not resolve AFK log directory: $log_dir"
+log_file="$log_dir/afk-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+: >"$log_file" || fail "could not create AFK log file: $log_file"
+chmod 600 "$log_file" || fail "could not protect AFK log file: $log_file"
+
+# Mirror both terminal streams into one private per-run log while preserving
+# their original terminal destinations. The tee processes ignore watcher
+# control signals and exit on EOF, leaving this process as the owner of drain,
+# force-stop, and exit-status behavior.
+exec 3>&1 4>&2
+exec > >(trap '' INT TERM HUP; exec tee -a "$log_file" >&3) \
+  2> >(trap '' INT TERM HUP; exec tee -a "$log_file" >&4)
+exec 3>&- 4>&-
+printf 'AFK watcher log: %s\n' "$log_file" >&2
+
 exec 9>"$git_dir/afk-tracer.lock"
 flock -n 9 || fail "another AFK tracer owns this repository; stop it before launching another"
 

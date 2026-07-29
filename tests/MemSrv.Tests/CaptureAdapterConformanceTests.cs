@@ -201,6 +201,8 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                 JsonElement payload = envelope.GetProperty("event").GetProperty("payload");
                 Assert.Equal(phase, payload.GetProperty("phase").GetString());
                 Assert.Equal(boundary, payload.GetProperty("contextBoundary").GetBoolean());
+                Assert.Equal("manual", payload.GetProperty("trigger").GetString());
+                Assert.Equal("unknown", payload.GetProperty("outcome").GetString());
                 Assert.Equal(JsonValueKind.Null, payload.GetProperty("summary").ValueKind);
                 Assert.Equal(
                     "hook_fact",

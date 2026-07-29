@@ -78,6 +78,16 @@ isolation with claim-state mechanics. Their documented public module surfaces
 in `docs/capture-modules.md` are legitimate focused test seams, limited to
 those mechanisms.
 
+The transport-omission mechanism is also authorized at the
+`CodexCaptureClaimer` durable-state and `DisabledCaptureRuntime` delivery module
+seams. A test may inject a smaller positive transport bound to make omission
+and mandatory-identity refusal mechanically observable, but the injected value
+can only tighten the fixed 1,000,000-byte production bound; a larger request
+must never loosen it. These focused tests do not replace packaged-apphost proof:
+the real tracer must retain an observation whose adapted request is exactly
+1,000,000 UTF-8 bytes whole and convert the next byte to the versioned omission
+through the real HTTP API and operator read.
+
 This is not a general license to test capture behavior through modules.
 Startup/resume, delivery retry and timeout convergence, append/archive
 transitions, and canonical results must retain packaged-apphost coverage

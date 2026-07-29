@@ -256,6 +256,129 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task LegacySessionTransportOmissionImportsAndRetriesWithOneCanonicalIdentity()
+    {
+        string captureKey = CaptureCredential();
+        const string sourceSessionId = "legacy-transport-session";
+        await EnrollAsync($"legacy-transport-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        JsonElement payload = JsonSerializer.SerializeToElement(new { safe = true });
+        var legacy = new CaptureObservationRequest(
+            1,
+            sourceSessionId,
+            0,
+            new CaptureLocator(
+                "native_id",
+                $"legacy-transport-{Guid.NewGuid():N}",
+                null,
+                null,
+                null),
+            null,
+            new CaptureSource("codex", null, new string('p', 2_048), null, null, null),
+            new CaptureAdapter("legacy", "1"),
+            payload,
+            [new CaptureEvent("legacy/0", 0, "opaque", "harness", payload, null, [])]);
+
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+            CaptureFidelityPolicy.SerializeForTransport(legacy, 1_024);
+        CaptureObservationRequest request =
+            JsonSerializer.Deserialize<CaptureObservationRequest>(
+                bounded.Serialized,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Null(request.SourceSessionId);
+        Assert.Equal(
+            new CaptureSourceIdentity(sourceSessionId),
+            request.SourceIdentity);
+        Assert.Equal(
+            sourceSessionId,
+            request.SourcePayload.GetProperty("omission")
+                .GetProperty("sourceIdentity")
+                .GetProperty("externalSessionId").GetString());
+
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
+        CaptureObservationCommand command =
+            CaptureObservationCommand.FromRequest(request);
+        CaptureImportReceipt first = await ingestion.ImportAsync(binding, command);
+        CaptureImportReceipt retry = await ingestion.ImportAsync(binding, command);
+
+        Assert.Equal("new", first.Status);
+        Assert.Equal("already_accepted", retry.Status);
+        Assert.Equal(first.ObservationUuid, retry.ObservationUuid);
+        Assert.Equal(
+            sourceSessionId,
+            first.Observation.SourceIdentity.ExternalSessionId);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MandatoryIdentityOrNativeLocatorThatCannotFitContentBoundAppendsNothing(
+        bool oversizedIdentity)
+    {
+        string captureKey = CaptureCredential();
+        string bindingName = $"unfit-content-{Guid.NewGuid():N}";
+        await EnrollAsync(bindingName, captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        const string sentinel = "MANDATORY-RAW-VALUE-MUST-NOT-BE-CANONICAL";
+        string oversized = string.Concat(Enumerable.Repeat(sentinel, 100));
+        string sourceSessionId = oversizedIdentity ? oversized : UniqueSession();
+        string locator = oversizedIdentity
+            ? $"unfit-identity-{Guid.NewGuid():N}"
+            : oversized;
+        JsonElement payload = JsonSerializer.SerializeToElement(new { safe = true });
+        var command = CaptureObservationCommand.FromRequest(
+            new CaptureObservationRequest(
+                1,
+                sourceSessionId,
+                0,
+                new CaptureLocator("native_id", locator, null, null, null),
+                null,
+                new CaptureSource("codex", null, null, null, null, null),
+                new CaptureAdapter("test", "1"),
+                payload,
+                [new CaptureEvent("test/0", 0, "opaque", "harness", payload, null, [])],
+                SourceIdentity: new CaptureSourceIdentity(sourceSessionId)));
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxObservationBytes = 1_024 }));
+
+        SafetyScanException failure =
+            await Assert.ThrowsAsync<SafetyScanException>(
+                () => ingestion.ImportAsync(binding, command));
+
+        Assert.Contains("failed closed", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(sentinel, failure.ToString(), StringComparison.Ordinal);
+        await using var connection = new NpgsqlConnection(AdminConnection);
+        await connection.OpenAsync();
+        Assert.False(await connection.ExecuteScalarAsync<bool>(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM capture_observations o
+                JOIN capture_source_streams s USING (stream_uuid)
+                JOIN capture_source_bindings b USING (binding_uuid)
+                WHERE b.stable_name = @bindingName)
+            """,
+            new { bindingName }));
+        Assert.False(await connection.ExecuteScalarAsync<bool>(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM capture_source_streams s
+                JOIN capture_source_bindings b USING (binding_uuid)
+                WHERE b.stable_name = @bindingName)
+            """,
+            new { bindingName }));
+    }
+
+    [Fact]
     public async Task BudgetExhaustionPersistsNothingAndLeavesThePositionForTheNextRecord()
     {
         string captureKey = CaptureCredential();

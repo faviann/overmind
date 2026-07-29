@@ -27,9 +27,14 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     {
         CaptureLedger.RequireSafetyConfigured(neverStore);
         Validate(binding, command);
-        string inputJson = JsonSerializer.Serialize(command, CaptureLedger.JsonOptions);
-        long originalByteCount = Encoding.UTF8.GetByteCount(inputJson);
         CaptureObservationCommand originalCommand = command;
+        BoundedCaptureRepresentation<CaptureObservationCommand> bounded =
+            CaptureFidelityPolicy.SerializeForContent(
+                originalCommand,
+                neverStore.Budgets.MaxObservationBytes);
+        string inputJson = bounded.Serialized;
+        long originalByteCount = bounded.OriginalByteCount;
+        command = bounded.Observation;
 
         string signatureContent = JsonSerializer.Serialize(
             new CaptureSignatureContent(
@@ -44,17 +49,10 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 originalCommand.RouteEvidence),
             CaptureLedger.JsonOptions);
         string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
-        bool observationWasOmitted =
-            originalByteCount > neverStore.Budgets.MaxObservationBytes;
-        if (observationWasOmitted)
-        {
-            command = CaptureFidelityPolicy.OmitForContentLimit(
-                originalCommand, originalByteCount);
-            inputJson = JsonSerializer.Serialize(command, CaptureLedger.JsonOptions);
-        }
-        // The omitted representation itself must remain bounded. The Kestrel
-        // transport cap on this route is deliberately far below the production
-        // content limit (see docs/capture-safety-budgets.md).
+        bool observationWasOmitted = bounded.WasOmitted;
+        // The fidelity policy already proves the chosen serialized
+        // representation fits. The gate independently enforces its configured
+        // observation budget before scanning.
         neverStore.AssertObservationWithinBudget(inputJson);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
         if (observationWasOmitted)

@@ -1,6 +1,6 @@
 # Capture modules
 
-The capture spine (issue #74, stabilized by #120 and routed by #77) is five
+The capture spine (issue #74, stabilized by #120 and routed by #77) is six
 public modules in `MemSrv.Core`, plus the never-store gate (#76) that all of
 them cross. No module requires a caller to understand another's rules. This
 note records the shape that exists; it decides nothing new.
@@ -16,6 +16,7 @@ Source interpretation before this spine is described by the
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
+| `CaptureFidelityPolicy` | `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
@@ -30,6 +31,19 @@ rows — observations, events, relationships — that ingestion and operator rea
 both project into canonical facts.
 
 ## Invariants each interface hides
+
+**`CaptureFidelityPolicy`** — owns the complete deterministic serialization
+boundary: serialize the original, count its UTF-8 bytes, retain it or replace
+it with the versioned whole-observation omission, serialize that result, and
+refuse if the compact representation itself does not fit. Callers receive the
+chosen value and its exact serialized representation as one outcome; they do
+not repeat byte counting, reconstruct policy output, or infer omission from
+object identity. An injected transport bound can only tighten the fixed
+1,000,000-byte production bound and must be positive. Transport compaction
+canonicalizes the supported legacy `sourceSessionId` shape into top-level
+`sourceIdentity` before clearing the legacy field, and repeats that same
+identity in omission provenance. Mandatory source identity and locator values
+are never truncated or fingerprinted to make either bound fit.
 
 **`NeverStoreGate`** — the single governed policy point every write path
 crosses, and the only type that knows rules exist. It hides the rule-set schema
@@ -206,10 +220,12 @@ history or replace an earlier queued or canonical record.
 ## Where the gate runs
 
 The Codex claimer applies the fixed 1,000,000-byte production transport bound
-before a candidate enters the local durable queue. A runtime observation above
-that bound becomes a compact whole-observation omission before durable queueing
-or transmission, and the claimer mechanically verifies that the omission
-itself fits the active bound before it can be claimed. The omission retains the
+before a candidate enters the local durable queue. Tests may inject only a
+tighter positive bound; an injected value above production is clamped and
+cannot admit a raw observation production would omit. A runtime observation
+above the effective bound becomes a compact whole-observation omission before
+durable queueing or transmission, and the fidelity policy mechanically verifies
+that the omission itself fits before it can be claimed. The omission retains the
 authenticated harness, source identity, source position, and locator required
 for ingestion and idempotency. Its source timestamp, source/adapter descriptive
 metadata, route evidence, and original semantic content are absent; the

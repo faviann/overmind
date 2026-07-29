@@ -99,18 +99,11 @@ public static class DisabledCaptureRuntime
             }
 
             var terminal = (CaptureSourcePositionOutcome.Terminal)outcome;
-            string originalJson = JsonSerializer.Serialize(
-                terminal.Observation, JsonDefaults.Options);
-            long originalByteCount = Encoding.UTF8.GetByteCount(originalJson);
-            CaptureObservationRequest boundedObservation =
-                CaptureFidelityPolicy.ApplyTransportLimit(
+            BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+                CaptureFidelityPolicy.SerializeForTransport(
                     terminal.Observation,
-                    originalByteCount,
                     maxTransportBytes);
-            string observationJson = ReferenceEquals(
-                    boundedObservation, terminal.Observation)
-                ? originalJson
-                : JsonSerializer.Serialize(boundedObservation, JsonDefaults.Options);
+            string observationJson = bounded.Serialized;
             // Fail closed before the observation leaves the process: the scan
             // runs here, and a scan FAILURE — an exhausted budget, a matcher
             // timeout, an internal scanner error, or an unusable rule set —

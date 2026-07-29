@@ -636,17 +636,11 @@ public static class CodexCaptureClaimer
             var prefix = new CapturePrefixEvidence(
                 prefixLength,
                 Digest(sourceBytes.AsSpan(0, checked((int)prefixLength))));
-            string originalJson = JsonSerializer.Serialize(
-                terminal.Observation, JsonDefaults.Options);
-            long originalByteCount = Encoding.UTF8.GetByteCount(originalJson);
-            CaptureObservationRequest boundedObservation =
-                CaptureFidelityPolicy.ApplyTransportLimit(
+            BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+                CaptureFidelityPolicy.SerializeForTransport(
                     terminal.Observation,
-                    originalByteCount,
                     maxTransportBytes);
-            string boundedJson = ReferenceEquals(boundedObservation, terminal.Observation)
-                ? originalJson
-                : JsonSerializer.Serialize(boundedObservation, JsonDefaults.Options);
+            string boundedJson = bounded.Serialized;
             safetyGate.AssertObservationWithinBudget(boundedJson);
             string candidateJson = safetyGate.ScanJson(boundedJson).Redacted;
             var locatorEvidence = new CaptureRuntimeLocatorEvidence(

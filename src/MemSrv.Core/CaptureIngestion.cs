@@ -423,16 +423,16 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             return [];
         }
 
-        string? expectedHarnessVersion = CodexV3VersionString(
+        string? expectedHarnessVersion = CodexVersionString(
                 command.SourcePayload, "cli_version")
-            ?? CodexV3VersionString(command.SourcePayload, "version");
+            ?? CodexVersionString(command.SourcePayload, "version");
         if (expectedHarnessVersion is null
             && command.SourcePayload.ValueKind == JsonValueKind.Object
             && command.SourcePayload.TryGetProperty("payload", out JsonElement payload)
             && payload.ValueKind == JsonValueKind.Object)
         {
-            expectedHarnessVersion = CodexV3VersionString(payload, "cli_version")
-                ?? CodexV3VersionString(payload, "version");
+            expectedHarnessVersion = CodexVersionString(payload, "cli_version")
+                ?? CodexVersionString(payload, "version");
         }
         if (!string.Equals(
                 command.Source.HarnessVersion, expectedHarnessVersion, StringComparison.Ordinal))
@@ -442,8 +442,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
 
         var legacySource = command.Source with
         {
-            HarnessVersion = TopLevelString(command.SourcePayload, "cli_version")
-                ?? TopLevelString(command.SourcePayload, "version")
+            HarnessVersion = CodexVersionString(command.SourcePayload, "cli_version")
+                ?? CodexVersionString(command.SourcePayload, "version")
         };
         var legacyAdapter = command.Adapter with { Version = "2" };
         string currentIdentityV2 = JsonSerializer.Serialize(
@@ -473,7 +473,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         return [Sign(currentIdentityV2, key), Sign(historicalV2, key)];
     }
 
-    private static string? CodexV3VersionString(JsonElement value, string propertyName)
+    private static string? CodexVersionString(JsonElement value, string propertyName)
     {
         if (value.ValueKind != JsonValueKind.Object
             || !value.TryGetProperty(propertyName, out JsonElement property))
@@ -488,18 +488,6 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 && nested.ValueKind == JsonValueKind.String => nested.GetString(),
             _ => null
         };
-    }
-
-    private static string? TopLevelString(JsonElement value, string propertyName)
-    {
-        if (value.ValueKind != JsonValueKind.Object
-            || !value.TryGetProperty(propertyName, out JsonElement property)
-            || property.ValueKind != JsonValueKind.String)
-        {
-            return null;
-        }
-        string? result = property.GetString();
-        return string.IsNullOrWhiteSpace(result) ? null : result;
     }
 
     private static string CanonicalSessionId(

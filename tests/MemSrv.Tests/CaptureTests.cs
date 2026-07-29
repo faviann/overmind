@@ -642,6 +642,52 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(HttpStatusCode.Conflict, changedSource.StatusCode);
     }
 
+    [Theory]
+    [InlineData("object", "0.145.object")]
+    [InlineData("blank", "   ")]
+    public async Task CodexAdapterUpgradeRetryPreservesV2TopLevelVersionEvidence(
+        string evidenceShape, string expectedHarnessVersion)
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-upgrade-version-{Guid.NewGuid():N}";
+        object cliVersionEvidence = evidenceShape == "object"
+            ? new { name = expectedHarnessVersion }
+            : expectedHarnessVersion;
+        await EnrollAsync(
+            $"codex-adapter-upgrade-version-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        object observation = CodexUpgradeObservation(
+            externalSessionId,
+            childId,
+            locator,
+            cliVersionEvidence,
+            expectedHarnessVersion);
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations", observation);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var acceptedReceipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        object upgradedObservation = CodexUpgradeObservation(
+            externalSessionId,
+            childId,
+            locator,
+            cliVersionEvidence,
+            expectedHarnessVersion,
+            adapterVersion: "3");
+        var upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations", upgradedObservation);
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        var retryReceipt = await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
     [Fact]
     public async Task DisabledTracerImportsSyntheticCodexMessageAndToolExchange()
     {
@@ -3228,6 +3274,52 @@ public sealed class CaptureTests : HttpSeamTestBase
                     kind = "lifecycle",
                     actor = "harness",
                     payload = new { message }
+                }
+            }
+        };
+
+    private static object CodexUpgradeObservation(
+        string externalSessionId,
+        string childId,
+        string nativeId,
+        object cliVersionEvidence,
+        string harnessVersion,
+        string adapterVersion = "2") => new
+        {
+            contractVersion = 1,
+            sourceSessionId = externalSessionId,
+            sourceIdentity = new { externalSessionId, childId },
+            sourcePosition = 0,
+            locator = new { kind = "native_id", nativeId },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion,
+                recordType = "session_meta",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload = new
+            {
+                type = "session_meta",
+                cli_version = cliVersionEvidence,
+                version = "fallback-must-not-win",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = childId,
+                    thread_source = "subagent"
+                }
+            },
+            events = new[]
+            {
+                new
+                {
+                    partKey = "metadata/0",
+                    partOrder = 0,
+                    kind = "lifecycle",
+                    actor = "harness",
+                    payload = new { message = "same source record" }
                 }
             }
         };

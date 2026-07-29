@@ -18,6 +18,7 @@ test_home="$fixture/home"
 skills="$test_home/.agents/skills"
 events="$fixture/events"
 state="$fixture/state"
+logs="$fixture/logs"
 mkdir -p "$root/tools" "$root/node_modules/.bin" \
   "$root/node_modules/@ai-hero/sandcastle" "$repo" "$adapters" \
   "$skills/work-on/scripts" "$skills/tdd" \
@@ -215,8 +216,11 @@ EOF
 cat >"$adapters/date" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == +%s ]]
-cat "$AFK_TEST_CLOCK"
+case "$*" in
+  "+%s") cat "$AFK_TEST_CLOCK" ;;
+  "-u +%Y%m%dT%H%M%SZ") printf '19700101T000000Z\n' ;;
+  *) exit 90 ;;
+esac
 EOF
 
 cat >"$adapters/gh" <<'EOF'
@@ -366,6 +370,7 @@ setup_scenario() {
   rm -f "$fixture/active" "$fixture/release" "$fixture/merge-oid"
   rm -f "$fixture/preclaim-signalled"
   rm -rf "$fixture/artifact-worktree"
+  rm -rf "$logs"
 }
 
 run_watcher() {
@@ -384,6 +389,7 @@ run_watcher() {
       AFK_TEST_REPO="$repo" AFK_TEST_MERGE_OID="$fixture/merge-oid" \
       AFK_TEST_ARTIFACT_WORKTREE="$fixture/artifact-worktree" \
       AFK_TEST_CLOCK="$fixture/clock" \
+      AFK_LOG_DIR="$logs" \
       "$root/tools/run-afk-once.sh"
 }
 
@@ -468,6 +474,14 @@ mapfile -t chain_bases < <(sed -n 's/^agent-base [0-9][0-9]* //p' "$events")
 [[ "${#chain_bases[@]}" == 2 && "${chain_bases[0]}" != "${chain_bases[1]}" ]]
 [[ "$(sed -n 's/^agent //p' "$events" | paste -sd, -)" == 42,43 ]]
 ! grep -q '^concurrent-agent ' "$events"
+mapfile -t chain_logs < <(find "$logs" -maxdepth 1 -type f -name 'afk-*.log')
+[[ "${#chain_logs[@]}" == 1 ]]
+[[ "$(stat -c '%a' "${chain_logs[0]}")" == 600 ]]
+for output in "$fixture/chain.out" "${chain_logs[0]}"; do
+  grep -q 'AFK watcher started for acme/widget' "$output"
+  grep -q 'AFK issue #42 merged: pull request #142 landed on main' "$output"
+  grep -q 'AFK issue #43 merged: pull request #143 landed on main' "$output"
+done
 
 run_foreground live-add
 [[ "$(grep -c '^agent 42$' "$events")" == 1 ]]

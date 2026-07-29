@@ -14,20 +14,22 @@ root="$fixture/workflow"
 repo="$fixture/repo"
 remote="$fixture/remote.git"
 adapters="$fixture/adapters"
-skills="$fixture/skills"
+test_home="$fixture/home"
+skills="$test_home/.agents/skills"
 events="$fixture/events"
 state="$fixture/state"
 mkdir -p "$root/tools" "$root/node_modules/.bin" \
   "$root/node_modules/@ai-hero/sandcastle" "$repo" "$adapters" \
-  "$skills/work-on/scripts" "$skills/implement" "$skills/tdd" \
+  "$skills/work-on/scripts" "$skills/tdd" \
   "$skills/code-review" "$skills/select-issue"
 cp "$source_root/tools/run-afk-once.sh" "$source_root/tools/run-afk-issue.sh" \
   "$source_root/tools/afk-merge.sh" "$source_root/tools/afk-followups.sh" \
   "$root/tools/"
 touch "$root/node_modules/@ai-hero/sandcastle/package.json" "$events" "$state"
-for skill in work-on implement tdd code-review select-issue; do
-  touch "$skills/$skill/SKILL.md"
+for skill in work-on tdd code-review select-issue; do
+  printf 'scripted %s skill\n' "$skill" >"$skills/$skill/SKILL.md"
 done
+printf 'scripted watcher work-on instructions\n' >"$skills/work-on/SKILL.md"
 
 cat >"$adapters/git" <<'EOF'
 #!/usr/bin/env bash
@@ -122,6 +124,9 @@ cat >"$root/node_modules/.bin/tsx" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 issue="$2"
+[[ "$3" == "afk/issue-$issue" ]]
+[[ "$4" == main ]]
+[[ "$5" =~ ^[0-9a-f]{64}$ ]]
 if [[ -e "$AFK_TEST_ACTIVE" ]]; then
   printf 'concurrent-agent %s\n' "$issue" >>"$AFK_TEST_EVENTS"
   exit 91
@@ -371,7 +376,7 @@ run_watcher() {
   fi
   cd "$repo"
   exec env "${required_checks_override[@]}" \
-      PATH="$adapters:$PATH" AFK_SKILLS_ROOT="$skills" AFK_POLL_SECONDS=0 \
+      PATH="$adapters:$PATH" HOME="$test_home" AFK_POLL_SECONDS=0 \
       AFK_TEST_REAL_GIT="$real_git" AFK_TEST_SCENARIO="$scenario" \
       AFK_TEST_EVENTS="$events" AFK_TEST_STATE="$state" \
       AFK_TEST_ACTIVE="$fixture/active" AFK_TEST_RELEASE="$fixture/release" \

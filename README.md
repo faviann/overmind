@@ -67,18 +67,17 @@ checklist before authorizing any issue:
    npm ci
    ```
 
-3. Install or update the shared `work-on`, `select-issue`, `implement`, `tdd`,
-   and `code-review` skills. The watcher reads shared skills from
-   `${AFK_SKILLS_ROOT:-$HOME/.agents/skills}`.
+3. Install or update the shared `work-on`, `select-issue`, `tdd`, and
+   `code-review` skills. The watcher reads the same global skill directory as
+   Codex: `$HOME/.agents/skills`.
 
    ```sh
    npx skills add mattpocock/skills --global --agent '*' \
-     --skill work-on --skill select-issue --skill implement --skill tdd \
-     --skill code-review --yes
+     --skill work-on --skill select-issue --skill tdd --skill code-review --yes
    npx skills update --global --yes
 
-   skills_root="${AFK_SKILLS_ROOT:-$HOME/.agents/skills}"
-   for skill in work-on select-issue implement tdd code-review; do
+   skills_root="$HOME/.agents/skills"
+   for skill in work-on select-issue tdd code-review; do
      test -f "$skills_root/$skill/SKILL.md"
    done
    test -x "$skills_root/work-on/scripts/select-issue-codex.sh"

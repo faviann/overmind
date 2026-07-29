@@ -1,12 +1,55 @@
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentStreamEvent } from "@ai-hero/sandcastle";
 import { codex, run } from "@ai-hero/sandcastle";
 import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 
-const [issueNumber, branch, defaultBranch] = process.argv.slice(2);
+const [issueNumber, branch, defaultBranch, expectedWorkOnDigest] =
+  process.argv.slice(2);
 
-if (!issueNumber || !/^\d+$/.test(issueNumber) || !branch || !defaultBranch) {
-  throw new Error("usage: main.mts <issue-number> <branch> <default-branch>");
+if (
+  !issueNumber ||
+  !/^\d+$/.test(issueNumber) ||
+  !branch ||
+  !defaultBranch ||
+  !expectedWorkOnDigest ||
+  !/^[0-9a-f]{64}$/.test(expectedWorkOnDigest)
+) {
+  throw new Error(
+    "usage: main.mts <issue-number> <branch> <default-branch> <work-on-sha256>",
+  );
+}
+
+const workOnSkillPath = join(
+  homedir(),
+  ".agents",
+  "skills",
+  "work-on",
+  "SKILL.md",
+);
+let workOnInstructions: string;
+try {
+  workOnInstructions = await readFile(workOnSkillPath, "utf8");
+} catch (error) {
+  throw new Error(
+    `cannot load the required work-on skill at ${workOnSkillPath}`,
+    { cause: error },
+  );
+}
+if (workOnInstructions.trim() === "") {
+  throw new Error(
+    `cannot load the required work-on skill because it is empty: ${workOnSkillPath}`,
+  );
+}
+const observedWorkOnDigest = createHash("sha256")
+  .update(workOnInstructions)
+  .digest("hex");
+if (observedWorkOnDigest !== expectedWorkOnDigest) {
+  throw new Error(
+    `cannot load the required work-on skill because it changed after preflight: ${workOnSkillPath}`,
+  );
 }
 
 const runName = `afk-issue-${issueNumber}`;

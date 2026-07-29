@@ -6,7 +6,7 @@ fail() {
   exit 1
 }
 
-for command in git gh codex flock jq setsid; do
+for command in git gh codex flock jq setsid sha256sum; do
   command -v "$command" >/dev/null 2>&1 || fail "required command is unavailable: $command"
 done
 
@@ -21,11 +21,22 @@ flock -n 9 || fail "another AFK tracer owns this repository; stop it before laun
 gh auth status >/dev/null 2>&1 || fail "GitHub authentication is unavailable; run 'gh auth login'"
 codex login status >/dev/null 2>&1 || fail "Codex authentication is unavailable; run 'codex login'"
 
-skills_root="${AFK_SKILLS_ROOT:-${HOME}/.agents/skills}"
-for skill in work-on select-issue implement tdd code-review; do
-  [[ -f "$skills_root/$skill/SKILL.md" ]] || \
-    fail "required shared skill is unavailable: $skills_root/$skill/SKILL.md"
+[[ -n "${HOME:-}" ]] || fail "HOME is unavailable"
+skills_root="$HOME/.agents/skills"
+[[ -d "$skills_root" ]] || \
+  fail "Codex global skills directory is unavailable: $skills_root"
+required_skills=(work-on select-issue tdd code-review)
+for skill in "${required_skills[@]}"; do
+  [[ -r "$skills_root/$skill/SKILL.md" && -s "$skills_root/$skill/SKILL.md" ]] || \
+    fail "required shared skill is unavailable, unreadable, or empty: $skills_root/$skill/SKILL.md"
 done
+work_on_skill="$skills_root/work-on/SKILL.md"
+[[ -r "$work_on_skill" && -s "$work_on_skill" ]] || \
+  fail "shared work-on skill is unavailable, unreadable, or empty: $work_on_skill"
+read -r work_on_digest _ < <(sha256sum -- "$work_on_skill") || \
+  fail "could not fingerprint shared work-on skill: $work_on_skill"
+[[ "$work_on_digest" =~ ^[0-9a-f]{64}$ ]] || \
+  fail "shared work-on skill returned an invalid fingerprint: $work_on_skill"
 selector="$skills_root/work-on/scripts/select-issue-codex.sh"
 [[ -x "$selector" ]] || fail "shared AFK selector is unavailable or not executable: $selector"
 
@@ -245,6 +256,18 @@ while :; do
     fail "selector returned an issue from $selected_repo instead of $repo_name"
   issue_number="${selected_url##*/}"
 
+  # The intelligent selector is an external process and can run long enough
+  # for the shared workflow to be removed or replaced. Revalidate the exact
+  # resolved skill before consuming the one-shot Sandcastle authorization.
+  for skill in "${required_skills[@]}"; do
+    [[ -r "$skills_root/$skill/SKILL.md" && -s "$skills_root/$skill/SKILL.md" ]] || \
+      fail "required shared skill changed or became unavailable before claim: $skills_root/$skill/SKILL.md"
+  done
+  read -r current_work_on_digest _ < <(sha256sum -- "$work_on_skill") || \
+    fail "could not re-fingerprint shared work-on skill before claim: $work_on_skill"
+  [[ "$current_work_on_digest" == "$work_on_digest" ]] || \
+    fail "shared work-on skill changed before claim: $work_on_skill"
+
   # Selection can take long enough for authorization, dependencies, issue
   # metadata, or the default branch to change. Re-read every input once after
   # the selector returns; any change invalidates its reasoning and restarts the
@@ -330,7 +353,7 @@ while :; do
   # A separate process group gives the second stop signal a deterministic
   # force boundary across Sandcastle and its agent descendants.
   setsid "$workflow_root/tools/run-afk-issue.sh" \
-    "$issue_number" "$branch" "$default_branch" &
+    "$issue_number" "$branch" "$default_branch" "$work_on_digest" &
   active_pid=$!
   if wait_for_active_issue; then
     issue_status=0

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly command_under_test="$(git rev-parse --show-toplevel)/tools/run-afk-once.sh"
+readonly workflow_root="$(git rev-parse --show-toplevel)"
 readonly real_git="$(command -v git)"
 fixture="$(mktemp -d)"
 trap 'rm -rf "$fixture"' EXIT
@@ -9,18 +10,28 @@ trap 'rm -rf "$fixture"' EXIT
 repo="$fixture/repo"
 remote="$fixture/remote.git"
 adapters="$fixture/adapters"
-skills="$fixture/skills"
+test_home="$fixture/home"
+skills="$test_home/.agents/skills"
 events="$fixture/events"
 state="$fixture/state"
 pr_body="$fixture/pr-body.md"
 timer_events="$fixture/timer-events"
 timer_recorder="$fixture/timer-recorder.cjs"
+agent_prompt="$fixture/agent-prompt.txt"
 mkdir -p "$repo" "$adapters" "$skills/work-on/scripts" \
-  "$skills/implement" "$skills/tdd" "$skills/code-review" "$skills/select-issue"
-touch "$events" "$state" "$timer_events"
-for skill in work-on implement tdd code-review select-issue; do
-  touch "$skills/$skill/SKILL.md"
+  "$skills/tdd" "$skills/code-review" "$skills/select-issue"
+touch "$events" "$state" "$timer_events" "$agent_prompt"
+for skill in work-on tdd code-review select-issue; do
+  printf 'scripted %s skill\n' "$skill" >"$skills/$skill/SKILL.md"
 done
+cat >"$skills/work-on/SKILL.md" <<'EOF'
+---
+name: work-on
+description: Scripted AFK work-on fixture.
+---
+
+AFK_TEST_WORK_ON_INSTRUCTION
+EOF
 
 git init --bare --quiet "$remote"
 git -C "$repo" init --quiet --initial-branch=main
@@ -59,6 +70,14 @@ set -euo pipefail
 printf 'selector %s\n' "$*" >>"$AFK_TEST_EVENTS"
 [[ "${1:-}" == afk ]]
 if ! grep -qx claimed "$AFK_TEST_STATE"; then
+  if [[ "${AFK_TEST_REMOVE_WORK_ON_AFTER_SELECTION:-0}" == 1 ]]; then
+    rm "$(dirname "$0")/../SKILL.md"
+  elif [[ "${AFK_TEST_REPLACE_WORK_ON_AFTER_SELECTION:-0}" == 1 ]]; then
+    printf 'replacement work-on instructions\n' >"$(dirname "$0")/../SKILL.md"
+  fi
+  if [[ "${AFK_TEST_REMOVE_TDD_AFTER_SELECTION:-0}" == 1 ]]; then
+    rm "$(dirname "$0")/../../tdd/SKILL.md"
+  fi
   printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
 fi
 EOF
@@ -75,9 +94,9 @@ fi
 prompt="$(cat)"
 branch="$(git branch --show-current)"
 [[ -f .git ]]
-printf 'codex-agent cwd=%s branch=%s args=%s prompt=%s\n' \
-  "$PWD" "$branch" "$*" "$prompt" >>"$AFK_TEST_EVENTS"
-[[ "$prompt" == '$work-on #42' ]]
+printf '%s' "$prompt" >"$AFK_TEST_AGENT_PROMPT"
+printf 'codex-agent cwd=%s branch=%s args=%s\n' \
+  "$PWD" "$branch" "$*" >>"$AFK_TEST_EVENTS"
 
 printf 'completed by scripted work-on boundary\n' >afk-result.txt
 git add afk-result.txt
@@ -183,16 +202,81 @@ EOF
 chmod +x "$adapters/gh" "$adapters/codex" "$adapters/git" "$adapters/sleep" \
   "$skills/work-on/scripts/select-issue-codex.sh"
 
+# The final launch boundary must independently load the skill before
+# Sandcastle/Codex can create a branch or mutate anything. This catches a
+# post-preflight disappearance without relying on the watcher check.
+: >"$events"
+missing_home="$fixture/missing-home"
+missing_skill="$missing_home/.agents/skills/work-on/SKILL.md"
+missing_skill_digest="$(printf 'missing\n' | sha256sum | cut -d' ' -f1)"
+mkdir -p "$missing_home"
+set +e
+(
+  cd "$repo"
+  PATH="$adapters:$PATH" \
+    HOME="$missing_home" \
+    AFK_TEST_EVENTS="$events" \
+    AFK_TEST_AGENT_PROMPT="$agent_prompt" \
+    AFK_TEST_PR_BODY="$pr_body" \
+    AFK_TEST_RELEASE="$fixture/release" \
+    "$workflow_root/node_modules/.bin/tsx" \
+    "$workflow_root/.sandcastle/main.mts" \
+    99 afk/issue-99 main "$missing_skill_digest"
+) >"$fixture/missing-launch-skill.out" 2>&1
+missing_launch_status=$?
+set -e
+[[ "$missing_launch_status" -ne 0 ]] || {
+  echo "expected missing launch skill to fail" >&2
+  exit 1
+}
+grep -Fq "cannot load the required work-on skill at $missing_skill" \
+  "$fixture/missing-launch-skill.out"
+if grep -q '^codex-agent ' "$events"; then
+  echo "Codex launched before the required work-on skill was loaded" >&2
+  exit 1
+fi
+
+# Even a readable skill must match the workflow fingerprint pinned before the
+# one-shot authorization was consumed.
+: >"$events"
+wrong_digest="$(printf '0%.0s' {1..64})"
+set +e
+(
+  cd "$repo"
+  PATH="$adapters:$PATH" \
+    HOME="$test_home" \
+    AFK_TEST_EVENTS="$events" \
+    AFK_TEST_AGENT_PROMPT="$agent_prompt" \
+    AFK_TEST_PR_BODY="$pr_body" \
+    AFK_TEST_RELEASE="$fixture/release" \
+    "$workflow_root/node_modules/.bin/tsx" \
+    "$workflow_root/.sandcastle/main.mts" \
+    98 afk/issue-98 main "$wrong_digest"
+) >"$fixture/changed-launch-skill.out" 2>&1
+changed_launch_status=$?
+set -e
+[[ "$changed_launch_status" -ne 0 ]] || {
+  echo "expected changed launch skill to fail" >&2
+  exit 1
+}
+grep -Fq "cannot load the required work-on skill because it changed after preflight: $skills/work-on/SKILL.md" \
+  "$fixture/changed-launch-skill.out"
+if grep -q '^codex-agent ' "$events"; then
+  echo "Codex launched with a work-on skill that changed after preflight" >&2
+  exit 1
+fi
+
 run_command() {
   (
     cd "$repo"
     PATH="$adapters:$PATH" \
-      AFK_SKILLS_ROOT="$skills" \
+      HOME="$test_home" \
       AFK_TEST_EVENTS="$events" \
       AFK_TEST_STATE="$state" \
       AFK_TEST_PR_BODY="$pr_body" \
       AFK_TEST_REAL_GIT="$real_git" \
       AFK_TEST_TIMER_EVENTS="$timer_events" \
+      AFK_TEST_AGENT_PROMPT="$agent_prompt" \
       AFK_TEST_RELEASE="$fixture/release" \
       NODE_OPTIONS="${NODE_OPTIONS:-} --require=$timer_recorder" \
       AFK_TEST_FAIL_FETCH="${2:-0}" \
@@ -206,7 +290,10 @@ run_command() {
 preflight_cases=(
   'github-auth|GitHub authentication is unavailable|1|0|'
   'codex-auth|Codex authentication is unavailable|0|1|'
-  "missing-skill|required shared skill is unavailable: $skills/tdd/SKILL.md|0|0|tdd"
+  "missing-selector-skill|required shared skill is unavailable, unreadable, or empty: $skills/select-issue/SKILL.md|0|0|select-issue"
+  "missing-worker-skill|required shared skill is unavailable, unreadable, or empty: $skills/work-on/SKILL.md|0|0|work-on"
+  "missing-delegation-skill|required shared skill is unavailable, unreadable, or empty: $skills/tdd/SKILL.md|0|0|tdd"
+  "missing-review-skill|required shared skill is unavailable, unreadable, or empty: $skills/code-review/SKILL.md|0|0|code-review"
 )
 for preflight_case in "${preflight_cases[@]}"; do
   IFS='|' read -r case_name diagnostic fail_gh fail_codex missing_skill \
@@ -227,9 +314,69 @@ for preflight_case in "${preflight_cases[@]}"; do
     exit 1
   fi
   if [[ -n "$missing_skill" ]]; then
-    touch "$skills/$missing_skill/SKILL.md"
+    printf 'scripted %s skill\n' "$missing_skill" \
+      >"$skills/$missing_skill/SKILL.md"
   fi
 done
+
+: >"$events"
+: >"$state"
+if AFK_TEST_REMOVE_WORK_ON_AFTER_SELECTION=1 \
+  run_command 1 >"$fixture/work-on-selection-race.out" 2>&1; then
+  echo "expected work-on disappearance after selection to fail" >&2
+  exit 1
+fi
+grep -Fq "required shared skill changed or became unavailable before claim: $skills/work-on/SKILL.md" \
+  "$fixture/work-on-selection-race.out"
+if grep -Eq '^(gh api --method DELETE|codex-agent )' "$events"; then
+  echo "authorization was consumed after the work-on skill disappeared" >&2
+  exit 1
+fi
+cat >"$skills/work-on/SKILL.md" <<'EOF'
+---
+name: work-on
+description: Scripted AFK work-on fixture.
+---
+
+AFK_TEST_WORK_ON_INSTRUCTION
+EOF
+
+: >"$events"
+: >"$state"
+if AFK_TEST_REPLACE_WORK_ON_AFTER_SELECTION=1 \
+  run_command 1 >"$fixture/work-on-replacement-race.out" 2>&1; then
+  echo "expected work-on replacement after selection to fail" >&2
+  exit 1
+fi
+grep -Fq "shared work-on skill changed before claim: $skills/work-on/SKILL.md" \
+  "$fixture/work-on-replacement-race.out"
+if grep -Eq '^(gh api --method DELETE|codex-agent )' "$events"; then
+  echo "authorization was consumed after the work-on skill changed" >&2
+  exit 1
+fi
+cat >"$skills/work-on/SKILL.md" <<'EOF'
+---
+name: work-on
+description: Scripted AFK work-on fixture.
+---
+
+AFK_TEST_WORK_ON_INSTRUCTION
+EOF
+
+: >"$events"
+: >"$state"
+if AFK_TEST_REMOVE_TDD_AFTER_SELECTION=1 \
+  run_command 1 >"$fixture/supporting-skill-selection-race.out" 2>&1; then
+  echo "expected supporting-skill disappearance after selection to fail" >&2
+  exit 1
+fi
+grep -Fq "required shared skill changed or became unavailable before claim: $skills/tdd/SKILL.md" \
+  "$fixture/supporting-skill-selection-race.out"
+if grep -Eq '^(gh api --method DELETE|codex-agent )' "$events"; then
+  echo "authorization was consumed after a supporting skill disappeared" >&2
+  exit 1
+fi
+printf 'scripted tdd skill\n' >"$skills/tdd/SKILL.md"
 
 : >"$events"
 : >"$state"
@@ -366,7 +513,8 @@ grep -Fq 'tail -f .sandcastle/logs/afk-issue-42.log' "$progress" ||
 claim_line="$(grep -n '^gh api --method DELETE repos/acme/widget/issues/42/labels/Sandcastle$' "$events" | cut -d: -f1)"
 launch_line="$(grep -n '^codex-agent ' "$events" | cut -d: -f1)"
 [[ -n "$claim_line" && -n "$launch_line" && "$claim_line" -lt "$launch_line" ]]
-grep -Eq '^codex-agent cwd=.*/\.sandcastle/worktrees/.* branch=afk/issue-42 args=exec --json --dangerously-bypass-approvals-and-sandbox -m gpt-5\.6-sol -c model_reasoning_effort="medium" prompt=\$work-on #42$' "$events"
+grep -Eq '^codex-agent cwd=.*/\.sandcastle/worktrees/.* branch=afk/issue-42 args=exec --json --dangerously-bypass-approvals-and-sandbox -m gpt-5\.6-sol -c model_reasoning_effort="medium"$' "$events"
+grep -Fqx '$work-on #42' "$agent_prompt"
 git -C "$repo" show-ref --verify --quiet refs/heads/afk/issue-42
 git -C "$repo" show afk/issue-42:afk-result.txt | grep -q '^completed by scripted work-on boundary$'
 grep -qx pr-created "$state"

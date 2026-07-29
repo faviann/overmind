@@ -5,15 +5,16 @@ set -euo pipefail
 # The watcher starts this script in its own process group so a second stop can
 # force the whole Sandcastle/agent tree without weakening graceful drain.
 
-issue_number="${1:?usage: run-afk-issue.sh <issue-number> <branch> <default-branch>}"
-branch="${2:?usage: run-afk-issue.sh <issue-number> <branch> <default-branch>}"
-default_branch="${3:?usage: run-afk-issue.sh <issue-number> <branch> <default-branch>}"
+issue_number="${1:?usage: run-afk-issue.sh <issue-number> <branch> <default-branch> <work-on-digest>}"
+branch="${2:?usage: run-afk-issue.sh <issue-number> <branch> <default-branch> <work-on-digest>}"
+default_branch="${3:?usage: run-afk-issue.sh <issue-number> <branch> <default-branch> <work-on-digest>}"
+work_on_digest="${4:?usage: run-afk-issue.sh <issue-number> <branch> <default-branch> <work-on-digest>}"
 
 workflow_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 set +e
 "$workflow_root/node_modules/.bin/tsx" "$workflow_root/.sandcastle/main.mts" \
-  "$issue_number" "$branch" "$default_branch"
+  "$issue_number" "$branch" "$default_branch" "$work_on_digest"
 agent_status=$?
 set -e
 

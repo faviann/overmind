@@ -34,16 +34,19 @@ both project into canonical facts.
 
 **`CaptureFidelityPolicy`** — owns the complete deterministic serialization
 boundary: stream the original serialization through a byte-counting discard
-sink, retain and materialize it only after proving it fits or replace it with
-the versioned whole-observation omission, serialize that result, and refuse if
-the compact representation itself does not fit. Counting uses the published
-`MaxScanTime` as a fixed deadline and fails closed without reporting a guessed
-original byte count if serialization cannot finish. Callers receive the chosen
-value and its exact serialized representation as one outcome; they do not
-repeat byte counting, reconstruct policy output, or infer omission from object
-identity. Content-signature JSON likewise streams directly into its keyed hash
-instead of materializing the original. An injected transport bound can only tighten the fixed
-1,000,000-byte production bound and must be positive. Transport compaction
+sink, retain and materialize it only after proving it fits, recheck the actual
+UTF-8 size of that materialized string, or replace it with the versioned
+whole-observation omission. The compact result is refused if it does not fit.
+Counting uses the published `MaxScanTime` as a fixed deadline and fails closed
+without reporting a guessed original byte count if serialization cannot
+finish. Callers receive the chosen value and its exact serialized
+representation as one outcome; they do not repeat byte counting, reconstruct
+policy output, or infer omission from object identity. Fidelity counting and
+content-signature hashing share one governed write-only serialization stream;
+only their discard and keyed-hash sinks differ. An injected transport bound can
+only tighten the fixed 1,000,000-byte production bound, an injected content
+bound can only tighten the fixed 128 MiB production bound, and both must be
+positive. Transport compaction
 first runs the original request through
 `CaptureObservationCommand.FromRequest`: conflicting dual identity, a missing
 mandatory identity, and an invalid locator are refused before counting,
@@ -232,8 +235,12 @@ before a candidate enters the local durable queue. Tests may inject only a
 tighter positive bound; an injected value above production is clamped and
 cannot admit a raw observation production would omit. A runtime observation
 above the effective bound becomes a compact whole-observation omission before
-durable queueing or transmission, and the fidelity policy mechanically verifies
-that the omission itself fits before it can be claimed. The omission retains the
+durable queueing or transmission only for a verified `byte_range`, whose source
+digest is covered by the binding-keyed ingestion signature. An over-limit
+`native_id` observation lacks equivalent binding-stable content identity and
+fails closed before claim, queue, or transmission; capture adds neither an
+unkeyed fingerprint nor a credential-rotation-sensitive key. The fidelity
+policy mechanically verifies that the omission itself fits. The omission retains the
 authenticated harness, source identity, source position, and locator required
 for ingestion and idempotency. Its source timestamp, source/adapter descriptive
 metadata, route evidence, and original semantic content are absent; the

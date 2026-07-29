@@ -133,7 +133,10 @@ Each JSONL record has its own numeric source position, verified `byte_range`
 locator measured from the actual fixture bytes, idempotency identity, and
 receipt. The locator and exact-byte digest cover the JSON content plus its LF
 or CRLF separator when present, while JSON parsing excludes the separator.
-Imports may instead use a `native_id` locator when the source exposes one. The
+In-limit imports may instead use a `native_id` locator when the source exposes
+one. Transport-limit omission advancement is byte-range-only; an over-limit
+native locator fails closed before runtime claim because it cannot bind the
+compacted representation to changed original content safely. The
 source timestamp is retained as its exact raw string plus parsed time; it never
 falls back to event occurrence or server capture time. The tool result retains
 its source-native `result_for` relationship to the call.
@@ -178,7 +181,9 @@ writes and checkpoint movement, not reads.
   returned. Equal-length source rewrites therefore conflict even when they
   parse to the same JSON. LF/CRLF and final-newline changes also change source
   identity and stop the stream. A `native_id` locator has no byte-content
-  digest.
+  digest, so an over-transport-limit native observation is not claimed,
+  queued, or sent. No substitute unkeyed or credential-rotation-sensitive
+  fingerprint is introduced.
 - Retry comparison uses a server-owned random per-binding HMAC key. Receipts
   expose canonical scan status, rule-set version, applied rule IDs/categories,
   and aggregate redaction count; raw unsafe input and an unkeyed fingerprint of

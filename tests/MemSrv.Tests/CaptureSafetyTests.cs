@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Dapper;
@@ -244,9 +245,11 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             });
         GC.Collect();
         long before = GC.GetTotalAllocatedBytes(precise: true);
+        var clock = Stopwatch.StartNew();
 
         CaptureImportReceipt receipt = await ingestion.ImportAsync(binding!, command);
 
+        clock.Stop();
         long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
         Assert.Equal("new", receipt.Status);
         Assert.Equal(
@@ -259,6 +262,10 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             allocated < 12L * 1024 * 1024,
             $"Bounded content ingestion allocated {allocated:N0} bytes; it " +
             "should not materialize the roughly 8 MiB original JSON for signing.");
+        Assert.True(
+            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            $"Bounded content ingestion took {clock.Elapsed}; the published deadline is " +
+            $"{SafetyBudgets.Default.MaxScanTime}.");
     }
 
     [Fact]

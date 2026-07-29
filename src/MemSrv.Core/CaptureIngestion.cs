@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Diagnostics;
 using Dapper;
 using Npgsql;
 
@@ -481,73 +480,6 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         }
 
         return signatures;
-    }
-
-    private sealed class HashingSerializationStream(
-        IncrementalHash hash,
-        TimeSpan deadline) : Stream
-    {
-        private readonly Stopwatch _clock = Stopwatch.StartNew();
-        private long _position;
-
-        public override bool CanRead => false;
-        public override bool CanSeek => false;
-        public override bool CanWrite => true;
-        public override long Length => _position;
-        public override long Position
-        {
-            get => _position;
-            set => throw new NotSupportedException();
-        }
-
-        public void AssertWithinDeadline()
-        {
-            if (_clock.Elapsed > deadline)
-            {
-                throw new SafetyScanException(
-                    "capture serialization exceeded the governed " +
-                    $"{deadline.TotalSeconds:0}-second deadline");
-            }
-        }
-
-        public override void Flush() => AssertWithinDeadline();
-
-        public override void Write(byte[] buffer, int offset, int count)
-        {
-            ArgumentNullException.ThrowIfNull(buffer);
-            ArgumentOutOfRangeException.ThrowIfNegative(offset);
-            ArgumentOutOfRangeException.ThrowIfNegative(count);
-            if (offset > buffer.Length - count)
-            {
-                throw new ArgumentException("The buffer range is invalid.");
-            }
-            Add(buffer.AsSpan(offset, count));
-        }
-
-        public override void Write(ReadOnlySpan<byte> buffer) => Add(buffer);
-
-        public override void WriteByte(byte value)
-        {
-            Span<byte> buffer = stackalloc byte[1];
-            buffer[0] = value;
-            Add(buffer);
-        }
-
-        private void Add(ReadOnlySpan<byte> buffer)
-        {
-            AssertWithinDeadline();
-            hash.AppendData(buffer);
-            _position = checked(_position + buffer.Length);
-        }
-
-        public override int Read(byte[] buffer, int offset, int count) =>
-            throw new NotSupportedException();
-
-        public override long Seek(long offset, SeekOrigin origin) =>
-            throw new NotSupportedException();
-
-        public override void SetLength(long value) =>
-            throw new NotSupportedException();
     }
 
     private static string CanonicalSessionId(

@@ -155,8 +155,16 @@ public sealed class SafetyBoundaryTests : HttpSeamTestBase
             ObservationLimitBytes + 1,
             Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(overLimit, options)));
 
+        var callerLoosenedGate = new NeverStoreGate(
+            _shippedRules,
+            null,
+            SafetyBudgets.Default with
+            {
+                MaxObservationBytes =
+                    SafetyBudgets.Default.MaxObservationBytes + 1
+            });
         CaptureImportReceipt omitted = await new CaptureIngestion(
-            RuntimeConnection, gate).ImportAsync(binding, overLimit);
+            RuntimeConnection, callerLoosenedGate).ImportAsync(binding, overLimit);
         Assert.Equal("new", omitted.Status);
         Assert.Equal(
             "observation_exceeds_content_limit",

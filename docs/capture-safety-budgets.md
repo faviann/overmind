@@ -30,7 +30,8 @@ does not advance. The next legitimate record is still accepted at the same
 source position.
 
 `MaxObservationBytes` has a separate deterministic fidelity outcome at the
-`CaptureIngestion` interface. An original observation above 128 MiB is replaced
+`CaptureIngestion` interface. A positive injected bound may tighten but never
+loosen the fixed 128 MiB ceiling. An original observation above the effective bound is replaced
 with a compact whole-observation omission, that representation is scanned and
 persisted, and the checkpoint advances. `NeverStoreGate` still enforces the
 limit through `AssertObservationWithinBudget`: it protects the compact
@@ -48,10 +49,14 @@ Before either fidelity cap is applied, JSON byte measurement streams into a
 discarding counter rather than creating a whole-original serialized string.
 The counter checks the fixed published `MaxScanTime` deadline as serialization
 progresses; deadline exhaustion is an operational fail-closed outcome, records
-no invented original byte count, and occurs before claim or append. Only an
-original proven within its effective cap is materialized. An over-limit
-observation materializes only its compact omission, while ingestion streams
-the original retry-signature representation directly into the keyed hash.
+no invented original byte count, and occurs before claim or append. An original
+believed within its effective cap is materialized and its actual UTF-8 size is
+checked again. If mutable source state made that representation over-limit,
+policy selects the omission using the materialized count or fails closed when
+safe identity cannot support omission. An ordinary over-limit observation
+materializes only its compact omission, while ingestion streams the original
+retry-signature representation directly into the keyed hash. Counting and
+hashing share one governed write-only serialization/deadline implementation.
 
 ### `MaxDecoderCandidateLength` is an accepted residual risk
 
@@ -228,6 +233,12 @@ observation-size, decoder-candidate, scan-time, and matcher-timeout budgets are
 not reachable through the HTTP route. They are exercised at the
 `NeverStoreGate` and `CaptureIngestion` module surfaces instead, with injected
 budgets, and the match-count budget is exercised end-to-end over HTTP.
+Transport omission can advance only a `byte_range` observation, because its
+source digest participates in the binding-keyed signature without being
+persisted. An over-limit `native_id` observation fails closed before claim or
+delivery: it has no binding-stable content identity for detecting a changed
+same-length original after compaction, and policy introduces neither an unkeyed
+fingerprint nor a credential-derived key.
 
 ## Rule-set schema
 

@@ -381,6 +381,75 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public void NativeRecordBeyondTransportLimitFailsClosedAtTheFidelityPolicy()
+    {
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            padding = new string('p', 4_096)
+        });
+        CaptureObservationRequest observation = ResourceBoundObservation(
+            payload,
+            "native-overlimit-policy",
+            new CaptureLocator(
+                "native_id",
+                "stable-native-locator",
+                null,
+                null,
+                null));
+
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
+            () => CaptureFidelityPolicy.SerializeForTransport(observation, 1_024));
+
+        Assert.Contains("native_id", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("fails closed", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NativeRecordBeyondTransportLimitClaimsNothingAndPersistsNoRawContent()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-native-overlimit-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            const string rawSentinel = "NATIVE-OVERLIMIT-RAW-MUST-NOT-PERSIST";
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            InvalidOperationException failure =
+                await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new NativeTransportPaddingAdapter(rawSentinel),
+                        transcript,
+                        "native-overlimit-runtime",
+                        state,
+                        new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                        maxTransportBytes: 1_024));
+
+            Assert.Contains("native_id", failure.Message, StringComparison.Ordinal);
+            Assert.Empty((await state.ReadAsync()).Streams);
+            string statePath = Path.Combine(directory, "state", "capture-state.json");
+            if (File.Exists(statePath))
+            {
+                Assert.DoesNotContain(
+                    rawSentinel,
+                    await File.ReadAllTextAsync(statePath),
+                    StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RequestedTransportBoundCannotQueueAProductionCapPlusOneObservationRaw()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -565,6 +634,55 @@ public sealed class CaptureRuntimeStateTests
             clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
             $"Streaming count took {clock.Elapsed}; the published deadline is " +
             $"{SafetyBudgets.Default.MaxScanTime}.");
+    }
+
+    [Fact]
+    public void MaterializationGrowthCannotReturnAnOverCapTransportRepresentation()
+    {
+        JsonElement small = JsonSerializer.SerializeToElement(new { value = "small" });
+        JsonElement large = JsonSerializer.SerializeToElement(new
+        {
+            value = new string('x', 4_096)
+        });
+        var events = new StatefulEventList(
+            new CaptureEvent("small/0", 0, "opaque", "harness", small, null, []),
+            new CaptureEvent("large/0", 0, "opaque", "harness", large, null, []));
+        CaptureObservationRequest observation = ResourceBoundObservation(
+            small,
+            "materialization-growth",
+            new CaptureLocator(
+                "byte_range",
+                null,
+                0,
+                1,
+                new string('a', 64))) with
+        {
+            Events = events
+        };
+
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+            CaptureFidelityPolicy.SerializeForTransport(observation, 1_024);
+
+        Assert.True(bounded.WasOmitted);
+        Assert.True(Encoding.UTF8.GetByteCount(bounded.Serialized) <= 1_024);
+        Assert.Equal(
+            CaptureFidelityPolicy.TransportLimitReason,
+            bounded.Observation.SourcePayload.GetProperty("omission")
+                .GetProperty("reason").GetString());
+        Assert.True(bounded.OriginalByteCount > 1_024);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void NonpositiveContentBoundIsRejected(long contentBound)
+    {
+        JsonElement payload = JsonSerializer.SerializeToElement(new { value = "safe" });
+        CaptureObservationCommand command = CaptureObservationCommand.FromRequest(
+            ResourceBoundObservation(payload, "invalid-content-bound"));
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => CaptureFidelityPolicy.SerializeForContent(command, contentBound));
     }
 
     [Theory]
@@ -2409,6 +2527,51 @@ public sealed class CaptureRuntimeStateTests
         }
     }
 
+    private sealed class NativeTransportPaddingAdapter(string rawSentinel)
+        : ICaptureSourceAdapter
+    {
+        private readonly string _padding = string.Concat(
+            Enumerable.Repeat(rawSentinel, 200));
+
+        public string Harness => "codex";
+        public CaptureAdapter Identity => new("test", "1");
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            JsonElement payload = JsonSerializer.SerializeToElement(new
+            {
+                padding = _padding
+            });
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    source.SourceIdentity.ExternalSessionId,
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        "native_id",
+                        "stable-native-locator",
+                        null,
+                        null,
+                        null),
+                    null,
+                    new CaptureSource(Harness, null, null, null, null, null),
+                    Identity,
+                    payload,
+                    [
+                        new CaptureEvent(
+                            "synthetic/0",
+                            0,
+                            "opaque",
+                            "harness",
+                            payload,
+                            null,
+                            [])
+                    ],
+                    SourceIdentity: source.SourceIdentity));
+        }
+    }
+
     private sealed class OversizedMandatoryFieldAdapter(
         string sentinel,
         bool oversizedIdentity) : ICaptureSourceAdapter
@@ -2501,17 +2664,18 @@ public sealed class CaptureRuntimeStateTests
 
     private static CaptureObservationRequest ResourceBoundObservation(
         JsonElement payload,
-        string identity) =>
+        string identity,
+        CaptureLocator? locator = null) =>
         new(
             1,
             identity,
             0,
-            new CaptureLocator(
-                "native_id",
-                "resource-bound-locator",
+            locator ?? new CaptureLocator(
+                "byte_range",
                 null,
-                null,
-                null),
+                0,
+                1,
+                new string('a', 64)),
             null,
             new CaptureSource("codex", null, null, null, null, null),
             new CaptureAdapter("test", "1"),
@@ -2527,4 +2691,27 @@ public sealed class CaptureRuntimeStateTests
                     [])
             ],
             SourceIdentity: new CaptureSourceIdentity(identity));
+
+    private sealed class StatefulEventList(
+        CaptureEvent firstEnumeration,
+        CaptureEvent laterEnumeration) : IReadOnlyList<CaptureEvent>
+    {
+        private int _enumerations;
+
+        public int Count => 1;
+        public CaptureEvent this[int index] => index == 0
+            ? (_enumerations == 0 ? firstEnumeration : laterEnumeration)
+            : throw new ArgumentOutOfRangeException(nameof(index));
+
+        public IEnumerator<CaptureEvent> GetEnumerator()
+        {
+            CaptureEvent item = Interlocked.Increment(ref _enumerations) == 1
+                ? firstEnumeration
+                : laterEnumeration;
+            yield return item;
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
+    }
 }

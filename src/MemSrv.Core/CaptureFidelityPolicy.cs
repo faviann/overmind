@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -10,7 +9,7 @@ namespace MemSrv.Core;
 /// </summary>
 public static class CaptureFidelityPolicy
 {
-    public const string CurrentVersion = "capture-fidelity/2026-07-29.3";
+    public const string CurrentVersion = "capture-fidelity/2026-07-29.4";
     public const int ProductionTransportBytes = 1_000_000;
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
@@ -36,10 +35,16 @@ public static class CaptureFidelityPolicy
         return SerializeWithinLimit(
             observation,
             effectiveBound,
-            (request, originalByteCount) => OmitForTransport(
-                request,
-                originalByteCount,
-                validated.SourceIdentity),
+            (request, originalByteCount) =>
+                validated.Locator is CaptureSourceLocator.NativeId
+                    ? throw new InvalidOperationException(
+                        "An over-limit native_id observation cannot fit safely and " +
+                        "fails closed because transport omission requires " +
+                        "binding-stable content identity.")
+                    : OmitForTransport(
+                        request,
+                        originalByteCount,
+                        validated.SourceIdentity),
             omittedByteCount => new InvalidOperationException(
                 "The required capture source identity and locator cannot fit " +
                 $"within the {effectiveBound}-byte transport limit " +
@@ -59,12 +64,15 @@ public static class CaptureFidelityPolicy
                 "The content bound must be positive.");
         }
 
+        long effectiveBound = Math.Min(
+            maxContentBytes,
+            SafetyBudgets.Default.MaxObservationBytes);
         return SerializeWithinLimit(
             observation,
-            maxContentBytes,
+            effectiveBound,
             OmitForContentLimit,
             _ => new SafetyScanException(
-                $"the observation budget of {maxContentBytes} bytes was exceeded"));
+                $"the observation budget of {effectiveBound} bytes was exceeded"));
     }
 
     private static CaptureObservationCommand OmitForContentLimit(
@@ -124,11 +132,17 @@ public static class CaptureFidelityPolicy
             string originalJson = JsonSerializer.Serialize(
                 observation,
                 CaptureLedger.JsonOptions);
-            return new(
-                observation,
-                originalJson,
-                originalByteCount,
-                WasOmitted: false);
+            long materializedByteCount = Encoding.UTF8.GetByteCount(originalJson);
+            if (materializedByteCount <= byteLimit)
+            {
+                return new(
+                    observation,
+                    originalJson,
+                    materializedByteCount,
+                    WasOmitted: false);
+            }
+
+            originalByteCount = materializedByteCount;
         }
 
         T omitted = omit(observation, originalByteCount);
@@ -150,7 +164,7 @@ public static class CaptureFidelityPolicy
 
     private static long CountSerializedBytes<T>(T observation)
     {
-        using var counter = new SerializationCountingStream(
+        using var counter = new CountingSerializationStream(
             SafetyBudgets.Default.MaxScanTime);
         JsonSerializer.Serialize(
             counter,
@@ -203,65 +217,6 @@ public static class CaptureFidelityPolicy
             null,
             []);
 
-    private sealed class SerializationCountingStream(TimeSpan deadline) : Stream
-    {
-        private readonly Stopwatch _clock = Stopwatch.StartNew();
-
-        public long BytesWritten { get; private set; }
-
-        public override bool CanRead => false;
-        public override bool CanSeek => false;
-        public override bool CanWrite => true;
-        public override long Length => BytesWritten;
-        public override long Position
-        {
-            get => BytesWritten;
-            set => throw new NotSupportedException();
-        }
-
-        public void AssertWithinDeadline()
-        {
-            if (_clock.Elapsed > deadline)
-            {
-                throw new SafetyScanException(
-                    "capture serialization exceeded the governed " +
-                    $"{deadline.TotalSeconds:0}-second deadline");
-            }
-        }
-
-        public override void Flush() => AssertWithinDeadline();
-
-        public override void Write(byte[] buffer, int offset, int count)
-        {
-            ArgumentNullException.ThrowIfNull(buffer);
-            ArgumentOutOfRangeException.ThrowIfNegative(offset);
-            ArgumentOutOfRangeException.ThrowIfNegative(count);
-            if (offset > buffer.Length - count)
-            {
-                throw new ArgumentException("The buffer range is invalid.");
-            }
-            Add(count);
-        }
-
-        public override void Write(ReadOnlySpan<byte> buffer) => Add(buffer.Length);
-
-        public override void WriteByte(byte value) => Add(1);
-
-        private void Add(int count)
-        {
-            AssertWithinDeadline();
-            BytesWritten = checked(BytesWritten + count);
-        }
-
-        public override int Read(byte[] buffer, int offset, int count) =>
-            throw new NotSupportedException();
-
-        public override long Seek(long offset, SeekOrigin origin) =>
-            throw new NotSupportedException();
-
-        public override void SetLength(long value) =>
-            throw new NotSupportedException();
-    }
 }
 
 public sealed record BoundedCaptureRepresentation<T>(

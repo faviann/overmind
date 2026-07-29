@@ -50,7 +50,470 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         Assert.Equal("turn_context", turnContext.Source.RecordType);
         Assert.Equal("gpt-5.6-terra", turnContext.Source.Model);
         Assert.Null(turnContext.Source.Provider);
-        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "3"), adapter.Identity);
+        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "5"), adapter.Identity);
+    }
+
+    [Fact]
+    public async Task CodexAdditiveEvidencePreservesExposedReasoningOpaqueVariantsAndAnnotations()
+    {
+        var adapter = new CodexJsonlAdapter();
+        string fixtureRoot = Path.Combine(_root, "fixtures/adapter-conformance");
+        var reasoningSource = await JsonlSourceReader.ReadAsync(
+            Path.Combine(fixtureRoot, "codex-cli-0.145.reasoning.synthetic.jsonl"),
+            "synthetic-codex-reasoning",
+            terminalAtEndOfFile: true);
+        var opaqueSource = await JsonlSourceReader.ReadAsync(
+            Path.Combine(fixtureRoot, "codex-cli-0.145.opaque.synthetic.jsonl"),
+            "synthetic-codex-opaque",
+            terminalAtEndOfFile: true);
+        var annotationSource = await JsonlSourceReader.ReadAsync(
+            Path.Combine(fixtureRoot, "codex-cli-0.145.annotations.synthetic.jsonl"),
+            "synthetic-codex-annotations",
+            terminalAtEndOfFile: true);
+
+        var reasoning = reasoningSource.Select(adapter.Adapt)
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .ToArray();
+        Assert.Equal(
+            ["reasoning", "reasoning"],
+            reasoning[0].Observation.Events.Select(item => item.Kind));
+        Assert.Equal(
+            ["summary/0:reasoning", "content/0:reasoning"],
+            reasoning[0].Observation.Events.Select(item => item.PartKey));
+        Assert.Equal(
+            [0, 1],
+            reasoning[0].Observation.Events.Select(item => item.PartOrder));
+        Assert.Equal(
+            ["Synthetic exposed reasoning summary.", "Synthetic exposed reasoning detail."],
+            reasoning[0].Observation.Events.Select(
+                item => item.Payload.GetProperty("text").GetString()));
+        Assert.All(reasoning[0].Observation.Events, item =>
+        {
+            Assert.Equal("assistant", item.Actor);
+            Assert.False(item.Payload.TryGetProperty("encrypted_content", out _));
+            Assert.False(item.Payload.TryGetProperty("signature", out _));
+        });
+        Assert.Equal(
+            "synthetic-encrypted-provider-metadata",
+            reasoning[0].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("encrypted_content").GetString());
+        Assert.Equal(
+            "not-reasoning",
+            reasoning[0].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("signature").GetProperty("value").GetString());
+
+        CaptureEvent encryptedOnly = Assert.Single(reasoning[1].Observation.Events);
+        Assert.Equal("opaque", encryptedOnly.Kind);
+        Assert.Equal("developer", encryptedOnly.Actor);
+        Assert.Equal("reasoning", encryptedOnly.Payload.GetProperty("payloadType").GetString());
+        Assert.Equal(
+            "synthetic-encrypted-only-provider-metadata",
+            encryptedOnly.Payload.GetProperty("source")
+                .GetProperty("encrypted_content").GetString());
+        Assert.Equal(
+            "synthetic-signature-only",
+            encryptedOnly.Payload.GetProperty("source")
+                .GetProperty("signature").GetString());
+        Assert.True(
+            encryptedOnly.Payload.GetProperty("source")
+                .GetProperty("futureEncryptedField").GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "synthetic-encrypted-only-provider-metadata",
+            reasoning[1].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("encrypted_content").GetString());
+        Assert.Equal(
+            "synthetic-signature-only",
+            reasoning[1].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("signature").GetString());
+        Assert.True(
+            reasoning[1].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("futureEncryptedField").GetProperty("retained").GetBoolean());
+        Assert.False(encryptedOnly.Payload.TryGetProperty("text", out _));
+        Assert.DoesNotContain(
+            reasoning[1].Observation.Events,
+            item => item.Kind == "reasoning");
+
+        Assert.Equal(
+            ["reasoning", "opaque"],
+            reasoning[2].Observation.Events.Select(item => item.Kind));
+        Assert.Equal(
+            ["summary/0:reasoning", "content:opaque"],
+            reasoning[2].Observation.Events.Select(item => item.PartKey));
+        Assert.Equal(
+            [0, 1],
+            reasoning[2].Observation.Events.Select(item => item.PartOrder));
+        Assert.Equal(
+            "Synthetic supported summary beside malformed content.",
+            reasoning[2].Observation.Events[0].Payload.GetProperty("text").GetString());
+        Assert.Equal(
+            ["text"],
+            reasoning[2].Observation.Events[0].Payload.EnumerateObject()
+                .Select(property => property.Name));
+        JsonElement malformedContent = reasoning[2].Observation.Events[1].Payload;
+        Assert.Equal(
+            "future_reasoning_container",
+            malformedContent.GetProperty("contentType").GetString());
+        Assert.Equal(
+            "future_reasoning_container",
+            malformedContent.GetProperty("source").GetProperty("type").GetString());
+        Assert.Equal(
+            "Not promoted from an unsupported container.",
+            malformedContent.GetProperty("source").GetProperty("blocks")[0]
+                .GetProperty("text").GetString());
+        Assert.True(
+            malformedContent.GetProperty("source").GetProperty("futureMalformedSectionField")
+                .GetProperty("retained").GetBoolean());
+        Assert.All(reasoning[2].Observation.Events, item =>
+            Assert.Equal("user", item.Actor));
+
+        Assert.Equal(
+            ["opaque", "reasoning"],
+            reasoning[3].Observation.Events.Select(item => item.Kind));
+        Assert.Equal(
+            ["summary:opaque", "content/0:reasoning"],
+            reasoning[3].Observation.Events.Select(item => item.PartKey));
+        Assert.Equal(
+            [0, 1],
+            reasoning[3].Observation.Events.Select(item => item.PartOrder));
+        JsonElement malformedSummary = reasoning[3].Observation.Events[0].Payload;
+        Assert.Equal(
+            "future_summary_container",
+            malformedSummary.GetProperty("contentType").GetString());
+        Assert.Equal(
+            "future_summary_container",
+            malformedSummary.GetProperty("source").GetProperty("type").GetString());
+        Assert.Equal(
+            "Not promoted from an unsupported summary container.",
+            malformedSummary.GetProperty("source").GetProperty("blocks")[0]
+                .GetProperty("text").GetString());
+        Assert.True(
+            malformedSummary.GetProperty("source").GetProperty("blocks")[0]
+                .GetProperty("nested").GetProperty("retained").GetBoolean());
+        Assert.True(
+            malformedSummary.GetProperty("source").GetProperty("futureMalformedSummaryField")
+                .GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "Synthetic supported content beside malformed summary.",
+            reasoning[3].Observation.Events[1].Payload.GetProperty("text").GetString());
+        Assert.Equal(
+            "future_summary_container",
+            reasoning[3].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("summary").GetProperty("type").GetString());
+        Assert.DoesNotContain(
+            reasoning[3].Observation.Events,
+            item => item.Kind == "reasoning"
+                && item.Payload.TryGetProperty("text", out JsonElement text)
+                && text.GetString() == "Not promoted from an unsupported summary container.");
+        Assert.All(reasoning[3].Observation.Events, item =>
+            Assert.Equal("system", item.Actor));
+
+        CaptureEvent roleAbsent = Assert.Single(reasoning[4].Observation.Events);
+        Assert.Equal("reasoning", roleAbsent.Kind);
+        Assert.Equal("unknown", roleAbsent.Actor);
+        Assert.Equal(
+            "Synthetic role-absent reasoning remains unknown.",
+            roleAbsent.Payload.GetProperty("text").GetString());
+        CaptureEvent roleUnrecognized = Assert.Single(reasoning[5].Observation.Events);
+        Assert.Equal("reasoning", roleUnrecognized.Kind);
+        Assert.Equal("unknown", roleUnrecognized.Actor);
+        Assert.Equal(
+            "Synthetic unrecognized reasoning role remains unknown.",
+            roleUnrecognized.Payload.GetProperty("text").GetString());
+
+        var opaque = opaqueSource.Select(adapter.Adapt)
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .ToArray();
+        CaptureEvent unknownRecord = Assert.Single(opaque[0].Observation.Events);
+        Assert.Equal("opaque", unknownRecord.Kind);
+        Assert.Equal("future_rollout_record", unknownRecord.Payload
+            .GetProperty("recordType").GetString());
+        Assert.Equal(
+            "future_rollout_record",
+            unknownRecord.Payload.GetProperty("source").GetProperty("type").GetString());
+        Assert.Equal(
+            "future_payload",
+            unknownRecord.Payload.GetProperty("source").GetProperty("payload")
+                .GetProperty("type").GetString());
+        Assert.Equal(
+            "preserve me",
+            unknownRecord.Payload.GetProperty("source").GetProperty("payload")
+                .GetProperty("syntheticValue").GetString());
+        Assert.Equal(
+            "INERT_EXPLICIT_PLACEHOLDER",
+            unknownRecord.Payload.GetProperty("source").GetProperty("payload")
+                .GetProperty("sensitiveEvidence").GetString());
+        Assert.True(
+            unknownRecord.Payload.GetProperty("source").GetProperty("futureTopLevelField")
+                .GetProperty("retained").GetBoolean());
+
+        CaptureEvent unknownContent = Assert.Single(opaque[1].Observation.Events);
+        Assert.Equal("content/0:opaque", unknownContent.PartKey);
+        Assert.Equal("opaque", unknownContent.Kind);
+        Assert.Equal(
+            "future_content_block",
+            unknownContent.Payload.GetProperty("contentType").GetString());
+        Assert.Equal(
+            "future_content_block",
+            unknownContent.Payload.GetProperty("source").GetProperty("type").GetString());
+        Assert.Equal(
+            "not canonical text",
+            unknownContent.Payload.GetProperty("source")
+                .GetProperty("syntheticText").GetString());
+        Assert.True(
+            unknownContent.Payload.GetProperty("source").GetProperty("nested")
+                .GetProperty("retained").GetBoolean());
+
+        var annotations = annotationSource.Select(adapter.Adapt)
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .ToArray();
+        Assert.Equal(
+            ["annotation", "annotation", "compaction", "annotation"],
+            annotations.Select(
+                outcome => Assert.Single(outcome.Observation.Events).Kind));
+        Assert.All(annotations, outcome =>
+            Assert.Equal("harness", Assert.Single(outcome.Observation.Events).Actor));
+        Assert.Equal(
+            [
+                "view:turn_started",
+                "view:agent_reasoning",
+                $"compaction/{annotations[2].Observation.SourcePosition}",
+                "view:context_compacted"
+            ],
+            annotations.Select(
+                outcome => Assert.Single(outcome.Observation.Events).PartKey));
+        Assert.Equal(
+            1,
+            annotations.SelectMany(outcome => outcome.Observation.Events)
+                .Count(item => item.Kind == "compaction"));
+        Assert.Equal(
+            1,
+            annotations.SelectMany(outcome => outcome.Observation.Events)
+                .Count(item => item.PartKey == "view:context_compacted"
+                    && item.Kind == "annotation"));
+        Assert.DoesNotContain(
+            annotations.SelectMany(outcome => outcome.Observation.Events),
+            item => item.PartKey == "view:context_compacted"
+                && item.Kind is "compaction" or "opaque");
+        Assert.True(
+            annotations[0].Observation.Events[0].Payload.GetProperty("source")
+                .GetProperty("futureLifecycleField").GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "synthetic-turn-1",
+            annotations[0].Observation.Events[0].Payload.GetProperty("source")
+                .GetProperty("turn_id").GetString());
+        Assert.Equal(
+            200000,
+            annotations[0].Observation.Events[0].Payload.GetProperty("source")
+                .GetProperty("context_window").GetInt32());
+        Assert.True(
+            annotations[1].Observation.Events[0].Payload.GetProperty("source")
+                .GetProperty("futureReasoningViewField").GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "Synthetic duplicate reasoning view.",
+            annotations[1].Observation.Events[0].Payload.GetProperty("source")
+                .GetProperty("text").GetString());
+        CaptureEvent canonicalCompaction = Assert.Single(annotations[2].Observation.Events);
+        Assert.Equal("compaction", canonicalCompaction.Kind);
+        Assert.Equal("harness", canonicalCompaction.Actor);
+        Assert.Equal(
+            "Synthetic paired compacted summary.",
+            canonicalCompaction.Payload.GetProperty("summary").GetString());
+        Assert.Equal(
+            144,
+            canonicalCompaction.Payload.GetProperty("metrics")
+                .GetProperty("beforeTokens").GetInt32());
+        JsonElement compactionSource = annotations[2].Observation.SourcePayload
+            .GetProperty("payload");
+        Assert.Equal(
+            "Synthetic paired compacted summary.",
+            compactionSource.GetProperty("summary")[0].GetProperty("text").GetString());
+        Assert.True(
+            compactionSource.GetProperty("summary")[0].GetProperty("futureSummaryEvidence")
+                .GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "Synthetic retained pre-compaction history.",
+            compactionSource.GetProperty("history")[0].GetProperty("content").GetString());
+        Assert.True(
+            compactionSource.GetProperty("history")[0].GetProperty("futureHistoryEvidence")
+                .GetProperty("retained").GetBoolean());
+        Assert.True(
+            compactionSource.GetProperty("futureCompactionField")
+                .GetProperty("retained").GetBoolean());
+
+        CaptureEvent compactedBoundary = Assert.Single(annotations[3].Observation.Events);
+        Assert.Equal("annotation", compactedBoundary.Kind);
+        Assert.Equal("harness", compactedBoundary.Actor);
+        Assert.True(
+            compactedBoundary.Payload.GetProperty("source")
+                .GetProperty("futureCompactionBoundaryField")
+                .GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "synthetic",
+            compactedBoundary.Payload.GetProperty("source")
+                .GetProperty("futureCompactionBoundaryField")
+                .GetProperty("nested").GetProperty("boundary").GetString());
+        Assert.Equal(
+            "context_compacted",
+            annotations[3].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("type").GetString());
+        Assert.True(
+            annotations[3].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("futureCompactionBoundaryField")
+                .GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "synthetic",
+            annotations[3].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("futureCompactionBoundaryField")
+                .GetProperty("nested").GetProperty("boundary").GetString());
+
+        string first = JsonSerializer.Serialize(
+            reasoning.Concat(opaque).Concat(annotations)
+                .Select(outcome => outcome.Observation.Events),
+            WebJson);
+        string retry = JsonSerializer.Serialize(
+            reasoningSource.Concat(opaqueSource).Concat(annotationSource)
+                .Select(adapter.Adapt)
+                .Cast<CaptureSourcePositionOutcome.Terminal>()
+                .Select(outcome => outcome.Observation.Events),
+            WebJson);
+        Assert.Equal(first, retry);
+    }
+
+    [Fact]
+    public async Task CodexContextRecordsPreserveScopedValuesInstructionsAndIndependentClocks()
+    {
+        var adapter = new CodexJsonlAdapter();
+        string fixture = Path.Combine(
+            _root, "fixtures/adapter-conformance/codex-cli-0.144.context.synthetic.jsonl");
+        var source = await JsonlSourceReader.ReadAsync(
+            fixture, "synthetic-codex-context", terminalAtEndOfFile: true);
+
+        var terminal = source.Select(adapter.Adapt)
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .ToArray();
+
+        Assert.Equal(4, terminal.Length);
+        Assert.All(terminal, outcome =>
+        {
+            CaptureEvent capturedEvent = Assert.Single(outcome.Observation.Events);
+            Assert.Equal("context", capturedEvent.Kind);
+            Assert.Equal("harness", capturedEvent.Actor);
+            Assert.Empty(capturedEvent.Relationships!);
+        });
+        Assert.All(
+            terminal,
+            outcome => Assert.Equal("5", outcome.Observation.Adapter.Version));
+
+        CaptureObservationRequest session = terminal[0].Observation;
+        CaptureEvent sessionContext = Assert.Single(session.Events);
+        Assert.Equal("session_meta", session.Source.RecordType);
+        Assert.Equal("0.144.top-level-session", session.Source.HarnessVersion);
+        Assert.Null(session.Source.Model);
+        Assert.Equal("synthetic-session-provider", session.Source.Provider);
+        Assert.Equal("2026-06-03T10:00:00.000Z", session.SourceTimestamp!.Raw);
+        Assert.Equal(
+            DateTimeOffset.Parse("2026-06-03T10:00:00.000Z"),
+            session.SourceTimestamp.Parsed);
+        Assert.Equal(
+            DateTimeOffset.Parse("2026-06-03T09:59:58.000Z"),
+            sessionContext.OccurredAt);
+        Assert.Equal("session", sessionContext.Payload.GetProperty("scope").GetString());
+        Assert.Equal(
+            "codex-session-synthetic-1",
+            sessionContext.Payload.GetProperty("scopeId").GetString());
+        Assert.Equal(
+            session.SourcePayload.GetProperty("payload").GetRawText(),
+            sessionContext.Payload.GetProperty("values").GetRawText());
+        Assert.Equal(
+            "exposed",
+            sessionContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("base").GetString());
+        Assert.Equal(
+            "unavailable",
+            sessionContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("builtIn").GetString());
+        Assert.Equal(
+            "unavailable",
+            sessionContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("loaded").GetString());
+        Assert.True(
+            sessionContext.Payload.GetProperty("values")
+                .GetProperty("futureSessionSetting").GetProperty("retained").GetBoolean());
+
+        CaptureObservationRequest turn = terminal[1].Observation;
+        CaptureEvent turnContext = Assert.Single(turn.Events);
+        Assert.Equal("0.144.top-level-turn", turn.Source.HarnessVersion);
+        Assert.Equal("codex-synthetic-turn-model", turn.Source.Model);
+        Assert.Null(turn.Source.Provider);
+        Assert.Equal("not-a-source-time", turn.SourceTimestamp!.Raw);
+        Assert.Null(turn.SourceTimestamp.Parsed);
+        Assert.Null(turnContext.OccurredAt);
+        Assert.Equal("turn", turnContext.Payload.GetProperty("scope").GetString());
+        Assert.Equal(
+            "codex-turn-synthetic-1",
+            turnContext.Payload.GetProperty("scopeId").GetString());
+        Assert.Equal(
+            turn.SourcePayload.GetProperty("payload").GetRawText(),
+            turnContext.Payload.GetProperty("values").GetRawText());
+        Assert.Equal(
+            "unavailable",
+            turnContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("base").GetString());
+        JsonElement turnValues = turnContext.Payload.GetProperty("values");
+        Assert.Equal(
+            "codex-synthetic-turn-model",
+            turnValues.GetProperty("model").GetString());
+        Assert.Equal(
+            "/synthetic/turn-workspace",
+            turnValues.GetProperty("cwd").GetString());
+        Assert.Equal(
+            ["synthetic-context"],
+            sessionContext.Payload.GetProperty("values").GetProperty("git")
+                .EnumerateObject()
+                .Where(property => property.Name == "branch")
+                .Select(property => property.Value.GetString()));
+        Assert.True(
+            turnValues.GetProperty("multi_agent").GetProperty("enabled").GetBoolean());
+        Assert.True(
+            turnValues.GetProperty("futureTurnSetting").GetProperty("retained").GetBoolean());
+
+        CaptureObservationRequest secondSession = terminal[2].Observation;
+        CaptureEvent secondSessionContext = Assert.Single(secondSession.Events);
+        Assert.Equal("0.144.payload-fallback", secondSession.Source.HarnessVersion);
+        Assert.Equal("explicit-session-model", secondSession.Source.Model);
+        Assert.Null(secondSession.Source.Provider);
+        Assert.Equal(
+            "codex-session-synthetic-2",
+            secondSessionContext.Payload.GetProperty("scopeId").GetString());
+        Assert.Null(secondSessionContext.OccurredAt);
+        Assert.Equal(
+            "unavailable",
+            secondSessionContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("base").GetString());
+        Assert.Equal(
+            "not-an-occurrence-time",
+            secondSessionContext.Payload.GetProperty("values")
+                .GetProperty("timestamp").GetString());
+
+        CaptureObservationRequest providerTurn = terminal[3].Observation;
+        CaptureEvent providerTurnContext = Assert.Single(providerTurn.Events);
+        Assert.Null(providerTurn.Source.Model);
+        Assert.Equal("explicit-turn-provider", providerTurn.Source.Provider);
+        Assert.Null(providerTurnContext.Payload.GetProperty("scopeId").GetString());
+        Assert.Null(providerTurnContext.OccurredAt);
+        Assert.Equal(
+            "exposed",
+            providerTurnContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("base").GetString());
+
+        string first = JsonSerializer.Serialize(
+            terminal.Select(outcome => outcome.Observation), WebJson);
+        string retry = JsonSerializer.Serialize(
+            source.Select(adapter.Adapt)
+                .Cast<CaptureSourcePositionOutcome.Terminal>()
+                .Select(outcome => outcome.Observation),
+            WebJson);
+        Assert.Equal(first, retry);
     }
 
     [Fact]
@@ -78,11 +541,11 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             JsonValueKind.String,
             JsonValueKind.Number,
             JsonValueKind.True,
-            JsonValueKind.Null,
-            JsonValueKind.Array,
-            JsonValueKind.String,
-            JsonValueKind.Number,
-            JsonValueKind.True
+            JsonValueKind.Object,
+            JsonValueKind.Object,
+            JsonValueKind.Object,
+            JsonValueKind.Object,
+            JsonValueKind.Object
         ];
         var adapter = new CodexJsonlAdapter();
 
@@ -105,6 +568,12 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             Assert.Equal(
                 expectedEvidenceKinds[index],
                 evidence.Payload.GetProperty("source").ValueKind);
+            if (index >= 6)
+            {
+                Assert.Equal(
+                    JsonDocument.Parse(records[index]).RootElement.GetRawText(),
+                    evidence.Payload.GetProperty("source").GetRawText());
+            }
 
             var retry = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
                 adapter.Adapt(Source(records[index], isTerminal: true)));
@@ -351,7 +820,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .ToArray();
 
         Assert.Equal(6, terminal.Length);
-        Assert.Equal("3", terminal[0].Observation.Adapter.Version);
+        Assert.Equal("5", terminal[0].Observation.Adapter.Version);
         Assert.Equal(
             [2, 1, 1, 1, 2, 1],
             terminal.Select(outcome => outcome.Observation.Events.Count));

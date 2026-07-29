@@ -469,7 +469,7 @@ public sealed class SchemaVerifierTests
         using var legacySourcePayload = JsonDocument.Parse(legacySourcePayloadJson);
         using var legacyEventPayload = JsonDocument.Parse("""{"message":"legacy"}""");
         var legacySource = new CaptureSource(
-            "codex", null, "session_meta", MaterialKind: "persisted_record");
+            "codex", "0.144.synthetic", "session_meta", MaterialKind: "persisted_record");
         var legacyEvent = new CaptureEvent(
             "metadata/0", 0, "lifecycle", "harness",
             legacyEventPayload.RootElement.Clone(), null, null);
@@ -482,7 +482,7 @@ public sealed class SchemaVerifierTests
                     "legacy-session-meta"),
                 sourceTimestamp = (CaptureSourceTimestamp?)null,
                 source = legacySource,
-                adapter = new CaptureAdapter("codex-synthetic-jsonl", "2"),
+                adapter = new CaptureAdapter("codex-synthetic-jsonl", "4"),
                 sourcePayload = legacySourcePayload.RootElement.Clone(),
                 events = new[] { legacyEvent },
                 routeEvidence = (CaptureRouteEvidence?)null
@@ -534,8 +534,8 @@ public sealed class SchemaVerifierTests
                     VALUES
                       (@observationUuid, @streamUuid, 0, 'native_id', 'legacy-session-meta',
                        @legacySignature, 'capture/unscoped', 'fallback',
-                       '{"harness":"codex","harnessVersion":null,"recordType":"session_meta","materialKind":"persisted_record"}'::jsonb,
-                       '{"name":"codex-synthetic-jsonl","version":"2"}'::jsonb,
+                       '{"harness":"codex","harnessVersion":"0.144.synthetic","recordType":"session_meta","materialKind":"persisted_record"}'::jsonb,
+                       '{"name":"codex-synthetic-jsonl","version":"4"}'::jsonb,
                        CAST(@sourcePayload AS jsonb), 'clean');
 
                     INSERT INTO captured_events
@@ -611,7 +611,7 @@ public sealed class SchemaVerifierTests
                 new CaptureSource(
                     "codex", "0.144.synthetic", "turn_context",
                     MaterialKind: "persisted_record"),
-                new CaptureAdapter("codex-synthetic-jsonl", "3"),
+                new CaptureAdapter("codex-synthetic-jsonl", "5"),
                 sourcePayload.RootElement.Clone(),
                 [
                     new CaptureEvent(
@@ -626,8 +626,8 @@ public sealed class SchemaVerifierTests
                     new CaptureLocator(
                         "native_id", "legacy-session-meta", null, null, null),
                     null,
-                    legacySource with { HarnessVersion = "0.144.synthetic" },
-                    new CaptureAdapter("codex-synthetic-jsonl", "3"),
+                    legacySource,
+                    new CaptureAdapter("codex-synthetic-jsonl", "5"),
                     legacySourcePayload.RootElement.Clone(),
                     [legacyEvent],
                     SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId));

@@ -418,18 +418,19 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (!string.Equals(command.Source.Harness, "codex", StringComparison.Ordinal)
             || !string.Equals(
                 command.Adapter.Name, "codex-synthetic-jsonl", StringComparison.Ordinal)
-            || !string.Equals(command.Adapter.Version, "3", StringComparison.Ordinal))
+            || !string.Equals(command.Adapter.Version, "5", StringComparison.Ordinal))
         {
             return [];
         }
 
-        string? expectedHarnessVersion = CodexVersionString(
-                command.SourcePayload, "cli_version")
+        JsonElement payload = default;
+        bool hasRecordPayload = command.SourcePayload.ValueKind == JsonValueKind.Object
+            && command.SourcePayload.TryGetProperty("payload", out payload)
+            && payload.ValueKind == JsonValueKind.Object;
+        string? topLevelVersion = CodexVersionString(command.SourcePayload, "cli_version")
             ?? CodexVersionString(command.SourcePayload, "version");
-        if (expectedHarnessVersion is null
-            && command.SourcePayload.ValueKind == JsonValueKind.Object
-            && command.SourcePayload.TryGetProperty("payload", out JsonElement payload)
-            && payload.ValueKind == JsonValueKind.Object)
+        string? expectedHarnessVersion = topLevelVersion;
+        if (expectedHarnessVersion is null && hasRecordPayload)
         {
             expectedHarnessVersion = CodexVersionString(payload, "cli_version")
                 ?? CodexVersionString(payload, "version");
@@ -440,13 +441,19 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             return [];
         }
 
-        var legacySource = command.Source with
+        // Adapter v4 read a payload CLI version only for session_meta records and
+        // never used a payload `version` fallback.
+        string? legacyHarnessVersion = topLevelVersion;
+        if (legacyHarnessVersion is null
+            && hasRecordPayload
+            && string.Equals(command.Source.RecordType, "session_meta", StringComparison.Ordinal))
         {
-            HarnessVersion = CodexVersionString(command.SourcePayload, "cli_version")
-                ?? CodexVersionString(command.SourcePayload, "version")
-        };
-        var legacyAdapter = command.Adapter with { Version = "2" };
-        string currentIdentityV2 = JsonSerializer.Serialize(
+            legacyHarnessVersion = CodexVersionString(payload, "cli_version");
+        }
+
+        var legacySource = command.Source with { HarnessVersion = legacyHarnessVersion };
+        var legacyAdapter = command.Adapter with { Version = "4" };
+        string currentIdentityLegacy = JsonSerializer.Serialize(
             new CaptureSignatureContent(
                 command.ContractVersion,
                 command.SourceIdentity,
@@ -458,7 +465,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 command.Events,
                 command.RouteEvidence),
             CaptureLedger.JsonOptions);
-        string historicalV2 = JsonSerializer.Serialize(
+        string historicalLegacy = JsonSerializer.Serialize(
             new LegacyCaptureSignatureContent(
                 command.ContractVersion,
                 legacySourceSessionId,
@@ -470,7 +477,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 command.Events,
                 command.RouteEvidence),
             CaptureLedger.JsonOptions);
-        return [Sign(currentIdentityV2, key), Sign(historicalV2, key)];
+        return [Sign(currentIdentityLegacy, key), Sign(historicalLegacy, key)];
     }
 
     private static string? CodexVersionString(JsonElement value, string propertyName)
@@ -481,13 +488,14 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             return null;
         }
 
-        return property.ValueKind switch
+        string? version = property.ValueKind switch
         {
             JsonValueKind.String => property.GetString(),
             JsonValueKind.Object when property.TryGetProperty("name", out JsonElement nested)
                 && nested.ValueKind == JsonValueKind.String => nested.GetString(),
             _ => null
         };
+        return string.IsNullOrWhiteSpace(version) ? null : version;
     }
 
     private static string CanonicalSessionId(

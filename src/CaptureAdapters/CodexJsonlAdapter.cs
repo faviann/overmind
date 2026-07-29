@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "3");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "5");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -26,8 +26,8 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             ? JsonAdapterHelpers.NullableString(record, "type")
             : null;
         string? harnessVersion = isObjectRecord
-            ? JsonAdapterHelpers.NullableString(record, "cli_version")
-                ?? JsonAdapterHelpers.NullableString(record, "version")
+            ? UsableString(record, "cli_version")
+                ?? UsableString(record, "version")
             : null;
         string? model = isObjectRecord
             ? JsonAdapterHelpers.NullableString(record, "model")
@@ -44,9 +44,8 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             || (hasPayload && payload.ValueKind != JsonValueKind.Object);
         if (!isUnsupportedShape)
         {
-            harnessVersion ??=
-                JsonAdapterHelpers.NullableString(payload, "cli_version")
-                ?? JsonAdapterHelpers.NullableString(payload, "version");
+            harnessVersion ??= UsableString(payload, "cli_version")
+                ?? UsableString(payload, "version");
             model ??= JsonAdapterHelpers.NullableString(payload, "model");
             provider ??=
                 JsonAdapterHelpers.NullableString(payload, "model_provider")
@@ -54,8 +53,8 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         }
 
         IReadOnlyList<CaptureEvent> events = isUnsupportedShape
-            ? [Opaque(recordType, null, payload, "record:opaque")]
-            : Interpret(recordType, payload, source.SourcePosition);
+            ? [Opaque(recordType, null, record, "record:opaque")]
+            : Interpret(record, recordType, payload, source.SourcePosition);
         var request = new CaptureObservationRequest(
             ContractVersion: 1,
             source.SourceIdentity.ExternalSessionId,
@@ -77,7 +76,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
     }
 
     private static IReadOnlyList<CaptureEvent> Interpret(
-        string? recordType, JsonElement payload, long position)
+        JsonElement record, string? recordType, JsonElement payload, long position)
     {
         string? payloadType = JsonAdapterHelpers.NullableString(payload, "type");
         if (string.Equals(recordType, "response_item", StringComparison.Ordinal))
@@ -85,6 +84,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             return payloadType switch
             {
                 "message" => MessageContent(payload),
+                "reasoning" => ReasoningContent(payload),
                 "function_call" => [ToolCall(payload, position)],
                 "function_call_output" => [ToolResult(payload, position)],
                 "compacted" => [Compaction(payload, position)],
@@ -104,13 +104,135 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             {
                 "user_message" or "agent_message" =>
                     [MessageView(payload, payloadType)],
+                "turn_started" or "agent_reasoning" or "context_compacted" =>
+                    [AnnotationView(payload, payloadType)],
                 "error" or "turn_aborted" => [Error(payload, position)],
                 "subagent_start" => [Subagent(payload, position)],
                 _ => [Opaque(recordType, payloadType, payload, position)]
             };
         }
 
-        return [Opaque(recordType, payloadType, payload, position)];
+        if (string.Equals(recordType, "session_meta", StringComparison.Ordinal))
+        {
+            return [Context(payload, "session")];
+        }
+
+        if (string.Equals(recordType, "turn_context", StringComparison.Ordinal))
+        {
+            return [Context(payload, "turn")];
+        }
+
+        return [Opaque(recordType, payloadType, record, position)];
+    }
+
+    private static IReadOnlyList<CaptureEvent> ReasoningContent(JsonElement payload)
+    {
+        string actor = MessageActor(JsonAdapterHelpers.NullableString(payload, "role"));
+        var events = new List<CaptureEvent>();
+        AddReasoningParts(payload, "summary", "summary_text", actor, events);
+        AddReasoningParts(payload, "content", "reasoning_text", actor, events);
+        return events.Count == 0
+            ? [Opaque("response_item", "reasoning", payload, "reasoning:opaque", actor)]
+            : events;
+    }
+
+    private static void AddReasoningParts(
+        JsonElement payload,
+        string propertyName,
+        string partType,
+        string actor,
+        List<CaptureEvent> events)
+    {
+        if (!payload.TryGetProperty(propertyName, out JsonElement parts))
+        {
+            return;
+        }
+
+        if (parts.ValueKind != JsonValueKind.Array)
+        {
+            events.Add(Event(
+                $"{propertyName}:opaque",
+                "opaque",
+                actor,
+                new
+                {
+                    contentType = parts.ValueKind == JsonValueKind.Object
+                        ? JsonAdapterHelpers.NullableString(parts, "type")
+                        : null,
+                    source = parts.Clone()
+                },
+                partOrder: events.Count));
+            return;
+        }
+
+        int index = 0;
+        foreach (JsonElement part in parts.EnumerateArray())
+        {
+            if (part.ValueKind == JsonValueKind.Object
+                && string.Equals(
+                    JsonAdapterHelpers.NullableString(part, "type"),
+                    partType,
+                    StringComparison.Ordinal)
+                && part.TryGetProperty("text", out JsonElement text)
+                && text.ValueKind == JsonValueKind.String)
+            {
+                events.Add(Event(
+                    $"{propertyName}/{index}:reasoning",
+                    "reasoning",
+                    actor,
+                    new { text = text.GetString() },
+                    partOrder: events.Count));
+            }
+            else
+            {
+                events.Add(Event(
+                    $"{propertyName}/{index}:opaque",
+                    "opaque",
+                    actor,
+                    new
+                    {
+                        contentType = part.ValueKind == JsonValueKind.Object
+                            ? JsonAdapterHelpers.NullableString(part, "type")
+                            : null,
+                        source = part.Clone()
+                    },
+                    partOrder: events.Count));
+            }
+            index++;
+        }
+    }
+
+    private static CaptureEvent Context(JsonElement payload, string scope)
+    {
+        string? scopeId = scope == "session"
+            ? JsonAdapterHelpers.NullableString(payload, "id")
+                ?? JsonAdapterHelpers.NullableString(payload, "session_id")
+            : JsonAdapterHelpers.NullableString(payload, "turn_id");
+        string baseEvidence = payload.TryGetProperty("base_instructions", out var instructions)
+            && instructions.ValueKind is not JsonValueKind.Null
+                and not JsonValueKind.Undefined
+            ? "exposed"
+            : "unavailable";
+        DateTimeOffset? occurredAt = scope == "session"
+            ? JsonAdapterHelpers.SourceTimestamp(payload)?.Parsed
+            : null;
+        return Event(
+            $"context:{scope}",
+            "context",
+            "harness",
+            new
+            {
+                scope,
+                scopeId,
+                values = payload.Clone(),
+                instructionEvidence = new
+                {
+                    @base = baseEvidence,
+                    builtIn = "unavailable",
+                    loaded = "unavailable"
+                }
+            },
+            occurredAt: occurredAt);
     }
 
     private static IReadOnlyList<CaptureEvent> MessageContent(JsonElement payload)
@@ -197,6 +319,13 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             "harness",
             new { view, text = message.GetString() });
     }
+
+    private static CaptureEvent AnnotationView(JsonElement payload, string view) =>
+        Event(
+            $"view:{view}",
+            "annotation",
+            "harness",
+            new { view, source = payload.Clone() });
 
     private static string MessageActor(string? role) =>
         role is "user" or "assistant" or "developer" or "system"
@@ -298,11 +427,15 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         Opaque(recordType, payloadType, payload, $"opaque/{position}");
 
     private static CaptureEvent Opaque(
-        string? recordType, string? payloadType, JsonElement payload, string partKey) =>
+        string? recordType,
+        string? payloadType,
+        JsonElement payload,
+        string partKey,
+        string actor = "unknown") =>
         Event(
             partKey,
             "opaque",
-            "unknown",
+            actor,
             new { recordType, payloadType, source = payload.Clone() });
 
     private static CaptureEvent Event(
@@ -311,18 +444,25 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         string actor,
         object payload,
         IReadOnlyList<CaptureRelationship>? relationships = null,
-        int partOrder = 0) =>
+        int partOrder = 0,
+        DateTimeOffset? occurredAt = null) =>
         new(
             partKey,
             partOrder,
             kind,
             actor,
             JsonAdapterHelpers.Json(payload),
-            OccurredAt: null,
+            OccurredAt: occurredAt,
             relationships ?? []);
 
     private static CaptureRelationship Relationship(string type, string nativeId, string kind) =>
         new(type, new CaptureRelationshipTarget(null, nativeId, kind));
+
+    private static string? UsableString(JsonElement owner, string name)
+    {
+        string? value = JsonAdapterHelpers.NullableString(owner, name);
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
 
     private static CaptureLocator ToWireLocator(CaptureSourceLocator locator) =>
         locator switch

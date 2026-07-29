@@ -26,7 +26,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CancellationToken cancellationToken = default)
     {
         CaptureLedger.RequireSafetyConfigured(neverStore);
-        Validate(binding, command);
+        ValidateMandatory(binding, command);
         CaptureObservationCommand originalCommand = command;
         BoundedCaptureRepresentation<CaptureObservationCommand> bounded =
             CaptureFidelityPolicy.SerializeForContent(
@@ -35,18 +35,21 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         string inputJson = bounded.Serialized;
         long originalByteCount = bounded.OriginalByteCount;
         command = bounded.Observation;
+        ValidateSemantic(command);
+        CaptureObservationCommand signatureCommand =
+            bounded.WasOmitted ? originalCommand : command;
 
         string contentSignature = Sign(
             new CaptureSignatureContent(
-                originalCommand.ContractVersion,
-                originalCommand.SourceIdentity,
-                originalCommand.Locator,
-                originalCommand.SourceTimestamp,
-                originalCommand.Source,
-                originalCommand.Adapter,
-                originalCommand.SourcePayload,
-                originalCommand.Events,
-                originalCommand.RouteEvidence),
+                signatureCommand.ContractVersion,
+                signatureCommand.SourceIdentity,
+                signatureCommand.Locator,
+                signatureCommand.SourceTimestamp,
+                signatureCommand.Source,
+                signatureCommand.Adapter,
+                signatureCommand.SourcePayload,
+                signatureCommand.Events,
+                signatureCommand.RouteEvidence),
             binding.ContentSignatureKey);
         bool observationWasOmitted = bounded.WasOmitted;
         // The fidelity policy already proves the chosen serialized
@@ -225,7 +228,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 if (!string.Equals(
                         locatorMatch.ContentSignature, contentSignature, StringComparison.Ordinal)
                     && !CompatibleContentSignatures(
-                            command,
+                            signatureCommand,
                             stream.SourceSessionId,
                             binding.ContentSignatureKey)
                         .Contains(locatorMatch.ContentSignature, StringComparer.Ordinal))
@@ -371,7 +374,9 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             $"Source position {command.SourcePosition} was already accepted with " +
             "different identity or content.");
 
-    private static void Validate(CaptureBindingContext binding, CaptureObservationCommand command)
+    private static void ValidateMandatory(
+        CaptureBindingContext binding,
+        CaptureObservationCommand command)
     {
         if (command.ContractVersion != 1)
         {
@@ -384,13 +389,36 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         {
             CaptureLedger.Require(command.SourceIdentity.ChildId, "sourceIdentity.childId");
         }
-        if (command.SourceTimestamp is not null)
-        {
-            CaptureLedger.Require(command.SourceTimestamp.Raw, "sourceTimestamp.raw");
-        }
         if (!string.Equals(binding.Harness, command.Source.Harness, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Source harness does not match the authenticated binding.");
+        }
+        if (command.SourcePosition < 0)
+        {
+            throw new InvalidOperationException("sourcePosition must be zero or greater.");
+        }
+        _ = command.Locator switch
+        {
+            CaptureSourceLocator.NativeId nativeId =>
+                CaptureSourceLocator.Parse(
+                    new CaptureLocator("native_id", nativeId.Value, null, null, null)),
+            CaptureSourceLocator.ByteRange range =>
+                CaptureSourceLocator.Parse(
+                    new CaptureLocator(
+                        "byte_range",
+                        null,
+                        range.Offset,
+                        range.Length,
+                        range.SourceContentSha256)),
+            _ => throw new ArgumentException("locator.kind must be native_id or byte_range.")
+        };
+    }
+
+    private static void ValidateSemantic(CaptureObservationCommand command)
+    {
+        if (command.SourceTimestamp is not null)
+        {
+            CaptureLedger.Require(command.SourceTimestamp.Raw, "sourceTimestamp.raw");
         }
         if (command.Events.Count == 0)
         {
@@ -409,10 +437,6 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 throw new ArgumentException("relationship.target is required.");
             }
             CaptureLedger.Require(relationship.Target.NativeId, "relationship.target.nativeId");
-        }
-        if (command.SourcePosition < 0)
-        {
-            throw new InvalidOperationException("sourcePosition must be zero or greater.");
         }
     }
 

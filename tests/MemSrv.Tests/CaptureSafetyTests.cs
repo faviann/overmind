@@ -349,6 +349,170 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task OversizedMalformedOptionalContentIsOmittedButTheSameInLimitShapeIsRejected()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"malformed-optional-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        JsonElement payload = JsonSerializer.SerializeToElement(new { safe = true });
+        CaptureEvent malformed = new(
+            "duplicate",
+            0,
+            "opaque",
+            "harness",
+            payload,
+            null,
+            [new CaptureRelationship("", null!)]);
+        var oversized = new CaptureObservationCommand(
+            1,
+            new CaptureSourceIdentity(UniqueSession()),
+            0,
+            new CaptureSourceLocator.NativeId($"malformed-wide-{Guid.NewGuid():N}"),
+            new CaptureSourceTimestamp("", null),
+            new CaptureSource("codex", null, null, null, null, null),
+            new CaptureAdapter("test", "1"),
+            payload,
+            Enumerable.Repeat(malformed, 500).ToArray(),
+            null);
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxObservationBytes = 2_048 }));
+
+        CaptureImportReceipt receipt = await ingestion.ImportAsync(binding, oversized);
+
+        Assert.Equal("new", receipt.Status);
+        Assert.Null(receipt.Observation.SourceTimestamp);
+        Assert.Equal("observation/omitted", Assert.Single(receipt.Events).Event.PartKey);
+        Assert.DoesNotContain("duplicate", JsonSerializer.Serialize(receipt));
+
+        CaptureObservationCommand inLimit = oversized with
+        {
+            SourceIdentity = new CaptureSourceIdentity(UniqueSession()),
+            Events = [malformed]
+        };
+        await Assert.ThrowsAnyAsync<ArgumentException>(
+            () => ingestion.ImportAsync(binding, inLimit));
+    }
+
+    [Fact]
+    public async Task LaterCallerListMutationCannotChangeTheBoundedEventFanout()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"mutable-snapshot-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        string sourceSessionId = UniqueSession();
+        JsonElement payload = JsonSerializer.SerializeToElement(new { safe = true });
+        CaptureEvent retained = new(
+            "retained/0", 0, "opaque", "harness", payload, null, []);
+        CaptureEvent[] laterEvents = Enumerable.Range(0, 100)
+            .Select(index => new CaptureEvent(
+                $"later/{index}",
+                index,
+                "opaque",
+                "harness",
+                JsonSerializer.SerializeToElement(new { raw = new string('x', 256) }),
+                null,
+                []))
+            .ToArray();
+        var statefulEvents = new StatefulEventList(retained, laterEvents);
+        var command = new CaptureObservationCommand(
+            1,
+            new CaptureSourceIdentity(sourceSessionId),
+            0,
+            new CaptureSourceLocator.NativeId($"mutable-{Guid.NewGuid():N}"),
+            null,
+            new CaptureSource("codex", null, null, null, null, null),
+            new CaptureAdapter("test", "1"),
+            payload,
+            statefulEvents,
+            null);
+        const int contentBound = 4_096;
+        Assert.True(Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(
+            command with { Events = laterEvents },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))) > contentBound);
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxObservationBytes = contentBound }));
+
+        CaptureImportReceipt receipt = await ingestion.ImportAsync(binding, command);
+
+        Assert.Equal("new", receipt.Status);
+        Assert.Equal("retained/0", Assert.Single(receipt.Events).Event.PartKey);
+        Assert.False(receipt.Observation.SafeSourcePayload.TryGetProperty("omission", out _));
+        Assert.Equal(2, statefulEvents.EnumerationCount);
+    }
+
+    [Theory]
+    [InlineData("3")]
+    [InlineData("4")]
+    [InlineData("5")]
+    public async Task OversizedCodexAdapterUpgradeRetryUsesTheOriginalContentSignature(
+        string acceptedAdapterVersion)
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"oversized-upgrade-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        string sourceSessionId = UniqueSession();
+        string locator = $"oversized-upgrade-{Guid.NewGuid():N}";
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            message = "same source record",
+            padding = new string('p', 8_192)
+        });
+        var accepted = new CaptureObservationCommand(
+            1,
+            new CaptureSourceIdentity(sourceSessionId),
+            0,
+            new CaptureSourceLocator.NativeId(locator),
+            null,
+            new CaptureSource("codex", "0.144.synthetic", "session_meta", null, null, null),
+            new CaptureAdapter("codex-synthetic-jsonl", acceptedAdapterVersion),
+            payload,
+            [new CaptureEvent("metadata/0", 0, "lifecycle", "harness", payload, null, [])],
+            null);
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxObservationBytes = 2_048 }));
+
+        CaptureImportReceipt first = await ingestion.ImportAsync(binding, accepted);
+        CaptureImportReceipt retry = await ingestion.ImportAsync(
+            binding,
+            accepted with
+            {
+                Adapter = accepted.Adapter with { Version = "6" }
+            });
+
+        Assert.Equal("new", first.Status);
+        Assert.Equal("already_accepted", retry.Status);
+        Assert.Equal(first.ObservationUuid, retry.ObservationUuid);
+        CaptureConflictException changed = await Assert.ThrowsAsync<CaptureConflictException>(
+            () => ingestion.ImportAsync(
+                binding,
+                accepted with
+                {
+                    Adapter = accepted.Adapter with { Version = "6" },
+                    SourcePayload = JsonSerializer.SerializeToElement(new
+                    {
+                        message = "changed source record",
+                        padding = new string('p', 8_192)
+                    })
+                }));
+        Assert.Equal("accepted_source_conflict", changed.Reason);
+    }
+
+    [Fact]
     public async Task LegacySessionTransportOmissionImportsAndRetriesWithOneCanonicalIdentity()
     {
         string captureKey = CaptureCredential();
@@ -362,11 +526,11 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             sourceSessionId,
             0,
             new CaptureLocator(
-                "native_id",
-                $"legacy-transport-{Guid.NewGuid():N}",
+                "byte_range",
                 null,
-                null,
-                null),
+                0,
+                2_048,
+                new string('a', 64)),
             null,
             new CaptureSource("codex", null, new string('p', 2_048), null, null, null),
             new CaptureAdapter("legacy", "1"),
@@ -579,6 +743,28 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             "matcher-timeout",
             SafetyBudgets.Default with { MaxRuleTime = TimeSpan.FromTicks(1) },
             string.Concat(Enumerable.Repeat("AKIA", 200_000)));
+    }
+
+    private sealed class StatefulEventList(
+        CaptureEvent retained,
+        IReadOnlyList<CaptureEvent> later) : IReadOnlyList<CaptureEvent>
+    {
+        private int _enumerationCount;
+
+        public int EnumerationCount => _enumerationCount;
+        public int Count => 1;
+        public CaptureEvent this[int index] => index == 0
+            ? retained
+            : throw new ArgumentOutOfRangeException(nameof(index));
+
+        public IEnumerator<CaptureEvent> GetEnumerator()
+        {
+            int enumeration = Interlocked.Increment(ref _enumerationCount);
+            return (enumeration <= 3 ? [retained] : later).GetEnumerator();
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
     }
 
     [Fact]

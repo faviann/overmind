@@ -101,6 +101,12 @@ evidence-driven route derivation and fixation on first import, contiguous
 checkpoint advance, locator idempotency and conflict, and the single
 transaction over observation + events + relationships + checkpoint.
 It never resolves a credential; authorization arrives already decided.
+Before fidelity selection it validates only the mandatory authority and
+identity facts retained by an omission. It validates optional semantic content
+after selection, against a stable command reconstructed from the exact bounded
+serialization that passed the effective ceiling. In-limit signatures use that
+same stable original snapshot; over-limit signatures continue to stream the
+original content while scan and persistence use only the bounded omission.
 
 **`OperatorCaptureReads`** — envelope assembly. It returns complete versioned
 `CapturedEventEnvelope` values (contract version, immutable observation, one

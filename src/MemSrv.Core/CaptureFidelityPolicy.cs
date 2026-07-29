@@ -67,12 +67,23 @@ public static class CaptureFidelityPolicy
         long effectiveBound = Math.Min(
             maxContentBytes,
             SafetyBudgets.Default.MaxObservationBytes);
-        return SerializeWithinLimit(
+        BoundedCaptureRepresentation<CaptureObservationCommand> bounded =
+            SerializeWithinLimit(
             observation,
             effectiveBound,
             OmitForContentLimit,
             _ => new SafetyScanException(
                 $"the observation budget of {effectiveBound} bytes was exceeded"));
+        CaptureObservationRequest snapshot =
+            JsonSerializer.Deserialize<CaptureObservationRequest>(
+                bounded.Serialized,
+                CaptureLedger.JsonOptions)
+            ?? throw new SafetyScanException(
+                "the bounded capture representation could not be reconstructed");
+        return bounded with
+        {
+            Observation = CaptureObservationCommand.FromRequest(snapshot)
+        };
     }
 
     private static CaptureObservationCommand OmitForContentLimit(

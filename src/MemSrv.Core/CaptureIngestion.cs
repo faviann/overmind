@@ -410,11 +410,14 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 
-    // Adapters v3, v4 and v5 derive identical source provenance from the same
-    // immutable record; only the adapter version and the identity shape of the
-    // signature changed. A retry of an already-accepted position after the
-    // upgrade is therefore the same content under a pre-upgrade signature.
-    private static readonly string[] PreUpgradeCodexAdapterVersions = ["3", "4"];
+    // For every record kind whose derived events a version bump left alone,
+    // adapters v3 through v6 produce identical content from the same immutable
+    // record; only the adapter version and the identity shape of the signature
+    // changed, so a retry of an already-accepted position after the upgrade is
+    // the same content under a pre-upgrade signature. A record kind whose
+    // derived events the bump did change is not covered: its pre-upgrade
+    // signature no longer reconstructs, and the retry remains a conflict.
+    private static readonly string[] PreUpgradeCodexAdapterVersions = ["3", "4", "5"];
 
     private static IReadOnlyList<string> CompatibleContentSignatures(
         CaptureObservationCommand command,
@@ -424,7 +427,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (!string.Equals(command.Source.Harness, "codex", StringComparison.Ordinal)
             || !string.Equals(
                 command.Adapter.Name, "codex-synthetic-jsonl", StringComparison.Ordinal)
-            || !string.Equals(command.Adapter.Version, "5", StringComparison.Ordinal))
+            || !string.Equals(command.Adapter.Version, "6", StringComparison.Ordinal))
         {
             return [];
         }

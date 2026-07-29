@@ -1,0 +1,2 @@
+{"session_id":"codex-hook-session","turn_id":"codex-hook-turn","transcript_path":"/synthetic/codex-hook-rollout.jsonl","cwd":"/synthetic/workspace","hook_event_name":"PreCompact","model":"codex-synthetic-model","trigger":"manual"}
+{"session_id":"codex-hook-session","turn_id":"codex-hook-turn","transcript_path":"/synthetic/codex-hook-rollout.jsonl","cwd":"/synthetic/workspace","hook_event_name":"PostCompact","model":"codex-synthetic-model","trigger":"manual"}

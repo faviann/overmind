@@ -191,6 +191,17 @@ has a five-second response bound. Expiring that internal bound becomes a
 retryable delivery timeout for the scheduler; cancellation from the scheduler
 remains `OperationCanceledException` and is never reclassified or swallowed.
 
+The Codex compaction conformance path uses this unchanged runtime for persisted
+old/new rollout families. It preserves source-position order across canonical
+pre-boundary history, a completion observation, and the
+`context_compacted` annotation. Authenticated ingestion returns immutable
+observation UUIDs, retries return those same UUIDs as `already_accepted`, and
+`memctl capture receipt` exposes the operation phase, boundary, summary,
+replacement history, and window evidence. Hook facts use the same authenticated
+capture API and operator receipt seam directly: there is no hook claimer or
+hook runtime in this slice. The runtime does not interpret a summary as missing
+history or replace an earlier queued or canonical record.
+
 ## Where the gate runs
 
 The Codex claimer crosses the same `NeverStoreGate` before a candidate enters

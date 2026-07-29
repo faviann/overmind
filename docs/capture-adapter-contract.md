@@ -61,7 +61,7 @@ still runs.
 The canonical import receipt and `memctl capture receipt` expose the source
 identity loaded from the durable stream. An adapter upgrade may normalize
 adapter/source provenance without changing the immutable source record; the
-server recognizes the Codex v3/v4→v5 signature transition narrowly — those
+server recognizes the Codex v3/v4/v5→v6 signature transition narrowly — those
 adapters derive identical source provenance, so only the adapter version and
 the signature's identity shape changed — while a changed locator or changed
 source content remains a conflict.
@@ -125,11 +125,31 @@ missing or invalid payload timestamps remain null, and `turn_context` has no
 occurrence time. Neither clock falls back to the other or to server-authored
 capture time.
 
+Codex compaction uses separate immutable operation phases. A `PreCompact`
+hook fact is a `compaction` event with `phase: request`; `PostCompact` and
+persisted rollout `compacted` records are `phase: completion`, and every
+completion payload sets `contextBoundary: true`. Only source-stated facts are
+populated: current Codex hooks contribute their trigger but no success outcome
+or summary, while rollout completion contributes `message` summary,
+`replacement_history`, and available window-chain evidence. Summary evidence is
+preserved in its source shape and never flattened to text: a `message` summary
+is preferred, an older `summary` array is emitted unchanged when no `message` is
+present, and both keep their JSON type. Older numeric and newer string window
+IDs likewise retain their JSON type. Missing outcome remains
+`unknown`; missing evidence remains null. The separate rollout
+`event_msg/context_compacted` lifecycle signal is an `annotation` carrying its
+source payload, not another compaction or conversation event. Summary and
+replacement history remain derived evidence attached to the completion
+observation; adapters never reconstruct, replace, or mutate an earlier event.
+
 ## Conformance fixtures and disposable Claude spike
 
 The synthetic, version-labelled families are:
 
+- `fixtures/adapter-conformance/codex-cli-0.77.compaction.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.144.compaction.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.144.compaction-hooks.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.messages.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.context.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.reasoning.synthetic.jsonl`
@@ -151,7 +171,10 @@ messages, deterministic content-part fan-out, and duplicate UI-view
 annotations. The Codex context family covers session/turn scope, complete
 additive setting preservation, explicitly exposed base-instruction evidence,
 observation-local model/provider and CLI-version provenance, and the three
-non-fallback clocks. The Codex 0.145 additive families cover source-exposed
+non-fallback clocks. The Codex compaction families cover old numeric and new
+string window identities, the newer complete window chain, exact summary and
+replacement-history evidence, hook request/completion phases, and explicit
+completion boundaries. The Codex 0.145 additive families cover source-exposed
 reasoning, mixed supported and present-but-non-array reasoning sections,
 complete opaque signature/encrypted/additive metadata, complete unsupported
 record and content evidence, and evidence-bearing duplicate lifecycle/reasoning

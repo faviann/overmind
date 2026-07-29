@@ -405,13 +405,9 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 contextBoundary = true,
                 trigger = JsonAdapterHelpers.NullableString(payload, "trigger"),
                 outcome = JsonAdapterHelpers.NullableString(payload, "outcome") ?? "unknown",
-                instructions = Evidence(payload, "instructions"),
-                inputContext = Evidence(payload, "input_context"),
                 summary = Evidence(payload, "message") ?? Evidence(payload, "summary"),
                 replacementHistory = Evidence(payload, "replacement_history"),
-                metrics = payload.TryGetProperty("metrics", out var metrics)
-                    ? metrics.Clone()
-                    : (JsonElement?)null,
+                metrics = Evidence(payload, "metrics"),
                 windowMetrics = WindowMetrics(payload)
             });
 
@@ -427,8 +423,6 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 contextBoundary = phase == "completion",
                 trigger = JsonAdapterHelpers.NullableString(payload, "trigger"),
                 outcome = JsonAdapterHelpers.NullableString(payload, "outcome") ?? "unknown",
-                instructions = Evidence(payload, "instructions"),
-                inputContext = Evidence(payload, "input_context"),
                 summary = Evidence(payload, "summary"),
                 replacementHistory = Evidence(payload, "replacement_history"),
                 metrics = Evidence(payload, "metrics"),

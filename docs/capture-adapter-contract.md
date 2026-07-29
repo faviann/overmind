@@ -131,8 +131,11 @@ persisted rollout `compacted` records are `phase: completion`, and every
 completion payload sets `contextBoundary: true`. Only source-stated facts are
 populated: current Codex hooks contribute their trigger but no success outcome
 or summary, while rollout completion contributes `message` summary,
-`replacement_history`, and available window-chain evidence. Older numeric and
-newer string window IDs retain their JSON type. Missing outcome remains
+`replacement_history`, and available window-chain evidence. Summary evidence is
+preserved in its source shape and never flattened to text: a `message` summary
+is preferred, an older `summary` array is emitted unchanged when no `message` is
+present, and both keep their JSON type. Older numeric and newer string window
+IDs likewise retain their JSON type. Missing outcome remains
 `unknown`; missing evidence remains null. The separate rollout
 `event_msg/context_compacted` lifecycle signal is an `annotation` carrying its
 source payload, not another compaction or conversation event. Summary and

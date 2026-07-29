@@ -63,8 +63,6 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             AssertJsonShape(
                 item.ReplacementHistory,
                 completion.Payload.GetProperty("replacementHistory"));
-            Assert.Equal(JsonValueKind.Null, completion.Payload.GetProperty("instructions").ValueKind);
-            Assert.Equal(JsonValueKind.Null, completion.Payload.GetProperty("inputContext").ValueKind);
 
             CaptureEvent lifecycle = Assert.Single(terminal[2].Observation.Events);
             Assert.Equal("annotation", lifecycle.Kind);

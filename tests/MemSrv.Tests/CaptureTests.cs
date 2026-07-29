@@ -556,7 +556,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.All(receipts, receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
             Assert.Equal([0L, 1L, 2L], receipts.Select(receipt => receipt.GetProperty("sourcePosition").GetInt64()));
             Assert.Equal(
-                ["message/0", "tool/1", "tool/2"],
+                ["content/0:message", "tool/1", "tool/2"],
                 receipts.Select(receipt => Assert.Single(receipt.GetProperty("events").EnumerateArray())
                     .GetProperty("partKey").GetString()));
             Assert.Equal(
@@ -691,6 +691,201 @@ public sealed class CaptureTests : HttpSeamTestBase
         {
             File.Delete(fixturePath);
             DeleteRuntimeState(fixturePath);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerAndOperatorExposeVersionedCodexMessagePartsAndRetryIdentities()
+    {
+        const string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"codex-message-parts-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-message-parts-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string transcriptPath = Path.Combine(transcriptRoot, "messages.jsonl");
+        string firstStateDirectory = Path.Combine(directory, "state-first");
+        string retryStateDirectory = Path.Combine(directory, "state-retry");
+        Directory.CreateDirectory(transcriptRoot);
+        File.Copy(
+            Path.Combine(
+                _root,
+                "fixtures/adapter-conformance/codex-cli-0.144.messages.synthetic.jsonl"),
+            transcriptPath);
+
+        Dictionary<string, string> EnvironmentFor(string stateDirectory) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        async Task<JsonElement[]> CaptureOnceAsync(
+            string stateDirectory, string expectedStatus)
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(stateDirectory));
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            try
+            {
+                var receipts = new JsonElement[6];
+                for (int index = 0; index < receipts.Length; index++)
+                {
+                    receipts[index] = await ReadTracerReceiptAsync(process);
+                }
+                Assert.All(
+                    receipts,
+                    receipt => Assert.Equal(
+                        expectedStatus, receipt.GetProperty("status").GetString()));
+                return receipts;
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                await stderr;
+            }
+        }
+
+        async Task<JsonElement[]> ReadOperatorReceiptAsync(JsonElement receipt)
+        {
+            string shown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipt.GetProperty("observationUuid").GetGuid().ToString());
+            Assert.DoesNotContain(seededSyntheticSecret, shown, StringComparison.Ordinal);
+            return shown.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .ToArray();
+        }
+
+        try
+        {
+            JsonElement[] accepted = await CaptureOnceAsync(firstStateDirectory, "new");
+            Assert.Equal(
+                ["content/0:message", "content/1:message"],
+                accepted[0].GetProperty("events").EnumerateArray()
+                    .Select(item => item.GetProperty("partKey").GetString()));
+            Assert.Equal(
+                [0, 1],
+                accepted[0].GetProperty("events").EnumerateArray()
+                    .Select(item => item.GetProperty("partOrder").GetInt32()));
+            Assert.Equal(
+                ["user", "user"],
+                accepted[0].GetProperty("events").EnumerateArray()
+                    .Select(item => item.GetProperty("actor").GetString()));
+            Assert.Equal(
+                "annotation",
+                Assert.Single(accepted[1].GetProperty("events").EnumerateArray())
+                    .GetProperty("kind").GetString());
+            Assert.Equal(
+                "developer",
+                Assert.Single(accepted[2].GetProperty("events").EnumerateArray())
+                    .GetProperty("actor").GetString());
+            Assert.Equal(
+                "system",
+                Assert.Single(accepted[3].GetProperty("events").EnumerateArray())
+                    .GetProperty("actor").GetString());
+            Assert.Equal(
+                ["assistant", "assistant"],
+                accepted[4].GetProperty("events").EnumerateArray()
+                    .Select(item => item.GetProperty("actor").GetString()));
+            Assert.True(
+                accepted[0].GetProperty("observation").GetProperty("safeSourcePayload")
+                    .GetProperty("additiveMessageFixtureField")
+                    .GetProperty("retained").GetBoolean());
+
+            JsonElement[] userEnvelopes = await ReadOperatorReceiptAsync(accepted[0]);
+            JsonElement[] developerEnvelopes = await ReadOperatorReceiptAsync(accepted[2]);
+            JsonElement[] systemEnvelopes = await ReadOperatorReceiptAsync(accepted[3]);
+            JsonElement[] assistantEnvelopes = await ReadOperatorReceiptAsync(accepted[4]);
+
+            Assert.Equal(2, userEnvelopes.Length);
+            Assert.Equal(
+                ["content/0:message", "content/1:message"],
+                userEnvelopes.Select(
+                    envelope => envelope.GetProperty("event").GetProperty("partKey").GetString()));
+            Assert.Equal(
+                ["First user part.", "Second user part."],
+                userEnvelopes.Select(
+                    envelope => envelope.GetProperty("event").GetProperty("payload")
+                        .GetProperty("text").GetString()));
+            Assert.Equal(
+                ["user", "user"],
+                userEnvelopes.Select(
+                    envelope => envelope.GetProperty("event").GetProperty("actor").GetString()));
+            Assert.Equal(
+                "[REDACTED:aws-access-key-id]",
+                userEnvelopes[0].GetProperty("observation").GetProperty("safeSourcePayload")
+                    .GetProperty("payload").GetProperty("content")[0]
+                    .GetProperty("futureContentField").GetString());
+            Assert.All(userEnvelopes, envelope =>
+            {
+                JsonElement payload = envelope.GetProperty("event").GetProperty("payload");
+                Assert.Equal(["text"], payload.EnumerateObject().Select(property => property.Name));
+                Assert.False(payload.TryGetProperty("futureContentField", out _));
+            });
+
+            JsonElement developerEnvelope = Assert.Single(developerEnvelopes);
+            Assert.Equal(
+                "developer",
+                developerEnvelope.GetProperty("event").GetProperty("actor").GetString());
+            Assert.Equal(
+                "Developer instruction.",
+                developerEnvelope.GetProperty("event").GetProperty("payload")
+                    .GetProperty("text").GetString());
+
+            JsonElement systemEnvelope = Assert.Single(systemEnvelopes);
+            Assert.Equal(
+                "system",
+                systemEnvelope.GetProperty("event").GetProperty("actor").GetString());
+            Assert.Equal(
+                "System instruction.",
+                systemEnvelope.GetProperty("event").GetProperty("payload")
+                    .GetProperty("text").GetString());
+            Assert.False(
+                systemEnvelope.GetProperty("event").GetProperty("payload")
+                    .TryGetProperty("futureMessageField", out _));
+
+            Assert.Equal(2, assistantEnvelopes.Length);
+            Assert.Equal(
+                ["assistant", "assistant"],
+                assistantEnvelopes.Select(
+                    envelope => envelope.GetProperty("event").GetProperty("actor").GetString()));
+            Assert.Equal(
+                ["First assistant part.", "Second assistant part."],
+                assistantEnvelopes.Select(
+                    envelope => envelope.GetProperty("event").GetProperty("payload")
+                        .GetProperty("text").GetString()));
+            Assert.All(
+                assistantEnvelopes,
+                envelope => Assert.Equal(
+                    ["text"],
+                    envelope.GetProperty("event").GetProperty("payload")
+                        .EnumerateObject().Select(property => property.Name)));
+
+            JsonElement[] retried = await CaptureOnceAsync(
+                retryStateDirectory, "already_accepted");
+            Assert.Equal(
+                accepted.Select(receipt => receipt.GetProperty("observationUuid").GetGuid()),
+                retried.Select(receipt => receipt.GetProperty("observationUuid").GetGuid()));
+            Assert.Equal(
+                accepted.SelectMany(receipt => receipt.GetProperty("events").EnumerateArray())
+                    .Select(item => item.GetProperty("traceUuid").GetGuid()),
+                retried.SelectMany(receipt => receipt.GetProperty("events").EnumerateArray())
+                    .Select(item => item.GetProperty("traceUuid").GetGuid()));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
         }
     }
 

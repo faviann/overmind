@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "1");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "2");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -66,7 +66,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         {
             return payloadType switch
             {
-                "message" => [Message(payload, position)],
+                "message" => MessageContent(payload),
                 "function_call" => [ToolCall(payload, position)],
                 "function_call_output" => [ToolResult(payload, position)],
                 "compacted" => [Compaction(payload, position)],
@@ -84,6 +84,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         {
             return payloadType switch
             {
+                "user_message" or "agent_message" => [MessageView(payload, payloadType)],
                 "error" or "turn_aborted" => [Error(payload, position)],
                 "subagent_start" => [Subagent(payload, position)],
                 _ => [Opaque(recordType, payloadType, payload, position)]
@@ -93,18 +94,93 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         return [Opaque(recordType, payloadType, payload, position)];
     }
 
-    private static CaptureEvent Message(JsonElement payload, long position)
+    private static IReadOnlyList<CaptureEvent> MessageContent(JsonElement payload)
     {
-        string actor = JsonAdapterHelpers.NullableString(payload, "role") ?? "unknown";
-        JsonElement content = payload.TryGetProperty("content", out var value)
-            ? value
-            : default;
-        return Event(
-            $"message/{position}",
-            "message",
-            actor,
-            new { text = content.ValueKind == JsonValueKind.Undefined ? null : JsonAdapterHelpers.Text(content) });
+        string actor = MessageActor(JsonAdapterHelpers.NullableString(payload, "role"));
+        if (!payload.TryGetProperty("content", out var content)
+            || content.ValueKind != JsonValueKind.Array)
+        {
+            if (content.ValueKind == JsonValueKind.String)
+            {
+                return
+                [
+                    Event(
+                        "content:message",
+                        "message",
+                        actor,
+                        new { text = content.GetString() })
+                ];
+            }
+
+            JsonElement sourceEvidence = content.ValueKind == JsonValueKind.Undefined
+                ? payload.Clone()
+                : content.Clone();
+            return
+            [
+                Event(
+                    "content:opaque",
+                    "opaque",
+                    "unknown",
+                    new { contentType = "message_content", source = sourceEvidence })
+            ];
+        }
+
+        var events = new List<CaptureEvent>();
+        int index = 0;
+        foreach (JsonElement part in content.EnumerateArray())
+        {
+            string? partType = part.ValueKind == JsonValueKind.Object
+                ? JsonAdapterHelpers.NullableString(part, "type")
+                : null;
+            bool isMessagePart = part.ValueKind == JsonValueKind.String
+                || (partType is "input_text" or "output_text" or "text"
+                    && part.TryGetProperty("text", out var text)
+                    && text.ValueKind == JsonValueKind.String);
+            events.Add(isMessagePart
+                ? Event(
+                    $"content/{index}:message",
+                    "message",
+                    actor,
+                    new { text = JsonAdapterHelpers.Text(part) },
+                    partOrder: index)
+                : Event(
+                    $"content/{index}:opaque",
+                    "opaque",
+                    "unknown",
+                    new { contentType = partType, source = part.Clone() },
+                    partOrder: index));
+            index++;
+        }
+
+        return events.Count == 0
+            ?
+            [
+                Event(
+                    "content:opaque",
+                    "opaque",
+                    "unknown",
+                    new { contentType = "message_content", source = content.Clone() })
+            ]
+            : events;
     }
+
+    private static CaptureEvent MessageView(JsonElement payload, string view) =>
+        Event(
+            $"view:{view}",
+            "annotation",
+            "harness",
+            new
+            {
+                view,
+                text = payload.TryGetProperty("message", out var message)
+                    ? JsonAdapterHelpers.Text(message)
+                    : null
+            });
+
+    private static string MessageActor(string? role) =>
+        role is "user" or "assistant" or "developer" or "system"
+            ? role
+            : "unknown";
 
     private static CaptureEvent ToolCall(JsonElement payload, long position)
     {
@@ -209,10 +285,11 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         string kind,
         string actor,
         object payload,
-        IReadOnlyList<CaptureRelationship>? relationships = null) =>
+        IReadOnlyList<CaptureRelationship>? relationships = null,
+        int partOrder = 0) =>
         new(
             partKey,
-            PartOrder: 0,
+            partOrder,
             kind,
             actor,
             JsonAdapterHelpers.Json(payload),

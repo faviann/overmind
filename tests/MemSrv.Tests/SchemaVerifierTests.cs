@@ -1,6 +1,9 @@
 using Dapper;
 using MemSrv.Core;
 using Npgsql;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -425,6 +428,9 @@ public sealed class SchemaVerifierTests
         Guid streamUuid = Guid.NewGuid();
         Guid observationUuid = Guid.NewGuid();
         byte[] signatureKey = Enumerable.Range(1, 32).Select(value => (byte)value).ToArray();
+        string captureCredential = $"mcap_{Guid.NewGuid():N}";
+        string keysPath = Path.Combine(
+            Path.GetTempPath(), $"memsrv-source-identity-keys-{Guid.NewGuid():N}.yaml");
         const string legacyPathIdentity = "codex-rollout-legacy-path";
         const string externalSessionId = "01970000-0000-7000-8000-000000000149";
         const string childId = "01970000-0000-7000-8000-000000000150";
@@ -492,7 +498,7 @@ public sealed class SchemaVerifierTests
                        allowed_namespaces, content_signature_key)
                     VALUES
                       (@bindingUuid, 'legacy-source-identity-upgrade', 'codex',
-                       'capture:legacy-upgrade', 'legacy-upgrade-credential', '{}',
+                       'capture:legacy-upgrade', @credentialHash, '{}',
                        @signatureKey);
 
                     INSERT INTO capture_source_streams
@@ -527,6 +533,7 @@ public sealed class SchemaVerifierTests
                         streamUuid,
                         observationUuid,
                         signatureKey,
+                        credentialHash = CaptureCredential.Hash(captureCredential),
                         legacyPathIdentity,
                         establishedSessionId,
                         legacySignature,
@@ -553,10 +560,30 @@ public sealed class SchemaVerifierTests
                 Path.Combine(migrations, "0008_capture_source_identity.sql"));
             DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
 
+            await using (var verification = new NpgsqlConnection(admin))
+            {
+                await verification.OpenAsync();
+                var migrated = await verification.QuerySingleAsync<(
+                    string ExternalSessionId,
+                    string ChildId,
+                    string TraceSessionId)>(
+                    """
+                    SELECT external_session_id AS ExternalSessionId,
+                           child_id AS ChildId,
+                           trace_session_id AS TraceSessionId
+                    FROM capture_source_streams
+                    WHERE stream_uuid = @streamUuid
+                    """,
+                    new { streamUuid });
+                Assert.Equal(externalSessionId, migrated.ExternalSessionId);
+                Assert.Equal(childId, migrated.ChildId);
+                Assert.Equal(establishedSessionId, migrated.TraceSessionId);
+            }
+
             using var sourcePayload = JsonDocument.Parse(
                 """{"type":"turn_context","payload":{"message":"continued"}}""");
             using var eventPayload = JsonDocument.Parse("""{"message":"continued"}""");
-            var command = CaptureObservationCommand.FromRequest(new CaptureObservationRequest(
+            var continuation = new CaptureObservationRequest(
                 1,
                 externalSessionId,
                 1,
@@ -572,19 +599,8 @@ public sealed class SchemaVerifierTests
                         "message/0", 0, "message", "user",
                         eventPayload.RootElement.Clone(), null, null)
                 ],
-                SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId)));
-            var ingestion = new CaptureIngestion(
-                admin,
-                new NeverStoreGate(Path.Combine(_root, "config", "never_store.yaml")));
-            var binding = new CaptureBindingContext(
-                bindingUuid,
-                "codex",
-                "capture:legacy-upgrade",
-                signatureKey,
-                CaptureRoutingPolicy.Empty);
-            var historicalRetry = await ingestion.ImportAsync(
-                binding,
-                CaptureObservationCommand.FromRequest(new CaptureObservationRequest(
+                SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId));
+            var retry = new CaptureObservationRequest(
                     1,
                     externalSessionId,
                     0,
@@ -595,34 +611,100 @@ public sealed class SchemaVerifierTests
                     new CaptureAdapter("codex-synthetic-jsonl", "3"),
                     legacySourcePayload.RootElement.Clone(),
                     [legacyEvent],
-                    SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId))));
-            Assert.Equal("already_accepted", historicalRetry.Status);
-            Assert.Equal(observationUuid, historicalRetry.ObservationUuid);
-            Assert.Equal(streamUuid, historicalRetry.Observation.SourceStreamUuid);
+                    SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId));
 
-            var receipt = await ingestion.ImportAsync(
-                binding,
-                command);
+            await File.WriteAllTextAsync(keysPath, "keys: []\n");
+            using var server = TestProcessRunner.StartServer(new Dictionary<string, string>
+            {
+                ["MEMSRV_TRANSPORT"] = "http",
+                ["MEMSRV_HTTP_URL"] = "http://127.0.0.1:0",
+                ["MEMSRV_AGENT_KEYS_PATH"] = keysPath,
+                ["MEMSRV_CONNECTION_STRING"] = admin,
+                ["MEMSRV_NEVER_STORE_PATH"] =
+                    Path.Combine(_root, "config", "never_store.yaml")
+            });
+            var serverStdout = new StringBuilder();
+            var serverStderr = new StringBuilder();
+            var stdoutPump = PumpAsync(server.StandardOutput, serverStdout);
+            var stderrPump = PumpAsync(server.StandardError, serverStderr);
+            try
+            {
+                string url = await WaitForListeningUrlAsync(serverStderr);
+                using var client = new HttpClient { BaseAddress = new Uri(url) };
+                client.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue("Bearer", captureCredential);
 
-            Assert.Equal(streamUuid, receipt.Observation.SourceStreamUuid);
-            Assert.Equal(
-                new CaptureSourceIdentity(externalSessionId, childId),
-                receipt.Observation.SourceIdentity);
-            Assert.Equal(
-                establishedSessionId,
-                Assert.Single(receipt.Events).Event.SessionId);
-            var legacyEnvelope = Assert.Single(
-                await new OperatorCaptureReads(admin)
-                    .ReadCapturedEventEnvelopesAsync(observationUuid));
-            Assert.Equal(establishedSessionId, legacyEnvelope.Event.SessionId);
-            Assert.Equal(
-                new CaptureSourceIdentity(externalSessionId, childId),
-                legacyEnvelope.Observation.SourceIdentity);
-            await using var verification = new NpgsqlConnection(admin);
-            await verification.OpenAsync();
+                using var retryResponse = await client.PostAsJsonAsync(
+                    "/capture/v1/observations", retry);
+                Assert.Equal(HttpStatusCode.OK, retryResponse.StatusCode);
+                using JsonDocument retryBody =
+                    JsonDocument.Parse(await retryResponse.Content.ReadAsStringAsync());
+                Assert.Equal(
+                    "already_accepted",
+                    retryBody.RootElement.GetProperty("status").GetString());
+                Assert.Equal(
+                    observationUuid,
+                    retryBody.RootElement.GetProperty("observationUuid").GetGuid());
+                Assert.Equal(
+                    streamUuid,
+                    retryBody.RootElement.GetProperty("observation")
+                        .GetProperty("sourceStreamUuid").GetGuid());
+
+                using var continuationResponse = await client.PostAsJsonAsync(
+                    "/capture/v1/observations", continuation);
+                Assert.Equal(HttpStatusCode.OK, continuationResponse.StatusCode);
+                using JsonDocument continuationBody =
+                    JsonDocument.Parse(await continuationResponse.Content.ReadAsStringAsync());
+                Guid continuationObservationUuid = continuationBody.RootElement
+                    .GetProperty("observationUuid").GetGuid();
+                Assert.Equal("new", continuationBody.RootElement.GetProperty("status").GetString());
+                Assert.Equal(
+                    streamUuid,
+                    continuationBody.RootElement.GetProperty("observation")
+                        .GetProperty("sourceStreamUuid").GetGuid());
+
+                JsonElement legacyEnvelope = ParseSingleMemCtlEnvelope(
+                    await TestProcessRunner.RunMemCtlAsync(
+                        admin, null, "capture", "receipt", observationUuid.ToString()));
+                AssertCanonicalMigratedEnvelope(
+                    legacyEnvelope,
+                    observationUuid,
+                    streamUuid,
+                    externalSessionId,
+                    childId,
+                    establishedSessionId);
+
+                JsonElement continuationEnvelope = ParseSingleMemCtlEnvelope(
+                    await TestProcessRunner.RunMemCtlAsync(
+                        admin,
+                        null,
+                        "capture",
+                        "receipt",
+                        continuationObservationUuid.ToString()));
+                AssertCanonicalMigratedEnvelope(
+                    continuationEnvelope,
+                    continuationObservationUuid,
+                    streamUuid,
+                    externalSessionId,
+                    childId,
+                    establishedSessionId);
+            }
+            finally
+            {
+                if (!server.HasExited)
+                {
+                    server.Kill(entireProcessTree: true);
+                }
+                await server.WaitForExitAsync();
+                await Task.WhenAll(stdoutPump, stderrPump);
+            }
+
+            Assert.Equal("", Snapshot(serverStdout));
+            await using var immutabilityVerification = new NpgsqlConnection(admin);
+            await immutabilityVerification.OpenAsync();
             Assert.Equal(
                 observationXmin,
-                await verification.ExecuteScalarAsync<string>(
+                await immutabilityVerification.ExecuteScalarAsync<string>(
                     """
                     SELECT xmin::text
                     FROM capture_observations
@@ -637,6 +719,78 @@ public sealed class SchemaVerifierTests
                 MaintenanceConnection,
                 $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
             Directory.Delete(migrations, recursive: true);
+            File.Delete(keysPath);
+        }
+    }
+
+    private static JsonElement ParseSingleMemCtlEnvelope(string stdout)
+    {
+        string line = Assert.Single(
+            stdout.Split(
+                Environment.NewLine,
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.Clone();
+    }
+
+    private static void AssertCanonicalMigratedEnvelope(
+        JsonElement envelope,
+        Guid observationUuid,
+        Guid streamUuid,
+        string externalSessionId,
+        string childId,
+        string establishedSessionId)
+    {
+        JsonElement observation = envelope.GetProperty("observation");
+        Assert.Equal(observationUuid, observation.GetProperty("observationUuid").GetGuid());
+        Assert.Equal(streamUuid, observation.GetProperty("sourceStreamUuid").GetGuid());
+        JsonElement identity = observation.GetProperty("sourceIdentity");
+        Assert.Equal(
+            externalSessionId,
+            identity.GetProperty("externalSessionId").GetString());
+        Assert.Equal(childId, identity.GetProperty("childId").GetString());
+
+        JsonElement canonicalEvent = envelope.GetProperty("event");
+        Assert.Equal(establishedSessionId, canonicalEvent.GetProperty("sessionId").GetString());
+        Assert.Equal("capture:legacy-upgrade", canonicalEvent.GetProperty("agentId").GetString());
+    }
+
+    private static async Task<string> WaitForListeningUrlAsync(StringBuilder stderr)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (string line in Snapshot(stderr).Split('\n'))
+            {
+                int index = line.IndexOf("Now listening on: ", StringComparison.Ordinal);
+                if (index >= 0)
+                {
+                    return line[(index + "Now listening on: ".Length)..].Trim();
+                }
+            }
+            await Task.Delay(200);
+        }
+        throw new Xunit.Sdk.XunitException(
+            $"Server never reported a listening address. stderr:{Environment.NewLine}{Snapshot(stderr)}");
+    }
+
+    private static Task PumpAsync(StreamReader reader, StringBuilder sink) => Task.Run(async () =>
+    {
+        string? line;
+        while ((line = await reader.ReadLineAsync()) is not null)
+        {
+            lock (sink)
+            {
+                sink.AppendLine(line);
+            }
+        }
+    });
+
+    private static string Snapshot(StringBuilder buffer)
+    {
+        lock (buffer)
+        {
+            return buffer.ToString();
         }
     }
 

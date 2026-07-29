@@ -52,6 +52,43 @@ public sealed class CaptureScheduleTests
     }
 
     [Fact]
+    public void MalformedRecordBeforeSessionMetadataDoesNotReplaceExplicitChildIdentityWithPathIdentity()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-discovery-malformed-prefix-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string initialPath = Path.Combine(directory, "initial.jsonl");
+        string movedPath = Path.Combine(directory, "moved.jsonl");
+        const string externalSessionId = "01970000-0000-7000-8000-000000000149";
+        const string childId = "01970000-0000-7000-8000-000000000150";
+        File.WriteAllText(
+            initialPath,
+            "{malformed-json\n"
+            + $"{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{externalSessionId}\","
+            + $"\"id\":\"{childId}\",\"thread_source\":\"subagent\"}}}}\n");
+
+        try
+        {
+            CodexTranscriptStream first =
+                Assert.Single(CodexTranscriptDiscovery.Enumerate(initialPath));
+            File.Move(initialPath, movedPath);
+            CodexTranscriptStream rediscovered =
+                Assert.Single(CodexTranscriptDiscovery.Enumerate(movedPath));
+
+            Assert.Equal(
+                new CaptureSourceIdentity(externalSessionId, childId),
+                first.SourceIdentity);
+            Assert.Equal(first.SourceIdentity, rediscovered.SourceIdentity);
+            Assert.Equal(first.SourceStream, rediscovered.SourceStream);
+            Assert.Equal(first.TranscriptIdentity, rediscovered.TranscriptIdentity);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RootClassificationDoesNotMintAChildAndContradictoryClassifiersAreRejected()
     {
         string directory = Path.Combine(

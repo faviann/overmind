@@ -115,7 +115,7 @@ public static class CodexTranscriptDiscovery
             }
             catch (JsonException)
             {
-                return null;
+                continue;
             }
             if (record.ValueKind != JsonValueKind.Object
                 || !record.TryGetProperty("type", out JsonElement type)

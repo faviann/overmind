@@ -1091,6 +1091,8 @@ public sealed class CaptureTests : HttpSeamTestBase
                 JsonElement completion = completionEvent.GetProperty("payload");
                 Assert.Equal("completion", completion.GetProperty("phase").GetString());
                 Assert.True(completion.GetProperty("contextBoundary").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, completion.GetProperty("trigger").ValueKind);
+                Assert.Equal("unknown", completion.GetProperty("outcome").GetString());
                 AssertJsonShape(item.Summary, completion.GetProperty("summary"));
                 AssertJsonShape(
                     item.ReplacementHistory,

@@ -128,11 +128,12 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 
     private static IReadOnlyList<CaptureEvent> ReasoningContent(JsonElement payload)
     {
+        string actor = MessageActor(JsonAdapterHelpers.NullableString(payload, "role"));
         var events = new List<CaptureEvent>();
-        AddReasoningParts(payload, "summary", "summary_text", events);
-        AddReasoningParts(payload, "content", "reasoning_text", events);
+        AddReasoningParts(payload, "summary", "summary_text", actor, events);
+        AddReasoningParts(payload, "content", "reasoning_text", actor, events);
         return events.Count == 0
-            ? [Opaque("response_item", "reasoning", payload, "reasoning:opaque")]
+            ? [Opaque("response_item", "reasoning", payload, "reasoning:opaque", actor)]
             : events;
     }
 
@@ -140,6 +141,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         JsonElement payload,
         string propertyName,
         string partType,
+        string actor,
         List<CaptureEvent> events)
     {
         if (!payload.TryGetProperty(propertyName, out JsonElement parts))
@@ -152,7 +154,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             events.Add(Event(
                 $"{propertyName}:opaque",
                 "opaque",
-                "unknown",
+                actor,
                 new
                 {
                     contentType = parts.ValueKind == JsonValueKind.Object
@@ -178,7 +180,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 events.Add(Event(
                     $"{propertyName}/{index}:reasoning",
                     "reasoning",
-                    "unknown",
+                    actor,
                     new { text = text.GetString() },
                     partOrder: events.Count));
             }
@@ -187,7 +189,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 events.Add(Event(
                     $"{propertyName}/{index}:opaque",
                     "opaque",
-                    "unknown",
+                    actor,
                     new
                     {
                         contentType = part.ValueKind == JsonValueKind.Object
@@ -426,11 +428,15 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         Opaque(recordType, payloadType, payload, $"opaque/{position}");
 
     private static CaptureEvent Opaque(
-        string? recordType, string? payloadType, JsonElement payload, string partKey) =>
+        string? recordType,
+        string? payloadType,
+        JsonElement payload,
+        string partKey,
+        string actor = "unknown") =>
         Event(
             partKey,
             "opaque",
-            "unknown",
+            actor,
             new { recordType, payloadType, source = payload.Clone() });
 
     private static CaptureEvent Event(

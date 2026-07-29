@@ -50,16 +50,19 @@ Adapters are versioned tolerant tagged unions:
   `summary_text` and `reasoning_text` blocks as canonical `reasoning`; encrypted
   content and signatures remain source evidence and are never interpreted as
   reasoning. Event kind and actor are independent: the reasoning discriminator
-  earns kind `reasoning`, but absent a source-stated role its actor remains
-  `unknown`;
+  earns kind `reasoning`; a recognized explicit source-stated `user`,
+  `assistant`, `developer`, or `system` role supplies the actor for canonical
+  reasoning parts and opaque section evidence, while an absent or unrecognized
+  role remains `unknown`;
 - a present non-array Codex reasoning `summary` or `content` section remains a
   deterministic `opaque` event with its complete source shape and discriminator,
   even when the other section yields canonical reasoning; a missing section
   yields no event;
 - Codex `event_msg/context_compacted` is the duplicate lifecycle boundary view
-  paired with canonical `compacted` summary/history evidence, so it remains an
-  evidence-bearing `annotation` with actor `harness`, not a second compaction
-  event or an opaque record;
+  paired with one canonical `compacted` summary/history record, so it remains
+  one evidence-bearing `annotation` with actor `harness`, not a second
+  compaction event or an opaque record; both observations preserve their
+  complete scanned source evidence;
 - unknown additive fields remain in `sourcePayload`;
 - content and output accept string or array forms;
 - message content objects become canonical parts only when a known text-part

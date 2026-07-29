@@ -43,7 +43,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                 item => item.Payload.GetProperty("text").GetString()));
         Assert.All(reasoning[0].Observation.Events, item =>
         {
-            Assert.Equal("unknown", item.Actor);
+            Assert.Equal("assistant", item.Actor);
             Assert.False(item.Payload.TryGetProperty("encrypted_content", out _));
             Assert.False(item.Payload.TryGetProperty("signature", out _));
         });
@@ -58,7 +58,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 
         CaptureEvent encryptedOnly = Assert.Single(reasoning[1].Observation.Events);
         Assert.Equal("opaque", encryptedOnly.Kind);
-        Assert.Equal("unknown", encryptedOnly.Actor);
+        Assert.Equal("developer", encryptedOnly.Actor);
         Assert.Equal("reasoning", encryptedOnly.Payload.GetProperty("payloadType").GetString());
         Assert.Equal(
             "synthetic-encrypted-only-provider-metadata",
@@ -117,6 +117,8 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         Assert.True(
             malformedContent.GetProperty("source").GetProperty("futureMalformedSectionField")
                 .GetProperty("retained").GetBoolean());
+        Assert.All(reasoning[2].Observation.Events, item =>
+            Assert.Equal("user", item.Actor));
 
         Assert.Equal(
             ["opaque", "reasoning"],
@@ -156,6 +158,21 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             item => item.Kind == "reasoning"
                 && item.Payload.TryGetProperty("text", out JsonElement text)
                 && text.GetString() == "Not promoted from an unsupported summary container.");
+        Assert.All(reasoning[3].Observation.Events, item =>
+            Assert.Equal("system", item.Actor));
+
+        CaptureEvent roleAbsent = Assert.Single(reasoning[4].Observation.Events);
+        Assert.Equal("reasoning", roleAbsent.Kind);
+        Assert.Equal("unknown", roleAbsent.Actor);
+        Assert.Equal(
+            "Synthetic role-absent reasoning remains unknown.",
+            roleAbsent.Payload.GetProperty("text").GetString());
+        CaptureEvent roleUnrecognized = Assert.Single(reasoning[5].Observation.Events);
+        Assert.Equal("reasoning", roleUnrecognized.Kind);
+        Assert.Equal("unknown", roleUnrecognized.Actor);
+        Assert.Equal(
+            "Synthetic unrecognized reasoning role remains unknown.",
+            roleUnrecognized.Payload.GetProperty("text").GetString());
 
         var opaque = opaqueSource.Select(adapter.Adapt)
             .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
@@ -204,15 +221,33 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
             .ToArray();
         Assert.Equal(
-            ["annotation", "annotation", "annotation"],
+            ["annotation", "annotation", "compaction", "annotation"],
             annotations.Select(
                 outcome => Assert.Single(outcome.Observation.Events).Kind));
         Assert.All(annotations, outcome =>
             Assert.Equal("harness", Assert.Single(outcome.Observation.Events).Actor));
         Assert.Equal(
-            ["view:turn_started", "view:agent_reasoning", "view:context_compacted"],
+            [
+                "view:turn_started",
+                "view:agent_reasoning",
+                $"compaction/{annotations[2].Observation.SourcePosition}",
+                "view:context_compacted"
+            ],
             annotations.Select(
                 outcome => Assert.Single(outcome.Observation.Events).PartKey));
+        Assert.Equal(
+            1,
+            annotations.SelectMany(outcome => outcome.Observation.Events)
+                .Count(item => item.Kind == "compaction"));
+        Assert.Equal(
+            1,
+            annotations.SelectMany(outcome => outcome.Observation.Events)
+                .Count(item => item.PartKey == "view:context_compacted"
+                    && item.Kind == "annotation"));
+        Assert.DoesNotContain(
+            annotations.SelectMany(outcome => outcome.Observation.Events),
+            item => item.PartKey == "view:context_compacted"
+                && item.Kind is "compaction" or "opaque");
         Assert.True(
             annotations[0].Observation.Events[0].Payload.GetProperty("source")
                 .GetProperty("futureLifecycleField").GetProperty("retained").GetBoolean());
@@ -231,7 +266,35 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             "Synthetic duplicate reasoning view.",
             annotations[1].Observation.Events[0].Payload.GetProperty("source")
                 .GetProperty("text").GetString());
-        CaptureEvent compactedBoundary = Assert.Single(annotations[2].Observation.Events);
+        CaptureEvent canonicalCompaction = Assert.Single(annotations[2].Observation.Events);
+        Assert.Equal("compaction", canonicalCompaction.Kind);
+        Assert.Equal("harness", canonicalCompaction.Actor);
+        Assert.Equal(
+            "Synthetic paired compacted summary.",
+            canonicalCompaction.Payload.GetProperty("summary").GetString());
+        Assert.Equal(
+            144,
+            canonicalCompaction.Payload.GetProperty("metrics")
+                .GetProperty("beforeTokens").GetInt32());
+        JsonElement compactionSource = annotations[2].Observation.SourcePayload
+            .GetProperty("payload");
+        Assert.Equal(
+            "Synthetic paired compacted summary.",
+            compactionSource.GetProperty("summary")[0].GetProperty("text").GetString());
+        Assert.True(
+            compactionSource.GetProperty("summary")[0].GetProperty("futureSummaryEvidence")
+                .GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "Synthetic retained pre-compaction history.",
+            compactionSource.GetProperty("history")[0].GetProperty("content").GetString());
+        Assert.True(
+            compactionSource.GetProperty("history")[0].GetProperty("futureHistoryEvidence")
+                .GetProperty("retained").GetBoolean());
+        Assert.True(
+            compactionSource.GetProperty("futureCompactionField")
+                .GetProperty("retained").GetBoolean());
+
+        CaptureEvent compactedBoundary = Assert.Single(annotations[3].Observation.Events);
         Assert.Equal("annotation", compactedBoundary.Kind);
         Assert.Equal("harness", compactedBoundary.Actor);
         Assert.True(
@@ -245,15 +308,15 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                 .GetProperty("nested").GetProperty("boundary").GetString());
         Assert.Equal(
             "context_compacted",
-            annotations[2].Observation.SourcePayload.GetProperty("payload")
+            annotations[3].Observation.SourcePayload.GetProperty("payload")
                 .GetProperty("type").GetString());
         Assert.True(
-            annotations[2].Observation.SourcePayload.GetProperty("payload")
+            annotations[3].Observation.SourcePayload.GetProperty("payload")
                 .GetProperty("futureCompactionBoundaryField")
                 .GetProperty("retained").GetBoolean());
         Assert.Equal(
             "synthetic",
-            annotations[2].Observation.SourcePayload.GetProperty("payload")
+            annotations[3].Observation.SourcePayload.GetProperty("payload")
                 .GetProperty("futureCompactionBoundaryField")
                 .GetProperty("nested").GetProperty("boundary").GetString());
 

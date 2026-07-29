@@ -56,6 +56,10 @@ Adapters are versioned tolerant tagged unions:
   deterministic `opaque` event with its complete source shape and discriminator,
   even when the other section yields canonical reasoning; a missing section
   yields no event;
+- Codex `event_msg/context_compacted` is the duplicate lifecycle boundary view
+  paired with canonical `compacted` summary/history evidence, so it remains an
+  evidence-bearing `annotation` with actor `harness`, not a second compaction
+  event or an opaque record;
 - unknown additive fields remain in `sourcePayload`;
 - content and output accept string or array forms;
 - message content objects become canonical parts only when a known text-part
@@ -114,7 +118,8 @@ non-fallback clocks. The Codex 0.145 additive families cover source-exposed
 reasoning, mixed supported and present-but-non-array reasoning sections,
 complete opaque signature/encrypted/additive metadata, complete unsupported
 record and content evidence, and evidence-bearing duplicate lifecycle/reasoning
-views retained as annotations.
+views retained as annotations, including the `event_msg/context_compacted`
+boundary view paired with canonical `compacted` summary/history evidence.
 
 `CodexJsonlAdapter` is the only adapter referenced by the separately built
 disabled tracer image. `DisposableClaudeJsonlAdapter` is defined in the test

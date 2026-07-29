@@ -105,7 +105,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             {
                 "user_message" or "agent_message" =>
                     [MessageView(payload, payloadType)],
-                "turn_started" or "agent_reasoning" =>
+                "turn_started" or "agent_reasoning" or "context_compacted" =>
                     [AnnotationView(payload, payloadType)],
                 "error" or "turn_aborted" => [Error(payload, position)],
                 "subagent_start" => [Subagent(payload, position)],

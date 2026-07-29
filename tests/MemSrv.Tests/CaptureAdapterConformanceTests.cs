@@ -118,6 +118,45 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             malformedContent.GetProperty("source").GetProperty("futureMalformedSectionField")
                 .GetProperty("retained").GetBoolean());
 
+        Assert.Equal(
+            ["opaque", "reasoning"],
+            reasoning[3].Observation.Events.Select(item => item.Kind));
+        Assert.Equal(
+            ["summary:opaque", "content/0:reasoning"],
+            reasoning[3].Observation.Events.Select(item => item.PartKey));
+        Assert.Equal(
+            [0, 1],
+            reasoning[3].Observation.Events.Select(item => item.PartOrder));
+        JsonElement malformedSummary = reasoning[3].Observation.Events[0].Payload;
+        Assert.Equal(
+            "future_summary_container",
+            malformedSummary.GetProperty("contentType").GetString());
+        Assert.Equal(
+            "future_summary_container",
+            malformedSummary.GetProperty("source").GetProperty("type").GetString());
+        Assert.Equal(
+            "Not promoted from an unsupported summary container.",
+            malformedSummary.GetProperty("source").GetProperty("blocks")[0]
+                .GetProperty("text").GetString());
+        Assert.True(
+            malformedSummary.GetProperty("source").GetProperty("blocks")[0]
+                .GetProperty("nested").GetProperty("retained").GetBoolean());
+        Assert.True(
+            malformedSummary.GetProperty("source").GetProperty("futureMalformedSummaryField")
+                .GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "Synthetic supported content beside malformed summary.",
+            reasoning[3].Observation.Events[1].Payload.GetProperty("text").GetString());
+        Assert.Equal(
+            "future_summary_container",
+            reasoning[3].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("summary").GetProperty("type").GetString());
+        Assert.DoesNotContain(
+            reasoning[3].Observation.Events,
+            item => item.Kind == "reasoning"
+                && item.Payload.TryGetProperty("text", out JsonElement text)
+                && text.GetString() == "Not promoted from an unsupported summary container.");
+
         var opaque = opaqueSource.Select(adapter.Adapt)
             .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
             .ToArray();
@@ -165,13 +204,13 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
             .ToArray();
         Assert.Equal(
-            ["annotation", "annotation"],
+            ["annotation", "annotation", "annotation"],
             annotations.Select(
                 outcome => Assert.Single(outcome.Observation.Events).Kind));
         Assert.All(annotations, outcome =>
             Assert.Equal("harness", Assert.Single(outcome.Observation.Events).Actor));
         Assert.Equal(
-            ["view:turn_started", "view:agent_reasoning"],
+            ["view:turn_started", "view:agent_reasoning", "view:context_compacted"],
             annotations.Select(
                 outcome => Assert.Single(outcome.Observation.Events).PartKey));
         Assert.True(
@@ -192,6 +231,31 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             "Synthetic duplicate reasoning view.",
             annotations[1].Observation.Events[0].Payload.GetProperty("source")
                 .GetProperty("text").GetString());
+        CaptureEvent compactedBoundary = Assert.Single(annotations[2].Observation.Events);
+        Assert.Equal("annotation", compactedBoundary.Kind);
+        Assert.Equal("harness", compactedBoundary.Actor);
+        Assert.True(
+            compactedBoundary.Payload.GetProperty("source")
+                .GetProperty("futureCompactionBoundaryField")
+                .GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "synthetic",
+            compactedBoundary.Payload.GetProperty("source")
+                .GetProperty("futureCompactionBoundaryField")
+                .GetProperty("nested").GetProperty("boundary").GetString());
+        Assert.Equal(
+            "context_compacted",
+            annotations[2].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("type").GetString());
+        Assert.True(
+            annotations[2].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("futureCompactionBoundaryField")
+                .GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "synthetic",
+            annotations[2].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("futureCompactionBoundaryField")
+                .GetProperty("nested").GetProperty("boundary").GetString());
 
         string first = JsonSerializer.Serialize(
             reasoning.Concat(opaque).Concat(annotations)

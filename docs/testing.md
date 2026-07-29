@@ -78,6 +78,30 @@ isolation with claim-state mechanics. Their documented public module surfaces
 in `docs/capture-modules.md` are legitimate focused test seams, limited to
 those mechanisms.
 
+The transport-omission mechanism is also authorized at the
+`CodexCaptureClaimer` durable-state and `DisabledCaptureRuntime` delivery module
+seams. A test may inject a smaller positive transport bound to make omission
+and mandatory-identity refusal mechanically observable, including refusal of a
+conflicting legacy/current identity before durable claim. `CaptureFidelityPolicy`
+is the authorized mechanism seam for proving that pathological over-limit JSON
+is streaming-counted with bounded additional allocation and elapsed time,
+count/materialize mutation cannot return an over-cap representation, and an
+over-limit native locator fails closed. The runtime state seam proves such a
+native record claims nothing and persists no raw content. `CaptureIngestion` is
+the corresponding seam for proving content compaction, the fixed 128 MiB clamp,
+and keyed-signature streaming before append.
+Because the production deadline is deliberately not caller-injectable and the
+serializer has no honest deterministic clock seam, tests exercise elapsed time
+under the production deadline rather than adding test-only deadline machinery.
+The injected value
+can only tighten the fixed 1,000,000-byte production bound; a larger request
+must never loosen it. The same positive-only rule applies to injected content
+bounds against the fixed 128 MiB production ceiling. These focused tests do not
+replace packaged-apphost proof:
+the real tracer must retain an observation whose adapted request is exactly
+1,000,000 UTF-8 bytes whole and convert the next byte to the versioned omission
+through the real HTTP API and operator read.
+
 This is not a general license to test capture behavior through modules.
 Startup/resume, delivery retry and timeout convergence, append/archive
 transitions, and canonical results must retain packaged-apphost coverage

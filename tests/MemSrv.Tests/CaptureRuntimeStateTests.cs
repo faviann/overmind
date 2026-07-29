@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -294,6 +295,564 @@ public sealed class CaptureRuntimeStateTests
             Assert.DoesNotContain(
                 seededSyntheticSecret,
                 await File.ReadAllTextAsync(Path.Combine(directory, "state", "capture-state.json")));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RecordBeyondTransportLimitIsDurablyClaimedAsContentFreeObservationOmission()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-omission-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        const string rawPayload = "RAW-PAYLOAD-MUST-NOT-ENTER-DURABLE-STATE";
+        string record = JsonSerializer.Serialize(new
+        {
+            type = "response_item",
+            payload = new
+            {
+                type = "message",
+                role = "user",
+                content = string.Concat(Enumerable.Repeat(rawPayload, 100))
+            }
+        });
+        await File.WriteAllTextAsync(transcript, record + "\n", new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            var claims = await CodexCaptureClaimer.ClaimCompletedAsync(
+                new CodexJsonlAdapter(),
+                transcript,
+                "codex-runtime-transport-omission",
+                state,
+                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                maxTransportBytes: 1_024);
+
+            var claim = Assert.Single(claims);
+            Assert.DoesNotContain(rawPayload, claim.RedactedSafeCandidate);
+            using var candidate = JsonDocument.Parse(claim.RedactedSafeCandidate);
+            JsonElement omission = candidate.RootElement
+                .GetProperty("sourcePayload")
+                .GetProperty("omission");
+            Assert.Equal(
+                "observation_exceeds_transport_limit",
+                omission.GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureFidelityPolicy.CurrentVersion,
+                omission.GetProperty("policyVersion").GetString());
+            var originalOutcome = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                new CodexJsonlAdapter().Adapt(
+                    Assert.Single(JsonlSourceReader.Read(
+                        Encoding.UTF8.GetBytes(record + "\n"),
+                        "codex-runtime-transport-omission",
+                        terminalAtEndOfFile: false))));
+            Assert.Equal(
+                Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(
+                    originalOutcome.Observation,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web))),
+                omission.GetProperty("originalByteCount").GetInt64());
+            JsonElement sourceIdentity = omission.GetProperty("sourceIdentity");
+            Assert.Equal(
+                "codex-runtime-transport-omission",
+                sourceIdentity.GetProperty("externalSessionId").GetString());
+            Assert.Equal(
+                0,
+                sourceIdentity.GetProperty("sourcePosition").GetInt64());
+            Assert.Equal(
+                "byte_range",
+                sourceIdentity.GetProperty("locatorKind").GetString());
+            Assert.Single(candidate.RootElement.GetProperty("events").EnumerateArray());
+
+            string durableState = await File.ReadAllTextAsync(
+                Path.Combine(directory, "state", "capture-state.json"));
+            Assert.DoesNotContain(rawPayload, durableState);
+            Assert.Contains("observation_exceeds_transport_limit", durableState);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void NativeRecordBeyondTransportLimitFailsClosedAtTheFidelityPolicy()
+    {
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            padding = new string('p', 4_096)
+        });
+        CaptureObservationRequest observation = ResourceBoundObservation(
+            payload,
+            "native-overlimit-policy",
+            new CaptureLocator(
+                "native_id",
+                "stable-native-locator",
+                null,
+                null,
+                null));
+
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(
+            () => CaptureFidelityPolicy.SerializeForTransport(observation, 1_024));
+
+        Assert.Contains("native_id", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("fails closed", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NativeRecordBeyondTransportLimitClaimsNothingAndPersistsNoRawContent()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-native-overlimit-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            const string rawSentinel = "NATIVE-OVERLIMIT-RAW-MUST-NOT-PERSIST";
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            InvalidOperationException failure =
+                await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new NativeTransportPaddingAdapter(rawSentinel),
+                        transcript,
+                        "native-overlimit-runtime",
+                        state,
+                        new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                        maxTransportBytes: 1_024));
+
+            Assert.Contains("native_id", failure.Message, StringComparison.Ordinal);
+            Assert.Empty((await state.ReadAsync()).Streams);
+            string statePath = Path.Combine(directory, "state", "capture-state.json");
+            if (File.Exists(statePath))
+            {
+                Assert.DoesNotContain(
+                    rawSentinel,
+                    await File.ReadAllTextAsync(statePath),
+                    StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RequestedTransportBoundCannotQueueAProductionCapPlusOneObservationRaw()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-fixed-cap-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            TrustedSourceObservation source = Assert.Single(JsonlSourceReader.Read(
+                await File.ReadAllBytesAsync(transcript),
+                "fixed-cap-stream",
+                terminalAtEndOfFile: false));
+            var unpaddedAdapter = new TransportPaddingAdapter(0);
+            var unpadded = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                unpaddedAdapter.Adapt(source));
+            int unpaddedBytes = Encoding.UTF8.GetByteCount(
+                JsonSerializer.Serialize(
+                    unpadded.Observation,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            int paddingLength =
+                CaptureFidelityPolicy.ProductionTransportBytes + 1 - unpaddedBytes;
+            Assert.True(paddingLength > 0);
+            var adapter = new TransportPaddingAdapter(paddingLength);
+            var exact = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(source));
+            Assert.Equal(
+                CaptureFidelityPolicy.ProductionTransportBytes + 1,
+                Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(
+                    exact.Observation,
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web))));
+
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            CaptureRuntimeQueueItem claim = Assert.Single(
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    transcript,
+                    "fixed-cap-stream",
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    maxTransportBytes: CaptureFidelityPolicy.ProductionTransportBytes * 2));
+
+            Assert.True(
+                Encoding.UTF8.GetByteCount(claim.RedactedSafeCandidate)
+                <= CaptureFidelityPolicy.ProductionTransportBytes);
+            Assert.Contains(
+                CaptureFidelityPolicy.TransportLimitReason,
+                claim.RedactedSafeCandidate,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                new string('p', 256),
+                claim.RedactedSafeCandidate,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MandatoryIdentityOrLocatorThatCannotFitTransportBoundClaimsNothing(
+        bool oversizedIdentity)
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-unfit-identity-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            const string sentinel = "MANDATORY-RAW-VALUE-MUST-NOT-BE-PERSISTED";
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            InvalidOperationException failure =
+                await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new OversizedMandatoryFieldAdapter(sentinel, oversizedIdentity),
+                        transcript,
+                        "mandatory-field-stream",
+                        state,
+                        new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                        maxTransportBytes: 512));
+
+            Assert.Contains("cannot fit", failure.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(sentinel, failure.ToString(), StringComparison.Ordinal);
+            Assert.Empty((await state.ReadAsync()).Streams);
+            string statePath = Path.Combine(directory, "state", "capture-state.json");
+            if (File.Exists(statePath))
+            {
+                Assert.DoesNotContain(
+                    sentinel,
+                    await File.ReadAllTextAsync(statePath),
+                    StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConflictingDualIdentityBeyondTransportLimitClaimsNothing()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-conflicting-identity-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            ArgumentException failure =
+                await Assert.ThrowsAsync<ArgumentException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new ConflictingDualIdentityAdapter(),
+                        transcript,
+                        "transport-identity",
+                        state,
+                        new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                        maxTransportBytes: 512));
+
+            Assert.Contains(
+                "sourceSessionId must match sourceIdentity.externalSessionId",
+                failure.Message,
+                StringComparison.Ordinal);
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PathologicalTransportInputIsCountedWithBoundedAllocationAndTime()
+    {
+        JsonElement smallPayload =
+            JsonSerializer.SerializeToElement(new { padding = "warm" });
+        CaptureObservationRequest warm =
+            ResourceBoundObservation(smallPayload, "resource-bound-warm");
+        CaptureFidelityPolicy.SerializeForTransport(warm, 1_024);
+
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            padding = new string('p', 8 * 1024 * 1024)
+        });
+        CaptureObservationRequest pathological =
+            ResourceBoundObservation(payload, "resource-bound-pathological");
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var clock = Stopwatch.StartNew();
+
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+            CaptureFidelityPolicy.SerializeForTransport(pathological, 1_024);
+
+        clock.Stop();
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(bounded.WasOmitted);
+        Assert.True(
+            allocated < 4L * 1024 * 1024,
+            $"Streaming count allocated {allocated:N0} bytes; the bounded " +
+            "counting path should not materialize the 16 MiB original JSON.");
+        Assert.True(
+            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            $"Streaming count took {clock.Elapsed}; the published deadline is " +
+            $"{SafetyBudgets.Default.MaxScanTime}.");
+    }
+
+    [Fact]
+    public void MaterializationGrowthCannotReturnAnOverCapTransportRepresentation()
+    {
+        JsonElement small = JsonSerializer.SerializeToElement(new { value = "small" });
+        JsonElement large = JsonSerializer.SerializeToElement(new
+        {
+            value = new string('x', 4_096)
+        });
+        var events = new StatefulEventList(
+            new CaptureEvent("small/0", 0, "opaque", "harness", small, null, []),
+            new CaptureEvent("large/0", 0, "opaque", "harness", large, null, []));
+        CaptureObservationRequest observation = ResourceBoundObservation(
+            small,
+            "materialization-growth",
+            new CaptureLocator(
+                "byte_range",
+                null,
+                0,
+                1,
+                new string('a', 64))) with
+        {
+            Events = events
+        };
+
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+            CaptureFidelityPolicy.SerializeForTransport(observation, 1_024);
+
+        Assert.True(bounded.WasOmitted);
+        Assert.True(Encoding.UTF8.GetByteCount(bounded.Serialized) <= 1_024);
+        Assert.Equal(
+            CaptureFidelityPolicy.TransportLimitReason,
+            bounded.Observation.SourcePayload.GetProperty("omission")
+                .GetProperty("reason").GetString());
+        Assert.True(bounded.OriginalByteCount > 1_024);
+    }
+
+    [Fact]
+    public void MaterializedTransportSnapshotCannotDivergeFromBoundedSerialization()
+    {
+        JsonElement small = JsonSerializer.SerializeToElement(new { value = "small" });
+        JsonElement medium = JsonSerializer.SerializeToElement(new
+        {
+            value = new string('m', 64)
+        });
+        JsonElement large = JsonSerializer.SerializeToElement(new
+        {
+            value = new string('x', 4_096)
+        });
+        var events = new StatefulEventList(
+            new CaptureEvent("small/0", 0, "opaque", "harness", small, null, []),
+            new CaptureEvent("medium/0", 0, "opaque", "harness", medium, null, []),
+            new CaptureEvent("large/0", 0, "opaque", "harness", large, null, []));
+        CaptureObservationRequest observation = ResourceBoundObservation(
+            small,
+            "materialization-snapshot") with
+        {
+            Events = events
+        };
+
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+            CaptureFidelityPolicy.SerializeForTransport(observation, 1_024);
+        string returnedJson = JsonSerializer.Serialize(
+            bounded.Observation,
+            CaptureLedger.JsonOptions);
+
+        Assert.False(bounded.WasOmitted);
+        Assert.Equal(bounded.Serialized, returnedJson);
+        Assert.True(Encoding.UTF8.GetByteCount(returnedJson) <= 1_024);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void NonpositiveContentBoundIsRejected(long contentBound)
+    {
+        JsonElement payload = JsonSerializer.SerializeToElement(new { value = "safe" });
+        CaptureObservationCommand command = CaptureObservationCommand.FromRequest(
+            ResourceBoundObservation(payload, "invalid-content-bound"));
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => CaptureFidelityPolicy.SerializeForContent(command, contentBound));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task NonpositiveTransportBoundIsRejectedBeforeDurableClaim(
+        int transportBound)
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-invalid-bound-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+                () => CodexCaptureClaimer.ClaimCompletedAsync(
+                    new TransportPaddingAdapter(0),
+                    transcript,
+                    "invalid-bound-stream",
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    maxTransportBytes: transportBound));
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyIdentityAndRetainedMetadataAreCompactedBeforeClaimAndDelivery()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-metadata-omission-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        const string rawSentinel = "RAW-RETAINED-METADATA-MUST-NOT-BE-QUEUED";
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(stateDirectory);
+            const int transportBound = 1_024;
+            const string transcriptIdentity = "metadata-heavy-transcript";
+            IReadOnlyList<CaptureRuntimeQueueItem> claims =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new RetainedMetadataAdapter(rawSentinel),
+                    transcript,
+                    "metadata-heavy-stream",
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    transcriptIdentity: transcriptIdentity,
+                    maxTransportBytes: transportBound);
+
+            CaptureRuntimeQueueItem claim = Assert.Single(claims);
+            Assert.True(
+                Encoding.UTF8.GetByteCount(claim.RedactedSafeCandidate) <= transportBound);
+            Assert.DoesNotContain(rawSentinel, claim.RedactedSafeCandidate);
+            using (var queued = JsonDocument.Parse(claim.RedactedSafeCandidate))
+            {
+                Assert.Equal(
+                    "metadata-heavy-stream",
+                    queued.RootElement.GetProperty("sourceIdentity")
+                        .GetProperty("externalSessionId").GetString());
+                Assert.Equal(
+                    "metadata-heavy-stream",
+                    queued.RootElement.GetProperty("sourcePayload")
+                        .GetProperty("omission")
+                        .GetProperty("sourceIdentity")
+                        .GetProperty("externalSessionId").GetString());
+            }
+            string durableState = await File.ReadAllTextAsync(
+                Path.Combine(stateDirectory, "capture-state.json"));
+            Assert.DoesNotContain(rawSentinel, durableState);
+            Assert.Equal(
+                claim.RedactedSafeCandidate,
+                Assert.Single(Assert.Single((await state.ReadAsync()).Streams).Queue)
+                    .RedactedSafeCandidate);
+
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            Task<string> received = Task.Run(async () =>
+            {
+                using TcpClient delivery =
+                    await listener.AcceptTcpClientAsync(timeout.Token);
+                await using NetworkStream stream = delivery.GetStream();
+                string requestBody = await ReadRequestAsync(stream, timeout.Token);
+                byte[] response = Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+                await stream.WriteAsync(response, timeout.Token);
+                return requestBody;
+            });
+
+            await DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                new RetainedMetadataAdapter(rawSentinel),
+                transcript,
+                "metadata-heavy-stream",
+                claims,
+                new Uri($"http://127.0.0.1:{port}"),
+                $"mcap_{Guid.NewGuid():N}",
+                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                (_, _, _) => Task.CompletedTask,
+                transcriptIdentity: transcriptIdentity,
+                maxTransportBytes: transportBound);
+            string request = await received.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(Encoding.UTF8.GetByteCount(request) <= transportBound);
+            Assert.DoesNotContain(rawSentinel, request);
+            using (var delivered = JsonDocument.Parse(request))
+            {
+                Assert.Equal(
+                    "metadata-heavy-stream",
+                    delivered.RootElement.GetProperty("sourceIdentity")
+                        .GetProperty("externalSessionId").GetString());
+                Assert.Equal(
+                    JsonValueKind.Null,
+                    delivered.RootElement.GetProperty("sourceSessionId").ValueKind);
+            }
+            Assert.Equal(
+                claim.RedactedSafeCandidate,
+                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"))
+                    .ScanJson(request).Redacted);
         }
         finally
         {
@@ -1911,5 +2470,281 @@ public sealed class CaptureRuntimeStateTests
             CancellationToken cancellationToken = default) =>
             inner.DeliverAuthorizedAsync(
                 sourceStream, queued, deliverAsync, cancellationToken);
+    }
+
+    private sealed class RetainedMetadataAdapter(string rawSentinel) : ICaptureSourceAdapter
+    {
+        private readonly string _oversized = string.Concat(
+            Enumerable.Repeat(rawSentinel, 100));
+
+        public string Harness => "codex";
+        public CaptureAdapter Identity => new(_oversized, _oversized);
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var locator = Assert.IsType<CaptureSourceLocator.ByteRange>(source.Locator);
+            JsonElement payload = JsonSerializer.SerializeToElement(new { safe = true });
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    source.SourceIdentity.ExternalSessionId,
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        locator.Kind,
+                        null,
+                        locator.Offset,
+                        locator.Length,
+                        locator.SourceContentSha256),
+                    new CaptureSourceTimestamp(_oversized, null),
+                    new CaptureSource(
+                        Harness,
+                        _oversized,
+                        _oversized,
+                        _oversized,
+                        _oversized,
+                        _oversized),
+                    Identity,
+                    payload,
+                    [
+                        new CaptureEvent(
+                            "synthetic/0",
+                            0,
+                            "opaque",
+                            "harness",
+                            payload,
+                            null,
+                            [])
+                    ],
+                    SourceIdentity: null));
+        }
+    }
+
+    private sealed class TransportPaddingAdapter(int paddingLength) : ICaptureSourceAdapter
+    {
+        private readonly string _padding = new('p', paddingLength);
+
+        public string Harness => "codex";
+        public CaptureAdapter Identity => new("test", "1");
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var locator = Assert.IsType<CaptureSourceLocator.ByteRange>(source.Locator);
+            JsonElement payload = JsonSerializer.SerializeToElement(new { safe = true });
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    source.SourceIdentity.ExternalSessionId,
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        locator.Kind,
+                        null,
+                        locator.Offset,
+                        locator.Length,
+                        locator.SourceContentSha256),
+                    null,
+                    new CaptureSource(Harness, null, _padding, null, null, null),
+                    Identity,
+                    payload,
+                    [
+                        new CaptureEvent(
+                            "synthetic/0",
+                            0,
+                            "opaque",
+                            "harness",
+                            payload,
+                            null,
+                            [])
+                    ],
+                    SourceIdentity: source.SourceIdentity));
+        }
+    }
+
+    private sealed class NativeTransportPaddingAdapter(string rawSentinel)
+        : ICaptureSourceAdapter
+    {
+        private readonly string _padding = string.Concat(
+            Enumerable.Repeat(rawSentinel, 200));
+
+        public string Harness => "codex";
+        public CaptureAdapter Identity => new("test", "1");
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            JsonElement payload = JsonSerializer.SerializeToElement(new
+            {
+                padding = _padding
+            });
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    source.SourceIdentity.ExternalSessionId,
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        "native_id",
+                        "stable-native-locator",
+                        null,
+                        null,
+                        null),
+                    null,
+                    new CaptureSource(Harness, null, null, null, null, null),
+                    Identity,
+                    payload,
+                    [
+                        new CaptureEvent(
+                            "synthetic/0",
+                            0,
+                            "opaque",
+                            "harness",
+                            payload,
+                            null,
+                            [])
+                    ],
+                    SourceIdentity: source.SourceIdentity));
+        }
+    }
+
+    private sealed class OversizedMandatoryFieldAdapter(
+        string sentinel,
+        bool oversizedIdentity) : ICaptureSourceAdapter
+    {
+        private readonly string _oversized = string.Concat(
+            Enumerable.Repeat(sentinel, 100));
+
+        public string Harness => "codex";
+        public CaptureAdapter Identity => new("test", "1");
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            JsonElement payload = JsonSerializer.SerializeToElement(new { safe = true });
+            string externalSessionId = oversizedIdentity
+                ? _oversized
+                : source.SourceIdentity.ExternalSessionId;
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    externalSessionId,
+                    source.SourcePosition,
+                    oversizedIdentity
+                        ? new CaptureLocator(
+                            "byte_range",
+                            null,
+                            0,
+                            21,
+                            new string('a', 64))
+                        : new CaptureLocator("native_id", _oversized, null, null, null),
+                    null,
+                    new CaptureSource(Harness, null, null, null, null, null),
+                    Identity,
+                    payload,
+                    [
+                        new CaptureEvent(
+                            "synthetic/0",
+                            0,
+                            "opaque",
+                            "harness",
+                            payload,
+                            null,
+                            [])
+                    ],
+                    SourceIdentity: new CaptureSourceIdentity(externalSessionId)));
+        }
+    }
+
+    private sealed class ConflictingDualIdentityAdapter : ICaptureSourceAdapter
+    {
+        public string Harness => "codex";
+        public CaptureAdapter Identity => new("test", "1");
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            JsonElement payload = JsonSerializer.SerializeToElement(new
+            {
+                padding = new string('p', 4_096)
+            });
+            var locator = Assert.IsType<CaptureSourceLocator.ByteRange>(source.Locator);
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    "legacy-identity",
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        locator.Kind,
+                        null,
+                        locator.Offset,
+                        locator.Length,
+                        locator.SourceContentSha256),
+                    null,
+                    new CaptureSource(Harness, null, null, null, null, null),
+                    Identity,
+                    payload,
+                    [
+                        new CaptureEvent(
+                            "synthetic/0",
+                            0,
+                            "opaque",
+                            "harness",
+                            payload,
+                            null,
+                            [])
+                    ],
+                    SourceIdentity: new CaptureSourceIdentity("current-identity")));
+        }
+    }
+
+    private static CaptureObservationRequest ResourceBoundObservation(
+        JsonElement payload,
+        string identity,
+        CaptureLocator? locator = null) =>
+        new(
+            1,
+            identity,
+            0,
+            locator ?? new CaptureLocator(
+                "byte_range",
+                null,
+                0,
+                1,
+                new string('a', 64)),
+            null,
+            new CaptureSource("codex", null, null, null, null, null),
+            new CaptureAdapter("test", "1"),
+            payload,
+            [
+                new CaptureEvent(
+                    "synthetic/0",
+                    0,
+                    "opaque",
+                    "harness",
+                    payload,
+                    null,
+                    [])
+            ],
+            SourceIdentity: new CaptureSourceIdentity(identity));
+
+    private sealed class StatefulEventList(
+        params CaptureEvent[] enumerations) : IReadOnlyList<CaptureEvent>
+    {
+        private int _enumeration;
+
+        public int Count => 1;
+        public CaptureEvent this[int index] => index == 0
+            ? enumerations[Math.Min(_enumeration, enumerations.Length - 1)]
+            : throw new ArgumentOutOfRangeException(nameof(index));
+
+        public IEnumerator<CaptureEvent> GetEnumerator()
+        {
+            int enumeration = Interlocked.Increment(ref _enumeration) - 1;
+            CaptureEvent item =
+                enumerations[Math.Min(enumeration, enumerations.Length - 1)];
+            yield return item;
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
     }
 }

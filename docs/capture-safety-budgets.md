@@ -15,7 +15,7 @@ of operator literals — never their values).
 
 | Budget | Default | Unit | Exceeded → |
 | --- | ---: | --- | --- |
-| `MaxObservationBytes` | 134,217,728 (128 MiB) | UTF-8 bytes per source observation | fail closed |
+| `MaxObservationBytes` | 134,217,728 (128 MiB) | UTF-8 bytes per source observation | whole observation omitted by `CaptureIngestion`; assertion fails closed for direct gate callers |
 | `MaxLeafBytes` | 67,108,864 (64 MiB) | UTF-8 bytes per decoded structured leaf | leaf wholly omitted (fail closed if the value is a required identity) |
 | `MaxScanTime` | 30 | seconds per scan call | fail closed |
 | `MaxRuleTime` | 5 | seconds per rule matcher | fail closed |
@@ -24,9 +24,39 @@ of operator literals — never their values).
 | `MaxDecoderCandidateLength` | 65,536 (64 KiB) | characters | run is not decoded; see the residual risk below |
 | `MaxDecodedBytes` | 16,777,216 (16 MiB) | decoded bytes per scan call | fail closed |
 
-"Fail closed" means the scan throws `SafetyScanException`, ingestion persists
-nothing, and the stream checkpoint does not advance. The next legitimate record
-is still accepted at the same source position.
+An operational "fail closed" outcome means the scan throws
+`SafetyScanException`, ingestion persists nothing, and the stream checkpoint
+does not advance. The next legitimate record is still accepted at the same
+source position.
+
+`MaxObservationBytes` has a separate deterministic fidelity outcome at the
+`CaptureIngestion` interface. A positive injected bound may tighten but never
+loosen the fixed 128 MiB ceiling. An original observation above the effective bound is replaced
+with a compact whole-observation omission, that representation is scanned and
+persisted, and the checkpoint advances. `NeverStoreGate` still enforces the
+limit through `AssertObservationWithinBudget`: it protects the compact
+representation inside ingestion and remains fail closed for direct callers.
+The compact form retains only the authenticated harness and the source
+identity/position/locator needed for canonical identity and keyed retry
+semantics, plus fixed omission provenance. Optional timestamp, descriptive
+source/adapter metadata, route evidence, source payload, and original semantic events
+cannot keep the omission above the limit. Required identity and locator values
+are neither truncated nor replaced by unkeyed content fingerprints.
+Operational scanner failures while processing either representation still
+persist nothing and do not advance the checkpoint.
+
+Before either fidelity cap is applied, JSON byte measurement streams into a
+discarding counter rather than creating a whole-original serialized string.
+The counter checks the fixed published `MaxScanTime` deadline as serialization
+progresses; deadline exhaustion is an operational fail-closed outcome, records
+no invented original byte count, and occurs before claim or append. An original
+believed within its effective cap is materialized and its actual UTF-8 size is
+checked again. If mutable source state made that representation over-limit,
+policy selects the omission using the materialized count or fails closed when
+safe identity cannot support omission. An ordinary over-limit observation
+materializes only its compact omission, while ingestion streams the original
+retry-signature representation directly into the keyed hash. Counting and
+hashing share one governed write-only serialization/deadline implementation.
 
 ### `MaxDecoderCandidateLength` is an accepted residual risk
 
@@ -124,7 +154,9 @@ How each default follows from those numbers:
 - **`MaxScanTime` = 30 s.** A leaf at the 64 MiB limit costs 2.3 s warm and up
   to 3.8 s cold in Release. Thirty seconds leaves roughly an 8× margin for a
   Debug build, a loaded host, and four concurrent test shards, while still
-  bounding the worst case.
+  bounding the worst case. The same fixed deadline governs streaming fidelity
+  byte counting and keyed-signature serialization; unlike scanner budgets, it
+  is not caller-injectable through a smaller fidelity cap.
 - **`MaxRuleTime` = 5 s.** The slowest single matcher over a limit-sized leaf is
   Base64 candidate extraction, measured at 687–775 ms since the alphabet was
   widened to base64url. Five seconds is still a ~6× margin. A shorter timeout —
@@ -201,6 +233,12 @@ observation-size, decoder-candidate, scan-time, and matcher-timeout budgets are
 not reachable through the HTTP route. They are exercised at the
 `NeverStoreGate` and `CaptureIngestion` module surfaces instead, with injected
 budgets, and the match-count budget is exercised end-to-end over HTTP.
+Transport omission can advance only a `byte_range` observation, because its
+source digest participates in the binding-keyed signature without being
+persisted. An over-limit `native_id` observation fails closed before claim or
+delivery: it has no binding-stable content identity for detecting a changed
+same-length original after compaction, and policy introduces neither an unkeyed
+fingerprint nor a credential-derived key.
 
 ## Rule-set schema
 

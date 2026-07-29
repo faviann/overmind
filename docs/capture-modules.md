@@ -1,6 +1,6 @@
 # Capture modules
 
-The capture spine (issue #74, stabilized by #120 and routed by #77) is five
+The capture spine (issue #74, stabilized by #120 and routed by #77) is six
 public modules in `MemSrv.Core`, plus the never-store gate (#76) that all of
 them cross. No module requires a caller to understand another's rules. This
 note records the shape that exists; it decides nothing new.
@@ -16,6 +16,7 @@ Source interpretation before this spine is described by the
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
+| `CaptureFidelityPolicy` | `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
@@ -30,6 +31,30 @@ rows — observations, events, relationships — that ingestion and operator rea
 both project into canonical facts.
 
 ## Invariants each interface hides
+
+**`CaptureFidelityPolicy`** — owns the complete deterministic serialization
+boundary: stream the original serialization through a byte-counting discard
+sink, retain and materialize it only after proving it fits, recheck the actual
+UTF-8 size of that materialized string, or replace it with the versioned
+whole-observation omission. The compact result is refused if it does not fit.
+Counting uses the published `MaxScanTime` as a fixed deadline and fails closed
+without reporting a guessed original byte count if serialization cannot
+finish. Callers receive the chosen value and its exact serialized
+representation as one outcome; they do not repeat byte counting, reconstruct
+policy output, or infer omission from object identity. Fidelity counting and
+content-signature hashing share one governed write-only serialization stream;
+only their discard and keyed-hash sinks differ. An injected transport bound can
+only tighten the fixed 1,000,000-byte production bound, an injected content
+bound can only tighten the fixed 128 MiB production bound, and both must be
+positive. Transport compaction
+first runs the original request through
+`CaptureObservationCommand.FromRequest`: conflicting dual identity, a missing
+mandatory identity, and an invalid locator are refused before counting,
+compaction, claim, or delivery. A supported legacy-only `sourceSessionId`
+canonicalizes into top-level `sourceIdentity` in the omission before the legacy
+field is cleared, and that same identity is repeated in omission provenance.
+Mandatory source identity and locator values are never truncated or
+fingerprinted to make either bound fit.
 
 **`NeverStoreGate`** — the single governed policy point every write path
 crosses, and the only type that knows rules exist. It hides the rule-set schema
@@ -68,13 +93,20 @@ binding-scoped routing policy, and the per-binding content-signature key.
 `null` means "reject before reading the body".
 
 **`CaptureIngestion`** — contract version, binding/harness agreement, unique
-part keys, relationship shape, the versioned 128 MiB observation ceiling, the
-never-store gate, the binding-keyed retry signature (which covers the
+part keys, relationship shape, deterministic whole-payload omission above the
+versioned 128 MiB observation ceiling, the never-store gate, the binding-keyed
+retry signature (which covers the
 `byte_range` source content digest that is signed but never persisted),
 evidence-driven route derivation and fixation on first import, contiguous
 checkpoint advance, locator idempotency and conflict, and the single
 transaction over observation + events + relationships + checkpoint.
 It never resolves a credential; authorization arrives already decided.
+Before fidelity selection it validates only the mandatory authority and
+identity facts retained by an omission. It validates optional semantic content
+after selection, against a stable command reconstructed from the exact bounded
+serialization that passed the effective ceiling. In-limit signatures use that
+same stable original snapshot; over-limit signatures continue to stream the
+original content while scan and persistence use only the bounded omission.
 
 **`OperatorCaptureReads`** — envelope assembly. It returns complete versioned
 `CapturedEventEnvelope` values (contract version, immutable observation, one
@@ -204,31 +236,53 @@ history or replace an earlier queued or canonical record.
 
 ## Where the gate runs
 
-The Codex claimer crosses the same `NeverStoreGate` before a candidate enters
-the local durable queue. The existing disabled delivery runtime scans the
-original observation again before it leaves the tracer process, and the server
-crosses the gate independently before canonical append. All three use the same
-governed rule semantics because they construct the same gate implementation;
-there is no second scanner implementation. Local candidate sanitization
-evidence is not canonical server scan provenance: the server remains the sole
-author of the canonical `scan_*` columns when delivery occurs.
+The Codex claimer applies the fixed 1,000,000-byte production transport bound
+before a candidate enters the local durable queue. Tests may inject only a
+tighter positive bound; an injected value above production is clamped and
+cannot admit a raw observation production would omit. A runtime observation
+above the effective bound becomes a compact whole-observation omission before
+durable queueing or transmission only for a verified `byte_range`, whose source
+digest is covered by the binding-keyed ingestion signature. An over-limit
+`native_id` observation lacks equivalent binding-stable content identity and
+fails closed before claim, queue, or transmission; capture adds neither an
+unkeyed fingerprint nor a credential-rotation-sensitive key. The fidelity
+policy mechanically verifies that the omission itself fits. The omission retains the
+authenticated harness, source identity, source position, and locator required
+for ingestion and idempotency. Its source timestamp, source/adapter descriptive
+metadata, route evidence, and original semantic content are absent; the
+policy-owned omission provenance repeats the required source-identity tuple but
+contains no source-content digest or excerpt. A mandatory identity or locator
+that cannot fit is refused rather than truncated or fingerprinted. The claimer
+then scans that bounded representation. An
+observation within the bound retains its original payload and is scanned as
+such. The existing disabled delivery runtime reconstructs the same bounded
+representation, scans it again before it leaves the tracer process, and the
+server crosses the gate independently before canonical append. All three use
+the same governed rule semantics because they construct the same gate
+implementation; there is no second scanner implementation. Local candidate
+sanitization evidence is not canonical server scan provenance: whether the wire
+carries the in-limit original observation or the compact transport omission,
+the server remains the sole author of the canonical `scan_*` columns when
+delivery occurs.
 
 The two sides do different things with the result. The runtime calls exactly two
 gate methods — `AssertObservationWithinBudget` and `ScanJson` — and **refuses on
-scan failure**: a budget exhaustion, a matcher timeout, an internal scanner
-error, or an unusable rule set throws out of `ScanJson`, so it emits nothing
-and says why on stderr. The one-shot compatibility mode exits non-zero; the
-scheduled synthetic mode retains responsibility and retries a later cycle. An
-omission is not a refusal — a leaf
+operational scan failure**: a budget exhausted while scanning the bounded
+representation, a matcher timeout, an internal scanner error, or an unusable
+rule set throws, so it emits nothing and says why on stderr. The one-shot
+compatibility mode exits non-zero; the scheduled synthetic mode retains
+responsibility and retries a later cycle. An omission is not a refusal — a leaf
 past its byte limit, a sensitive property name carrying a subtree, or a
 redaction-caused name collision is a recorded fidelity outcome that the server
 persists *as* an omission, not an unscanned tail, so the runtime still sends
-those observations. The runtime discards the scan result and does **not**
-rewrite the payload it transmits. If it did, the server would scan
-already-sanitized bytes and record `scan_status = "clean"` with no rule ids for
-content that was in fact redacted. Imported content supplies evidence only and
-cannot assert its own scan provenance, so the server — which sanitizes what it
-appends — remains the sole author of the canonical `scan_*` columns.
+those observations. Apart from the deterministic whole-observation transport
+omission, the runtime discards the scan result and does **not** rewrite the
+payload it transmits. Replacing an in-limit original payload with its scan
+result would make the server scan already-sanitized bytes and record
+`scan_status = "clean"` with no rule ids for content that was in fact redacted.
+Imported content supplies evidence only and cannot assert its own canonical
+scan provenance, so the server — which sanitizes what it appends — remains the
+sole author of the canonical `scan_*` columns.
 
 `AssertAllowed`/`AssertAllowedObject` are **server-side only**: they are the
 reject door, and rejecting is something only the side that owns the durable

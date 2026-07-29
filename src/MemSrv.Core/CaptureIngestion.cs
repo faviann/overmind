@@ -26,26 +26,41 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CancellationToken cancellationToken = default)
     {
         CaptureLedger.RequireSafetyConfigured(neverStore);
-        Validate(binding, command);
-        string inputJson = JsonSerializer.Serialize(command, CaptureLedger.JsonOptions);
-        // The versioned observation ceiling. The Kestrel transport cap on this
-        // route is deliberately far below it (see docs/capture-safety-budgets.md).
-        neverStore.AssertObservationWithinBudget(inputJson);
+        ValidateMandatory(binding, command);
+        CaptureObservationCommand originalCommand = command;
+        BoundedCaptureRepresentation<CaptureObservationCommand> bounded =
+            CaptureFidelityPolicy.SerializeForContent(
+                originalCommand,
+                neverStore.Budgets.MaxObservationBytes);
+        string inputJson = bounded.Serialized;
+        long originalByteCount = bounded.OriginalByteCount;
+        command = bounded.Observation;
+        ValidateSemantic(command);
+        CaptureObservationCommand signatureCommand =
+            bounded.WasOmitted ? originalCommand : command;
 
-        string signatureContent = JsonSerializer.Serialize(
+        string contentSignature = Sign(
             new CaptureSignatureContent(
-                command.ContractVersion,
-                command.SourceIdentity,
-                command.Locator,
-                command.SourceTimestamp,
-                command.Source,
-                command.Adapter,
-                command.SourcePayload,
-                command.Events,
-                command.RouteEvidence),
-            CaptureLedger.JsonOptions);
-        string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
+                signatureCommand.ContractVersion,
+                signatureCommand.SourceIdentity,
+                signatureCommand.Locator,
+                signatureCommand.SourceTimestamp,
+                signatureCommand.Source,
+                signatureCommand.Adapter,
+                signatureCommand.SourcePayload,
+                signatureCommand.Events,
+                signatureCommand.RouteEvidence),
+            binding.ContentSignatureKey);
+        bool observationWasOmitted = bounded.WasOmitted;
+        // The fidelity policy already proves the chosen serialized
+        // representation fits. The gate independently enforces its configured
+        // observation budget before scanning.
+        neverStore.AssertObservationWithinBudget(inputJson);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
+        if (observationWasOmitted)
+        {
+            scan.Omit(CaptureFidelityPolicy.ContentLimitReason);
+        }
         AssertSafe(command.SourceIdentity.ExternalSessionId, scan);
         if (command.SourceIdentity.ChildId is not null)
         {
@@ -213,7 +228,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 if (!string.Equals(
                         locatorMatch.ContentSignature, contentSignature, StringComparison.Ordinal)
                     && !CompatibleContentSignatures(
-                            command,
+                            signatureCommand,
                             stream.SourceSessionId,
                             binding.ContentSignatureKey)
                         .Contains(locatorMatch.ContentSignature, StringComparer.Ordinal))
@@ -359,7 +374,9 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             $"Source position {command.SourcePosition} was already accepted with " +
             "different identity or content.");
 
-    private static void Validate(CaptureBindingContext binding, CaptureObservationCommand command)
+    private static void ValidateMandatory(
+        CaptureBindingContext binding,
+        CaptureObservationCommand command)
     {
         if (command.ContractVersion != 1)
         {
@@ -372,13 +389,36 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         {
             CaptureLedger.Require(command.SourceIdentity.ChildId, "sourceIdentity.childId");
         }
-        if (command.SourceTimestamp is not null)
-        {
-            CaptureLedger.Require(command.SourceTimestamp.Raw, "sourceTimestamp.raw");
-        }
         if (!string.Equals(binding.Harness, command.Source.Harness, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Source harness does not match the authenticated binding.");
+        }
+        if (command.SourcePosition < 0)
+        {
+            throw new InvalidOperationException("sourcePosition must be zero or greater.");
+        }
+        _ = command.Locator switch
+        {
+            CaptureSourceLocator.NativeId nativeId =>
+                CaptureSourceLocator.Parse(
+                    new CaptureLocator("native_id", nativeId.Value, null, null, null)),
+            CaptureSourceLocator.ByteRange range =>
+                CaptureSourceLocator.Parse(
+                    new CaptureLocator(
+                        "byte_range",
+                        null,
+                        range.Offset,
+                        range.Length,
+                        range.SourceContentSha256)),
+            _ => throw new ArgumentException("locator.kind must be native_id or byte_range.")
+        };
+    }
+
+    private static void ValidateSemantic(CaptureObservationCommand command)
+    {
+        if (command.SourceTimestamp is not null)
+        {
+            CaptureLedger.Require(command.SourceTimestamp.Raw, "sourceTimestamp.raw");
         }
         if (command.Events.Count == 0)
         {
@@ -398,16 +438,17 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             }
             CaptureLedger.Require(relationship.Target.NativeId, "relationship.target.nativeId");
         }
-        if (command.SourcePosition < 0)
-        {
-            throw new InvalidOperationException("sourcePosition must be zero or greater.");
-        }
     }
 
-    private static string Sign(string value, byte[] key)
+    private static string Sign<T>(T value, byte[] key)
     {
-        using var hmac = new HMACSHA256(key);
-        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+        using var hash = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, key);
+        using var stream = new HashingSerializationStream(
+            hash,
+            SafetyBudgets.Default.MaxScanTime);
+        JsonSerializer.Serialize(stream, value, CaptureLedger.JsonOptions);
+        stream.AssertWithinDeadline();
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
     // For every record kind whose derived events a version bump left alone,
@@ -436,7 +477,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         foreach (string version in PreUpgradeCodexAdapterVersions)
         {
             var legacyAdapter = command.Adapter with { Version = version };
-            string currentIdentityLegacy = JsonSerializer.Serialize(
+            signatures.Add(Sign(
                 new CaptureSignatureContent(
                     command.ContractVersion,
                     command.SourceIdentity,
@@ -447,8 +488,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                     command.SourcePayload,
                     command.Events,
                     command.RouteEvidence),
-                CaptureLedger.JsonOptions);
-            string historicalLegacy = JsonSerializer.Serialize(
+                key));
+            signatures.Add(Sign(
                 new LegacyCaptureSignatureContent(
                     command.ContractVersion,
                     legacySourceSessionId,
@@ -459,9 +500,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                     command.SourcePayload,
                     command.Events,
                     command.RouteEvidence),
-                CaptureLedger.JsonOptions);
-            signatures.Add(Sign(currentIdentityLegacy, key));
-            signatures.Add(Sign(historicalLegacy, key));
+                key));
         }
 
         return signatures;
@@ -602,6 +641,12 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 Omissions.Add(reason);
                 RuleIds.Add($"omission:{reason}");
             }
+        }
+
+        public void Omit(string reason)
+        {
+            Omissions.Add(reason);
+            RuleIds.Add($"omission:{reason}");
         }
     }
 }

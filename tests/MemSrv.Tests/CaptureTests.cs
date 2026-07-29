@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CaptureAdapters;
 using Dapper;
 using MemSrv.Core;
@@ -977,6 +978,134 @@ public sealed class CaptureTests : HttpSeamTestBase
                 receipt.GetProperty("observationUuid").GetGuid(),
                 capturedEvent.GetProperty("traceUuid").GetGuid(),
                 capturedEvent.GetProperty("sessionId").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerKeepsExactTransportBoundaryWholeAndAdvancesTheNextByteAsOmission()
+    {
+        const string retainedTail = "WHOLE-TRANSPORT-BOUNDARY-TAIL";
+        string fixtureTemplate = await File.ReadAllTextAsync(
+            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+        string[] templateLines = fixtureTemplate.Split(
+            '\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(3, templateLines.Length);
+        string content = new string('x', 400_000) + retainedTail;
+        var serializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+        string FirstRecord(int paddingLength)
+        {
+            JsonNode root = JsonNode.Parse(templateLines[0])!;
+            root["transportBoundaryPadding"] = new string('p', paddingLength);
+            root["payload"]!["content"]![0]!["text"] = content;
+            return root.ToJsonString(serializerOptions);
+        }
+
+        static int AdaptedRequestBytes(string record, JsonSerializerOptions options)
+        {
+            byte[] source = Encoding.UTF8.GetBytes(record + "\n");
+            var sourceObservation = Assert.Single(JsonlSourceReader.Read(
+                source,
+                "codex-synthetic-rollout-v1",
+                terminalAtEndOfFile: false));
+            var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                new CodexJsonlAdapter().Adapt(sourceObservation));
+            return Encoding.UTF8.GetByteCount(
+                JsonSerializer.Serialize(terminal.Observation, options));
+        }
+
+        string unpadded = FirstRecord(0);
+        int unpaddedBytes = AdaptedRequestBytes(unpadded, serializerOptions);
+        int paddingLength =
+            CaptureFidelityPolicy.ProductionTransportBytes - unpaddedBytes;
+        Assert.True(paddingLength > 0);
+        string exactRecord = FirstRecord(paddingLength);
+        Assert.Equal(
+            CaptureFidelityPolicy.ProductionTransportBytes,
+            AdaptedRequestBytes(exactRecord, serializerOptions));
+        string overRecord = FirstRecord(paddingLength + 1);
+        Assert.Equal(
+            CaptureFidelityPolicy.ProductionTransportBytes + 1,
+            AdaptedRequestBytes(overRecord, serializerOptions));
+
+        async Task<(JsonElement First, string FixturePath, string Credential)> CaptureAsync(
+            string record,
+            string bindingSuffix)
+        {
+            string captureKey = CaptureCredential();
+            await EnrollAsync(
+                $"codex-transport-{bindingSuffix}-{Guid.NewGuid():N}",
+                captureKey);
+            string fixturePath = Path.Combine(
+                Path.GetTempPath(), $"codex-transport-{Guid.NewGuid():N}.jsonl");
+            await File.WriteAllTextAsync(
+                fixturePath,
+                string.Join('\n', [record, templateLines[1], templateLines[2]]) + "\n",
+                new UTF8Encoding(false));
+            var result = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.Equal(0, result.ExitCode);
+            JsonElement[] receipts = ParseReceiptLines(result.Stdout);
+            Assert.Equal(3, receipts.Length);
+            Assert.All(
+                receipts,
+                receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
+            return (receipts[0], fixturePath, captureKey);
+        }
+
+        string? exactPath = null;
+        string? overPath = null;
+        try
+        {
+            (JsonElement exact, exactPath, _) = await CaptureAsync(exactRecord, "exact");
+            string exactShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                exact.GetProperty("observationUuid").GetGuid().ToString());
+            Assert.Contains(retainedTail, exactShown);
+            Assert.DoesNotContain(
+                "observation_exceeds_transport_limit",
+                exactShown,
+                StringComparison.Ordinal);
+
+            (JsonElement omitted, overPath, string overCredential) =
+                await CaptureAsync(overRecord, "over");
+            string omittedShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                omitted.GetProperty("observationUuid").GetGuid().ToString());
+            Assert.DoesNotContain(retainedTail, omittedShown);
+            Assert.Contains(
+                "observation_exceeds_transport_limit",
+                omittedShown,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                CaptureFidelityPolicy.CurrentVersion,
+                omittedShown,
+                StringComparison.Ordinal);
+
+            Guid omissionUuid = omitted.GetProperty("observationUuid").GetGuid();
+            DeleteRuntimeState(overPath);
+            var retry = await RunEnabledTracerAsync(overCredential, overPath);
+            Assert.Equal(0, retry.ExitCode);
+            JsonElement retriedOmission = ParseReceiptLines(retry.Stdout)[0];
+            Assert.Equal(
+                "already_accepted",
+                retriedOmission.GetProperty("status").GetString());
+            Assert.Equal(
+                omissionUuid,
+                retriedOmission.GetProperty("observationUuid").GetGuid());
+        }
+        finally
+        {
+            foreach (string? path in new[] { exactPath, overPath })
+            {
+                if (path is null)
+                {
+                    continue;
+                }
+                File.Delete(path);
+                DeleteRuntimeState(path);
+            }
         }
     }
 

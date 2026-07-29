@@ -578,7 +578,8 @@ public static class CodexCaptureClaimer
         CancellationToken cancellationToken = default,
         bool terminalAtEndOfFile = false,
         string? transcriptIdentity = null,
-        CaptureSourceIdentity? sourceIdentity = null)
+        CaptureSourceIdentity? sourceIdentity = null,
+        int maxTransportBytes = CaptureFidelityPolicy.ProductionTransportBytes)
     {
         byte[] sourceBytes = await File.ReadAllBytesAsync(transcriptPath, cancellationToken);
         transcriptIdentity ??= Digest(
@@ -635,10 +636,13 @@ public static class CodexCaptureClaimer
             var prefix = new CapturePrefixEvidence(
                 prefixLength,
                 Digest(sourceBytes.AsSpan(0, checked((int)prefixLength))));
-            string originalJson = JsonSerializer.Serialize(
-                terminal.Observation, JsonDefaults.Options);
-            safetyGate.AssertObservationWithinBudget(originalJson);
-            string candidateJson = safetyGate.ScanJson(originalJson).Redacted;
+            BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+                CaptureFidelityPolicy.SerializeForTransport(
+                    terminal.Observation,
+                    maxTransportBytes);
+            string boundedJson = bounded.Serialized;
+            safetyGate.AssertObservationWithinBudget(boundedJson);
+            string candidateJson = safetyGate.ScanJson(boundedJson).Redacted;
             var locatorEvidence = new CaptureRuntimeLocatorEvidence(
                 transcriptIdentity,
                 record.SourcePosition,

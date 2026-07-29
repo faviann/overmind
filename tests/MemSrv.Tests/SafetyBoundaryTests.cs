@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using MemSrv.Core;
 
 namespace MemSrv.Tests;
@@ -14,7 +15,8 @@ namespace MemSrv.Tests;
 // decode exhaustion — run against explicitly injected smaller budgets in
 // SafetyGateTests and CaptureSafetyTests, so the suite does not pay for the
 // production number twelve times.
-public sealed class SafetyBoundaryTests
+[Collection("database")]
+public sealed class SafetyBoundaryTests : HttpSeamTestBase
 {
     private const long LeafLimitBytes = 64L * 1024 * 1024;
     private const long ObservationLimitBytes = 128L * 1024 * 1024;
@@ -56,8 +58,17 @@ public sealed class SafetyBoundaryTests
         string oversized = new string('x', (int)LeafLimitBytes + 1);
         Assert.Equal(LeafLimitBytes + 1, Encoding.UTF8.GetByteCount(oversized));
 
-        var result = gate.Scan(oversized);
-        Assert.Equal("[OMITTED:leaf_exceeds_limit]", result.Redacted);
+        string source = JsonSerializer.Serialize(new
+        {
+            safe = "kept",
+            oversized
+        });
+        var result = gate.ScanJson(source);
+        using JsonDocument document = JsonDocument.Parse(result.Redacted);
+        Assert.Equal("kept", document.RootElement.GetProperty("safe").GetString());
+        Assert.Equal(
+            "[OMITTED:leaf_exceeds_limit]",
+            document.RootElement.GetProperty("oversized").GetString());
         Assert.Equal(["leaf_exceeds_limit"], result.OmissionReasons);
 
         // A required identity value that large cannot be inspected at all.
@@ -66,24 +77,104 @@ public sealed class SafetyBoundaryTests
     }
 
     [Fact]
-    public void ObservationAtTheDocumented128MiBLimitIsAcceptedAndBeyondItFailsClosed()
+    public async Task ObservationAtTheDocumented128MiBLimitIsAcceptedAndBeyondItIsWhollyOmitted()
     {
         Assert.Equal(ObservationLimitBytes, SafetyBudgets.Default.MaxObservationBytes);
         var gate = new NeverStoreGate(_shippedRules);
+        string credential = $"mcap_{Guid.NewGuid():N}";
+        string bindingName = $"content-boundary-{Guid.NewGuid():N}";
+        await new CaptureEnrollment(RuntimeConnection, gate).EnrollAsync(
+            bindingName,
+            "codex",
+            $"capture:{bindingName}",
+            credential);
+        CaptureBindingContext binding =
+            Assert.IsType<CaptureBindingContext>(
+                await new CaptureAuthority(RuntimeConnection).ResolveAsync(credential));
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
-        // Three-byte UTF-8 characters keep the managed string a third of the
-        // size while the measured UTF-8 length is exactly the real limit.
-        const int wide = 3;
-        int wideCount = (int)(ObservationLimitBytes / wide);
-        int remainder = (int)(ObservationLimitBytes - ((long)wideCount * wide));
-        string atLimit = new string('一', wideCount) + new string('a', remainder);
-        Assert.Equal(ObservationLimitBytes, Encoding.UTF8.GetByteCount(atLimit));
+        static CaptureObservationCommand Command(
+            int payloadLength,
+            long position,
+            string locator)
+        {
+            JsonElement sourcePayload = JsonSerializer.SerializeToElement(new
+            {
+                value = new string('x', payloadLength)
+            });
+            return CaptureObservationCommand.FromRequest(new CaptureObservationRequest(
+                1,
+                "content-boundary-stream",
+                position,
+                new CaptureLocator("native_id", locator, null, null, null),
+                null,
+                new CaptureSource("codex", "synthetic", "boundary"),
+                new CaptureAdapter("boundary-test", "1"),
+                sourcePayload,
+                [
+                    new CaptureEvent(
+                        "boundary/0",
+                        0,
+                        "opaque",
+                        "harness",
+                        JsonSerializer.SerializeToElement(new { safe = "kept" }),
+                        null,
+                        [])
+                ]));
+        }
 
-        gate.AssertObservationWithinBudget(atLimit);
+        CaptureObservationCommand emptyAtLimit = Command(0, 0, "limit0");
+        int atLimitOverhead = Encoding.UTF8.GetByteCount(
+            JsonSerializer.Serialize(emptyAtLimit, options));
+        CaptureObservationCommand atLimit = Command(
+            checked((int)(ObservationLimitBytes - atLimitOverhead)),
+            0,
+            "limit0");
+        Assert.Equal(
+            ObservationLimitBytes,
+            Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(atLimit, options)));
 
-        var failure = Assert.Throws<SafetyScanException>(
-            () => gate.AssertObservationWithinBudget(atLimit + "a"));
-        Assert.Contains($"observation budget of {ObservationLimitBytes} bytes", failure.Message);
+        CaptureImportReceipt accepted = await new CaptureIngestion(
+            RuntimeConnection, gate).ImportAsync(binding, atLimit);
+        Assert.Equal("new", accepted.Status);
+        Assert.Contains(
+            "omission:leaf_exceeds_limit",
+            accepted.Observation.Scan.RuleIds);
+        emptyAtLimit = null!;
+        atLimit = null!;
+        ReleaseLargeValues();
+
+        CaptureObservationCommand emptyOverLimit = Command(0, 1, "limit1");
+        int overLimitOverhead = Encoding.UTF8.GetByteCount(
+            JsonSerializer.Serialize(emptyOverLimit, options));
+        CaptureObservationCommand overLimit = Command(
+            checked((int)(ObservationLimitBytes + 1 - overLimitOverhead)),
+            1,
+            "limit1");
+        Assert.Equal(
+            ObservationLimitBytes + 1,
+            Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(overLimit, options)));
+
+        var callerLoosenedGate = new NeverStoreGate(
+            _shippedRules,
+            null,
+            SafetyBudgets.Default with
+            {
+                MaxObservationBytes =
+                    SafetyBudgets.Default.MaxObservationBytes + 1
+            });
+        CaptureImportReceipt omitted = await new CaptureIngestion(
+            RuntimeConnection, callerLoosenedGate).ImportAsync(binding, overLimit);
+        Assert.Equal("new", omitted.Status);
+        Assert.Equal(
+            "observation_exceeds_content_limit",
+            omitted.Observation.SafeSourcePayload.GetProperty("omission")
+                .GetProperty("reason").GetString());
+        Assert.Equal(
+            ["observation/omitted"],
+            omitted.Events.Select(item => item.Event.PartKey));
+        emptyOverLimit = null!;
+        overLimit = null!;
         ReleaseLargeValues();
     }
 

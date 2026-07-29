@@ -23,7 +23,6 @@ public static class HttpServerHost
     // the server allocate a scanner-sized buffer. See
     // docs/capture-safety-budgets.md, "Why the transport cap is below the
     // scanner limit".
-    private const int CaptureRequestLimitBytes = 1_000_000;
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
@@ -154,12 +153,12 @@ public static class HttpServerHost
         HttpRequest request,
         CancellationToken cancellationToken)
     {
-        if (request.ContentLength > CaptureRequestLimitBytes)
+        if (request.ContentLength > CaptureFidelityPolicy.ProductionTransportBytes)
         {
             return null;
         }
 
-        byte[] buffer = new byte[CaptureRequestLimitBytes + 1];
+        byte[] buffer = new byte[CaptureFidelityPolicy.ProductionTransportBytes + 1];
         int length = 0;
         while (length < buffer.Length)
         {

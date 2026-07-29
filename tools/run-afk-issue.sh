@@ -81,7 +81,7 @@ if ! pr_body="$(gh pr view "$pr_number" --json body --jq .body)"; then
   exit 0
 fi
 set +e
-closeout_diagnostic="$("$closeout_validator" "$issue_number" - <<<"$pr_body" 2>&1)"
+closeout_diagnostic="$("$closeout_validator" --require-closes "$issue_number" - <<<"$pr_body" 2>&1)"
 closeout_status=$?
 set -e
 if [[ "$closeout_status" -ne 0 ]]; then

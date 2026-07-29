@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "6");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "7");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -88,8 +88,22 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             {
                 "message" => MessageContent(payload),
                 "reasoning" => ReasoningContent(payload),
-                "function_call" => [ToolCall(payload, position)],
-                "function_call_output" => [ToolResult(payload, position)],
+                "function_call" => [ToolCall(payload, position, "name", "arguments")],
+                "function_call_output" => [ToolResult(payload, position, "output")],
+                "custom_tool_call" => [ToolCall(payload, position, "name", "input")],
+                "custom_tool_call_output" => [ToolResult(payload, position, "output")],
+                "local_shell_call" =>
+                    TerminalSpecializedItem(
+                        payload, position, "local_shell", "action", "output"),
+                "tool_search_call" =>
+                    [ToolCall(payload, position, null, "arguments", "tool_search")],
+                "tool_search_output" => [ToolResult(payload, position, "tools")],
+                "web_search_call" =>
+                    TerminalSpecializedItem(
+                        payload, position, "web_search", "action", null),
+                "image_generation_call" =>
+                    TerminalSpecializedItem(
+                        payload, position, "image_generation", null, "result"),
                 "compacted" => [Compaction(payload, position)],
                 _ => [Opaque(recordType, payloadType, payload, position)]
             };
@@ -108,6 +122,9 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 "user_message" or "agent_message" =>
                     [MessageView(payload, payloadType)],
                 "turn_started" or "agent_reasoning" or "context_compacted" =>
+                    [AnnotationView(payload, payloadType)],
+                "exec_command_begin" or "patch_apply_begin"
+                    or "exec_command_end" or "patch_apply_end" =>
                     [AnnotationView(payload, payloadType)],
                 "error" or "turn_aborted" => [Error(payload, position)],
                 "subagent_start" => [Subagent(payload, position)],
@@ -345,40 +362,107 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             ? role
             : "unknown";
 
-    private static CaptureEvent ToolCall(JsonElement payload, long position)
+    private static CaptureEvent ToolCall(
+        JsonElement payload,
+        long position,
+        string? toolProperty,
+        string? argumentsProperty,
+        string? fixedTool = null,
+        int partOrder = 0)
     {
-        string? callId = JsonAdapterHelpers.NullableString(payload, "call_id");
-        JsonElement arguments = payload.TryGetProperty("arguments", out var value)
+        string? callId = NativeCallId(payload);
+        JsonElement arguments = argumentsProperty is not null
+            && payload.TryGetProperty(argumentsProperty, out var value)
             ? JsonAdapterHelpers.ObjectOrParsedString(value)
             : JsonAdapterHelpers.Json((object?)null);
         return Event(
-            $"tool/{position}",
+            ToolPartKey("tool_call", callId, position),
             "tool_call",
-            "assistant",
+            MessageActor(JsonAdapterHelpers.NullableString(payload, "role")),
             new
             {
                 callId,
-                tool = JsonAdapterHelpers.NullableString(payload, "name"),
+                tool = fixedTool ?? (toolProperty is null
+                    ? null
+                    : JsonAdapterHelpers.NullableString(payload, toolProperty)),
                 arguments
-            });
+            },
+            partOrder: partOrder);
     }
 
-    private static CaptureEvent ToolResult(JsonElement payload, long position)
+    private static CaptureEvent ToolResult(
+        JsonElement payload,
+        long position,
+        string? outputProperty,
+        int partOrder = 0)
     {
-        string? callId = JsonAdapterHelpers.NullableString(payload, "call_id");
-        string outcome = JsonAdapterHelpers.NullableString(payload, "outcome") ?? "unknown";
-        JsonElement output = payload.TryGetProperty("output", out var value)
-            ? JsonAdapterHelpers.Json(JsonAdapterHelpers.Text(value))
+        string? callId = NativeCallId(payload);
+        string outcome = ExplicitToolOutcome(payload);
+        JsonElement output = outputProperty is not null
+            && payload.TryGetProperty(outputProperty, out var value)
+            ? value.Clone()
             : JsonAdapterHelpers.Json((object?)null);
         IReadOnlyList<CaptureRelationship> relationships = callId is null
             ? []
             : [Relationship("result_for", callId, "tool_call")];
         return Event(
-            $"tool/{position}",
+            ToolPartKey("tool_result", callId, position),
             "tool_result",
-            "tool",
+            MessageActor(JsonAdapterHelpers.NullableString(payload, "role")),
             new { callId, outcome, output },
-            relationships);
+            relationships,
+            partOrder);
+    }
+
+    private static IReadOnlyList<CaptureEvent> TerminalSpecializedItem(
+        JsonElement payload,
+        long position,
+        string tool,
+        string? argumentsProperty,
+        string? outputProperty)
+    {
+        CaptureEvent call = ToolCall(
+            payload,
+            position,
+            null,
+            argumentsProperty,
+            tool);
+        return ExplicitToolOutcome(payload) == "unknown"
+            ? [call]
+            : [call, ToolResult(payload, position, outputProperty, partOrder: 1)];
+    }
+
+    private static string? NativeCallId(JsonElement payload) =>
+        UsableString(payload, "call_id") ?? UsableString(payload, "id");
+
+    private static string ToolPartKey(string kind, string? callId, long position) =>
+        callId is null ? $"{kind}/{position}" : $"{kind}:{callId}";
+
+    private static string ExplicitToolOutcome(JsonElement payload)
+    {
+        string? outcome = JsonAdapterHelpers.NullableString(payload, "outcome");
+        if (outcome is "succeeded" or "failed" or "denied" or "interrupted" or "unknown")
+        {
+            return outcome;
+        }
+
+        string statusOutcome = JsonAdapterHelpers.NullableString(payload, "status") switch
+        {
+            "completed" or "succeeded" => "succeeded",
+            "failed" => "failed",
+            "declined" or "denied" => "denied",
+            "interrupted" or "cancelled" or "canceled" => "interrupted",
+            _ => "unknown"
+        };
+        if (statusOutcome != "unknown")
+        {
+            return statusOutcome;
+        }
+
+        return payload.TryGetProperty("success", out JsonElement success)
+            && success.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? success.GetBoolean() ? "succeeded" : "failed"
+                : "unknown";
     }
 
     private static CaptureEvent Error(JsonElement payload, long position) =>
@@ -390,7 +474,9 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             {
                 error = payload.TryGetProperty("message", out var message)
                     ? JsonAdapterHelpers.Text(message)
-                    : null,
+                    : payload.TryGetProperty("reason", out var reason)
+                        ? JsonAdapterHelpers.Text(reason)
+                        : null,
                 outcome = JsonAdapterHelpers.NullableString(payload, "outcome") ?? "unknown"
             });
 

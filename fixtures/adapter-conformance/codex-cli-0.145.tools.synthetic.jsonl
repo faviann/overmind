@@ -1,0 +1,23 @@
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call","call_id":"function-alpha","name":"shell","arguments":"{\"command\":\"alpha\"}"}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call","call_id":"function-beta","arguments":{"command":"beta"}}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call_output","call_id":"function-beta","outcome":"invented","output":[{"type":"output_text","text":"beta output"},{"type":"image","url":"synthetic://beta"}]}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call_output","call_id":"function-alpha","outcome":"succeeded","output":"alpha output"}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"custom_tool_call","call_id":"custom-gamma","name":"freeform","input":"{\"query\":\"gamma\"}"}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"custom-gamma","output":[{"type":"output_text","text":"gamma failed"}],"outcome":"failed"}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call","call_id":"exec-delta","name":"exec_command","arguments":{"command":["sh","-lc","delta"],"cwd":"file:///synthetic"}}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"exec_command_begin","call_id":"exec-delta","command":["sh","-lc","delta"],"cwd":"file:///synthetic"}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call","call_id":"patch-epsilon","name":"apply_patch","arguments":{"changes":{"synthetic.txt":{"type":"add"}}}}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"patch_apply_begin","call_id":"patch-epsilon","changes":{"synthetic.txt":{"type":"add"}}}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"patch-epsilon","status":"declined","stdout":"","stderr":"permission denied","success":false}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call_output","call_id":"patch-epsilon","outcome":"denied","output":{"stdout":"","stderr":"permission denied","success":false}}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"exec_command_end","call_id":"exec-delta","status":"completed","stdout":"delta output","stderr":"","exit_code":0}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call_output","call_id":"exec-delta","outcome":"succeeded","output":{"stdout":"delta output","stderr":"","exit_code":0}}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"turn_aborted","reason":"synthetic interruption"}}
+{"cli_version":"0.145.synthetic","type":"event_msg","payload":{"type":"error","message":"synthetic terminal error"}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"local_shell_call","id":"local-zeta","call_id":"local-zeta","status":"completed","action":{"type":"exec","command":["sh","-lc","zeta"]}}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"tool_search_call","id":"search-eta-item","call_id":"search-eta","status":"in_progress","execution":"server_tools","arguments":{"query":"eta"}}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"tool_search_output","id":"search-eta-output","call_id":"search-eta","status":"completed","execution":"server_tools","tools":[{"name":"eta-tool"}]}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"web_search_call","id":"web-theta","status":"completed","action":{"type":"search","query":"synthetic theta"}}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"image_generation_call","id":"image-iota","status":"failed","revised_prompt":"synthetic iota","result":"synthetic image failure","__missing_arguments":{"must_not_be_promoted":true}}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call_output","call_id":"function-beta","outcome":"interrupted","output":"second beta result"}}
+{"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"function_call","call_id":"function-orphan","arguments":{"command":"orphan"}}}

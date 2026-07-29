@@ -611,7 +611,7 @@ public sealed class SchemaVerifierTests
                 new CaptureSource(
                     "codex", "0.144.synthetic", "turn_context",
                     MaterialKind: "persisted_record"),
-                new CaptureAdapter("codex-synthetic-jsonl", "6"),
+                new CaptureAdapter("codex-synthetic-jsonl", "7"),
                 sourcePayload.RootElement.Clone(),
                 [
                     new CaptureEvent(
@@ -627,7 +627,7 @@ public sealed class SchemaVerifierTests
                         "native_id", "legacy-session-meta", null, null, null),
                     null,
                     legacySource,
-                    new CaptureAdapter("codex-synthetic-jsonl", "6"),
+                    new CaptureAdapter("codex-synthetic-jsonl", "7"),
                     legacySourcePayload.RootElement.Clone(),
                     [legacyEvent],
                     SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId));

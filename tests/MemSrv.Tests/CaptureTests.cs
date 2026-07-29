@@ -606,7 +606,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "6",
+                "7",
                 "false-version",
                 "same source record"));
         Assert.Equal(HttpStatusCode.Conflict, falseProvenanceRetry.StatusCode);
@@ -619,7 +619,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "6",
+                "7",
                 "0.144.synthetic",
                 "same source record"));
         Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
@@ -637,7 +637,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "6",
+                "7",
                 "0.144.synthetic",
                 "changed source record"));
         Assert.Equal(HttpStatusCode.Conflict, changedSource.StatusCode);
@@ -647,6 +647,7 @@ public sealed class CaptureTests : HttpSeamTestBase
     [InlineData("3")]
     [InlineData("4")]
     [InlineData("5")]
+    [InlineData("6")]
     public async Task CodexAdapterUpgradeRetryConvergesFromEveryPreUpgradeAdapterVersion(
         string preUpgradeAdapterVersion)
     {
@@ -680,7 +681,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "6",
+                "7",
                 "0.144.synthetic",
                 "same source record"));
 
@@ -690,6 +691,40 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(
             acceptedReceipt.GetProperty("observationUuid").GetGuid(),
             retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Fact]
+    public async Task CodexAdapterUpgradeRetryConflictsWhenTheSameRecordDerivesChangedToolEvents()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-upgrade-tool-event-{Guid.NewGuid():N}";
+        await EnrollAsync(
+            $"codex-adapter-upgrade-tool-event-{Guid.NewGuid():N}",
+            captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            AdapterUpgradeToolObservation(
+                externalSessionId,
+                childId,
+                locator,
+                "6",
+                lifecycleAsAnnotation: false));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+
+        using var changedDerivedEvents = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            AdapterUpgradeToolObservation(
+                externalSessionId,
+                childId,
+                locator,
+                "7",
+                lifecycleAsAnnotation: true));
+
+        Assert.Equal(HttpStatusCode.Conflict, changedDerivedEvents.StatusCode);
     }
 
     [Fact]
@@ -732,7 +767,11 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.All(receipts, receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
             Assert.Equal([0L, 1L, 2L], receipts.Select(receipt => receipt.GetProperty("sourcePosition").GetInt64()));
             Assert.Equal(
-                ["content/0:message", "tool/1", "tool/2"],
+                [
+                    "content/0:message",
+                    $"tool_call:{fixtureCallId}",
+                    $"tool_result:{fixtureCallId}"
+                ],
                 receipts.Select(receipt => Assert.Single(receipt.GetProperty("events").EnumerateArray())
                     .GetProperty("partKey").GetString()));
             Assert.Equal(
@@ -1256,7 +1295,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "6",
+                    "7",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -1284,7 +1323,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "6",
+                    "7",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -1447,7 +1486,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 Assert.Equal("new", receipt.GetProperty("status").GetString());
                 Assert.Equal(
-                    "6",
+                    "7",
                     receipt.GetProperty("observation").GetProperty("adapter")
                         .GetProperty("version").GetString());
             });
@@ -1930,6 +1969,342 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task PackagedTracerAndOperatorExposeCodexToolFamiliesWithoutDuplicateLifecycleCalls()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"codex-tools-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-tools-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string transcriptPath = Path.Combine(transcriptRoot, "tools.jsonl");
+        Directory.CreateDirectory(transcriptRoot);
+        File.Copy(
+            Path.Combine(
+                _root,
+                "fixtures/adapter-conformance/codex-cli-0.145.tools.synthetic.jsonl"),
+            transcriptPath);
+
+        Dictionary<string, string> EnvironmentFor(string stateDirectory) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        async Task<JsonElement[]> CaptureOnceAsync(
+            string stateDirectory,
+            string expectedStatus)
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(stateDirectory));
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            try
+            {
+                var receipts = new JsonElement[23];
+                for (int index = 0; index < receipts.Length; index++)
+                {
+                    receipts[index] = await ReadTracerReceiptAsync(process);
+                }
+                Assert.All(receipts, receipt =>
+                {
+                    Assert.Equal(expectedStatus, receipt.GetProperty("status").GetString());
+                    Assert.Equal(
+                        "7",
+                        receipt.GetProperty("observation").GetProperty("adapter")
+                            .GetProperty("version").GetString());
+                });
+                return receipts;
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                await stderr;
+            }
+        }
+
+        async Task<JsonElement[]> ReadOperatorEventsAsync(JsonElement receipt)
+        {
+            string shown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipt.GetProperty("observationUuid").GetGuid().ToString());
+            return shown.Split(
+                    Environment.NewLine,
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .ToArray();
+        }
+
+        static JsonElement Event(JsonElement envelope) =>
+            envelope.GetProperty("event");
+
+        static void AssertNativePair(
+            IReadOnlyList<JsonElement[]> envelopes,
+            int callPosition,
+            int resultPosition,
+            string nativeId)
+        {
+            JsonElement call = Assert.Single(envelopes[callPosition]);
+            JsonElement result = Assert.Single(envelopes[resultPosition]);
+            Assert.Equal("tool_call", Event(call).GetProperty("kind").GetString());
+            Assert.Equal("tool_result", Event(result).GetProperty("kind").GetString());
+            Assert.Equal(
+                $"tool_call:{nativeId}",
+                Event(call).GetProperty("partKey").GetString());
+            Assert.Equal(
+                $"tool_result:{nativeId}",
+                Event(result).GetProperty("partKey").GetString());
+            Assert.Equal(
+                nativeId,
+                Event(call).GetProperty("payload").GetProperty("callId").GetString());
+            Assert.Equal(
+                nativeId,
+                Event(result).GetProperty("payload").GetProperty("callId").GetString());
+            Assert.Equal(
+                nativeId,
+                Assert.Single(result.GetProperty("relationships").EnumerateArray())
+                    .GetProperty("target").GetProperty("nativeId").GetString());
+        }
+
+        try
+        {
+            JsonElement[] accepted = await CaptureOnceAsync(
+                Path.Combine(directory, "state-first"),
+                "new");
+            Assert.Equal(
+                Enumerable.Range(0, accepted.Length).Select(index => (long)index),
+                accepted.Select(receipt =>
+                    receipt.GetProperty("sourcePosition").GetInt64()));
+
+            var envelopes = new List<JsonElement[]>();
+            foreach (JsonElement receipt in accepted)
+            {
+                envelopes.Add(await ReadOperatorEventsAsync(receipt));
+            }
+
+            AssertNativePair(envelopes, 0, 3, "function-alpha");
+            AssertNativePair(envelopes, 1, 2, "function-beta");
+            AssertNativePair(envelopes, 4, 5, "custom-gamma");
+            AssertNativePair(envelopes, 6, 13, "exec-delta");
+            AssertNativePair(envelopes, 8, 11, "patch-epsilon");
+            AssertNativePair(envelopes, 17, 18, "search-eta");
+
+            Assert.Equal(
+                "alpha",
+                Event(Assert.Single(envelopes[0])).GetProperty("payload")
+                    .GetProperty("arguments").GetProperty("command").GetString());
+            Assert.Equal(
+                "gamma",
+                Event(Assert.Single(envelopes[4])).GetProperty("payload")
+                    .GetProperty("arguments").GetProperty("query").GetString());
+            Assert.Equal(
+                JsonValueKind.Array,
+                Event(Assert.Single(envelopes[2])).GetProperty("payload")
+                    .GetProperty("output").ValueKind);
+            Assert.Equal(
+                JsonValueKind.String,
+                Event(Assert.Single(envelopes[3])).GetProperty("payload")
+                    .GetProperty("output").ValueKind);
+            Assert.Equal(
+                JsonValueKind.Array,
+                Event(Assert.Single(envelopes[5])).GetProperty("payload")
+                    .GetProperty("output").ValueKind);
+            Assert.Equal(
+                "gamma failed",
+                Event(Assert.Single(envelopes[5])).GetProperty("payload")
+                    .GetProperty("output")[0].GetProperty("text").GetString());
+            Assert.Equal(
+                JsonValueKind.Array,
+                Event(Assert.Single(envelopes[18])).GetProperty("payload")
+                    .GetProperty("output").ValueKind);
+            Assert.Equal(
+                "eta-tool",
+                Event(Assert.Single(envelopes[18])).GetProperty("payload")
+                    .GetProperty("output")[0].GetProperty("name").GetString());
+            Assert.Equal(
+                JsonValueKind.Null,
+                Event(Assert.Single(envelopes[1])).GetProperty("payload")
+                    .GetProperty("tool").ValueKind);
+            Assert.Equal(
+                JsonValueKind.Null,
+                Event(Assert.Single(envelopes[22])).GetProperty("payload")
+                    .GetProperty("tool").ValueKind);
+
+            foreach ((int position, string view) in new[]
+            {
+                (7, "exec_command_begin"),
+                (9, "patch_apply_begin"),
+                (10, "patch_apply_end"),
+                (12, "exec_command_end")
+            })
+            {
+                JsonElement lifecycle = Event(Assert.Single(envelopes[position]));
+                Assert.Equal("annotation", lifecycle.GetProperty("kind").GetString());
+                Assert.Equal($"view:{view}", lifecycle.GetProperty("partKey").GetString());
+                Assert.Equal(view, lifecycle.GetProperty("payload")
+                    .GetProperty("view").GetString());
+            }
+
+            JsonElement[] allEvents = envelopes.SelectMany(items => items)
+                .Select(Event)
+                .ToArray();
+            Assert.Equal(
+                1,
+                allEvents.Count(item => item.GetProperty("kind").GetString() == "tool_call"
+                    && item.GetProperty("payload").GetProperty("callId").GetString()
+                        == "exec-delta"));
+            Assert.Equal(
+                1,
+                allEvents.Count(item => item.GetProperty("kind").GetString() == "tool_call"
+                    && item.GetProperty("payload").GetProperty("callId").GetString()
+                        == "patch-epsilon"));
+            Assert.Equal(
+                1,
+                allEvents.Count(item => item.GetProperty("kind").GetString() == "tool_result"
+                    && item.GetProperty("payload").GetProperty("callId").GetString()
+                        == "exec-delta"));
+            Assert.Equal(
+                1,
+                allEvents.Count(item => item.GetProperty("kind").GetString() == "tool_result"
+                    && item.GetProperty("payload").GetProperty("callId").GetString()
+                        == "patch-epsilon"));
+            Assert.All(
+                allEvents.Where(item =>
+                    item.GetProperty("kind").GetString() is "tool_call" or "tool_result"),
+                item => Assert.Equal(
+                    "unknown",
+                    item.GetProperty("actor").GetString()));
+            Assert.Equal(
+                "declined",
+                Event(Assert.Single(envelopes[10])).GetProperty("payload")
+                    .GetProperty("source").GetProperty("status").GetString());
+            Assert.Equal(
+                "permission denied",
+                Event(Assert.Single(envelopes[10])).GetProperty("payload")
+                    .GetProperty("source").GetProperty("stderr").GetString());
+            Assert.Equal(
+                "completed",
+                Event(Assert.Single(envelopes[12])).GetProperty("payload")
+                    .GetProperty("source").GetProperty("status").GetString());
+            Assert.Equal(
+                0,
+                Event(Assert.Single(envelopes[12])).GetProperty("payload")
+                    .GetProperty("source").GetProperty("exit_code").GetInt32());
+
+            foreach ((int position, string nativeId, string outcome) in new[]
+            {
+                (16, "local-zeta", "succeeded"),
+                (19, "web-theta", "succeeded"),
+                (20, "image-iota", "failed")
+            })
+            {
+                Assert.Equal(
+                    ["tool_call", "tool_result"],
+                    envelopes[position].Select(item =>
+                        Event(item).GetProperty("kind").GetString()));
+                Assert.All(envelopes[position], item => Assert.Equal(
+                    nativeId,
+                    Event(item).GetProperty("payload").GetProperty("callId").GetString()));
+                Assert.Equal(
+                    outcome,
+                    Event(envelopes[position][1]).GetProperty("payload")
+                        .GetProperty("outcome").GetString());
+                Assert.Equal(
+                    $"tool_call:{nativeId}",
+                    Event(envelopes[position][0]).GetProperty("partKey").GetString());
+                Assert.Equal(
+                    $"tool_result:{nativeId}",
+                    Event(envelopes[position][1]).GetProperty("partKey").GetString());
+                Assert.Equal(
+                    nativeId,
+                    Assert.Single(envelopes[position][1]
+                            .GetProperty("relationships").EnumerateArray())
+                        .GetProperty("target").GetProperty("nativeId").GetString());
+            }
+            Assert.Equal(
+                "search",
+                Event(envelopes[19][0]).GetProperty("payload")
+                    .GetProperty("arguments").GetProperty("type").GetString());
+            Assert.Equal(
+                "synthetic theta",
+                Event(envelopes[19][0]).GetProperty("payload")
+                    .GetProperty("arguments").GetProperty("query").GetString());
+            Assert.Equal(
+                JsonValueKind.Null,
+                Event(envelopes[19][1]).GetProperty("payload")
+                    .GetProperty("output").ValueKind);
+            Assert.Equal(
+                JsonValueKind.Null,
+                Event(envelopes[20][0]).GetProperty("payload")
+                    .GetProperty("arguments").ValueKind);
+            Assert.Equal(
+                JsonValueKind.String,
+                Event(envelopes[20][1]).GetProperty("payload")
+                    .GetProperty("output").ValueKind);
+            Assert.True(
+                envelopes[20][0].GetProperty("observation")
+                    .GetProperty("safeSourcePayload").GetProperty("payload")
+                    .GetProperty("__missing_arguments")
+                    .GetProperty("must_not_be_promoted").GetBoolean());
+
+            Assert.Equal(
+                ["unknown", "succeeded", "failed", "denied", "succeeded", "interrupted"],
+                new[] { 2, 3, 5, 11, 13, 21 }.Select(position =>
+                    Event(Assert.Single(envelopes[position])).GetProperty("payload")
+                        .GetProperty("outcome").GetString()));
+            Assert.Equal(
+                ["synthetic interruption", "synthetic terminal error"],
+                new[] { 14, 15 }.Select(position =>
+                    Event(Assert.Single(envelopes[position])).GetProperty("payload")
+                        .GetProperty("error").GetString()));
+            Assert.Equal(
+                "function-beta",
+                Assert.Single(Assert.Single(envelopes[21])
+                        .GetProperty("relationships").EnumerateArray())
+                    .GetProperty("target").GetProperty("nativeId").GetString());
+            JsonElement orphan = Event(Assert.Single(envelopes[22]));
+            Assert.Equal("tool_call", orphan.GetProperty("kind").GetString());
+            Assert.Equal(
+                "function-orphan",
+                orphan.GetProperty("payload").GetProperty("callId").GetString());
+            Assert.DoesNotContain(
+                allEvents,
+                item => item.GetProperty("kind").GetString() == "tool_result"
+                    && item.GetProperty("payload").GetProperty("callId").GetString()
+                        == "function-orphan");
+
+            JsonElement[] retried = await CaptureOnceAsync(
+                Path.Combine(directory, "state-retry"),
+                "already_accepted");
+            Assert.Equal(
+                accepted.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()),
+                retried.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()));
+            for (int index = 0; index < retried.Length; index++)
+            {
+                Assert.True(
+                    JsonElement.DeepEquals(
+                        JsonSerializer.SerializeToElement(envelopes[index]),
+                        JsonSerializer.SerializeToElement(
+                            await ReadOperatorEventsAsync(retried[index]))));
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerAndOperatorExposeVersionedCodexCompactionsAndRetryIdentities()
     {
         string captureKey = CaptureCredential();
@@ -2180,7 +2555,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 JsonElement observation = receipt.GetProperty("observation");
                 Assert.Equal(
-                    "6",
+                    "7",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
                 JsonElement capturedEvent =
                     Assert.Single(receipt.GetProperty("events").EnumerateArray());
@@ -4331,6 +4706,90 @@ public sealed class CaptureTests : HttpSeamTestBase
                     payload = new { message }
                 }
             }
+        };
+
+    private static object AdapterUpgradeToolObservation(
+        string externalSessionId,
+        string childId,
+        string nativeId,
+        string adapterVersion,
+        bool lifecycleAsAnnotation) => new
+        {
+            contractVersion = 1,
+            sourceSessionId = externalSessionId,
+            sourceIdentity = new { externalSessionId, childId },
+            sourcePosition = 0,
+            locator = new { kind = "native_id", nativeId },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.145.synthetic",
+                recordType = "event_msg",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload = new
+            {
+                cli_version = "0.145.synthetic",
+                type = "event_msg",
+                payload = new
+                {
+                    type = "exec_command_end",
+                    call_id = "exec-upgrade",
+                    status = "completed",
+                    stdout = "unchanged output",
+                    stderr = "",
+                    exit_code = 0
+                }
+            },
+            events = lifecycleAsAnnotation
+                ? new object[]
+                {
+                    new
+                    {
+                        partKey = "view:exec_command_end",
+                        partOrder = 0,
+                        kind = "annotation",
+                        actor = "harness",
+                        payload = new
+                        {
+                            view = "exec_command_end",
+                            source = new
+                            {
+                                type = "exec_command_end",
+                                call_id = "exec-upgrade",
+                                status = "completed",
+                                stdout = "unchanged output",
+                                stderr = "",
+                                exit_code = 0
+                            }
+                        }
+                    }
+                }
+                : new object[]
+                {
+                    new
+                    {
+                        partKey = "opaque/0",
+                        partOrder = 0,
+                        kind = "opaque",
+                        actor = "unknown",
+                        payload = new
+                        {
+                            recordType = "event_msg",
+                            payloadType = "exec_command_end",
+                            source = new
+                            {
+                                type = "exec_command_end",
+                                call_id = "exec-upgrade",
+                                status = "completed",
+                                stdout = "unchanged output",
+                                stderr = "",
+                                exit_code = 0
+                            }
+                        }
+                    }
+                }
         };
 
     private static object RoutedObservation(

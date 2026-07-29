@@ -61,9 +61,9 @@ still runs.
 The canonical import receipt and `memctl capture receipt` expose the source
 identity loaded from the durable stream. An adapter upgrade may normalize
 adapter/source provenance without changing the immutable source record; the
-server recognizes the Codex v3/v4/v5→v6 signature transition narrowly — those
-adapters derive identical source provenance, so only the adapter version and
-the signature's identity shape changed — while a changed locator or changed
+server recognizes Codex v3/v4/v5/v6→v7 signatures narrowly where the record's
+derived events are unchanged and only adapter/signature identity moved. A
+record whose derived tool events changed in v7, a changed locator, or changed
 source content remains a conflict.
 
 ## Tolerant parsing
@@ -94,6 +94,25 @@ Adapters are versioned tolerant tagged unions:
   complete scanned source evidence;
 - unknown additive fields remain in `sourcePayload`;
 - content and output accept string or array forms;
+- Codex `function_call`/`function_call_output`,
+  `custom_tool_call`/`custom_tool_call_output`, specialized model-facing
+  `local_shell_call`, `tool_search_call`/`tool_search_output`,
+  `web_search_call`, and `image_generation_call` response items retain
+  `call_id` (falling back to an explicitly stated item `id`) in both the event
+  payload and deterministic part key. Persisted exec-command and patch-apply
+  `event_msg` begin/end records remain evidence-bearing annotations rather than
+  duplicate canonical calls or results.
+  Results carry a `result_for` relationship to that same native identity, so
+  parallel and out-of-order observations never pair by adjacency. Arguments
+  and input accept structured values or JSON-encoded strings and normalize to
+  structured canonical arguments, while `sourcePayload` retains the native
+  source form. Tool output/content retains its source string versus structured
+  JSON type, and absent names remain null;
+- tool outcomes are limited to `succeeded`, `failed`, `denied`, `interrupted`,
+  or `unknown`. A canonical source `outcome`, a recognized terminal source
+  `status`, or an explicit boolean `success` is evidence; unrecognized or
+  absent evidence remains `unknown`, and a call without a captured result
+  remains only a `tool_call`;
 - message content objects become canonical parts only when a known text-part
   discriminator carries an explicit string `text`; nominal text parts without
   that field remain opaque evidence rather than becoming serialized JSON text;
@@ -155,6 +174,7 @@ The synthetic, version-labelled families are:
 - `fixtures/adapter-conformance/codex-cli-0.145.reasoning.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.opaque.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.annotations.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.145.tools.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.77.parent-only.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.90.fork-only.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.120.parent-fork.synthetic.jsonl`
@@ -179,7 +199,11 @@ reasoning, mixed supported and present-but-non-array reasoning sections,
 complete opaque signature/encrypted/additive metadata, complete unsupported
 record and content evidence, and evidence-bearing duplicate lifecycle/reasoning
 views retained as annotations, including the `event_msg/context_compacted`
-boundary view paired with canonical `compacted` summary/history evidence.
+boundary view paired with canonical `compacted` summary/history evidence. The
+0.145 tool family covers function, custom, and specialized call/result records,
+parallel and out-of-order native identities, missing names, string and
+structured values, explicit canonical outcomes, and visible turn abort/error
+records.
 
 `CodexJsonlAdapter` is the only adapter referenced by the separately built
 disabled tracer image. `DisposableClaudeJsonlAdapter` is defined in the test

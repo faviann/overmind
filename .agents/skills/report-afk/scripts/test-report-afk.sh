@@ -17,9 +17,9 @@ printf '%s\n' "$*" >>"$REPORT_AFK_TEST_EVENTS"
 case "$*" in
   "repo view --json nameWithOwner,url")
     printf '%s\n' '{"nameWithOwner":"acme/widget","url":"https://github.com/acme/widget"}' ;;
-  "pr list --state all --label afk-review --limit 1000 --json number,title,state,mergedAt,url,body,mergeStateStatus")
+  "pr list --state all --label afk-review --limit 1000 --json number,title,state,mergedAt,url,body,mergeStateStatus,labels")
     cat <<'JSON'
-[{"number":10,"title":"Ship complete slice","state":"MERGED","mergedAt":"2026-07-18T09:00:00Z","url":"https://github.com/acme/widget/pull/10","body":"Closes #100\n\n## Evidence\n- Closure gate: all tested\n\n## Workflow telemetry\n| Final workflow outcome | Closes |\n\n## Follow-ups\nNone.","mergeStateStatus":"UNKNOWN"},{"number":11,"title":"Make partial progress","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/11","body":"Progresses https://github.com/acme/other/issues/401\n\n## Evidence\n- Three criteria remain\n\n## Workflow telemetry\n| Final workflow outcome | Progresses |\n\n## Follow-ups\n- #301","mergeStateStatus":"CLEAN"},{"number":12,"title":"Checks failed","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/12","body":"Closes #102\n\n## Validation\n- integration: failed\n\n## Workflow telemetry\n| Final workflow outcome | Closes |\n\n## Follow-ups\nNone.","mergeStateStatus":"UNSTABLE"},{"number":13,"title":"Blocked work","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/13","body":"Closes #103\n\n## Review\n- Awaiting policy decision\n\n## Workflow telemetry\n| Final workflow outcome | Closes |\n\n## Follow-ups\n- #302","mergeStateStatus":"BLOCKED"},{"number":14,"title":"Closed without merge","state":"CLOSED","mergedAt":null,"url":"https://github.com/acme/widget/pull/14","body":"Closes #104","mergeStateStatus":"UNKNOWN"},{"number":15,"title":"No required checks","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/15","body":"Closes #105\n\n## Evidence\n- No checks configured\n\n## Workflow telemetry\n| Final workflow outcome | Closes |\n\n## Follow-ups\nNone.","mergeStateStatus":"CLEAN"}]
+[{"number":10,"title":"Ship complete slice","state":"MERGED","mergedAt":"2026-07-18T09:00:00Z","url":"https://github.com/acme/widget/pull/10","body":"Closes #100\n\n## Evidence\n- Closure gate: all tested\n\n## Workflow telemetry\n| Final workflow outcome | Closes |\n\n## Follow-ups\nNone.","mergeStateStatus":"UNKNOWN","labels":[{"name":"afk-review"}]},{"number":11,"title":"Make partial progress","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/11","body":"Progresses https://github.com/acme/other/issues/401\n\n## Evidence\n- Three criteria remain\n\n## Workflow telemetry\n| Final workflow outcome | Progresses |\n\n## Follow-ups\n- #301","mergeStateStatus":"CLEAN","labels":[{"name":"afk-review"}]},{"number":12,"title":"Checks failed","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/12","body":"Closes #102\n\n## Validation\n- integration: failed\n\n## Workflow telemetry\n| Final workflow outcome | Closes |\n\n## Follow-ups\nNone.","mergeStateStatus":"UNSTABLE","labels":[{"name":"afk-review"}]},{"number":13,"title":"Blocked work","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/13","body":"Closes #103\n\n## Review\n- Awaiting policy decision\n\n## Workflow telemetry\n| Final workflow outcome | Closes |\n\n## Follow-ups\n- #302","mergeStateStatus":"BLOCKED","labels":[{"name":"afk-review"}]},{"number":14,"title":"Closed without merge","state":"CLOSED","mergedAt":null,"url":"https://github.com/acme/widget/pull/14","body":"Closes #104","mergeStateStatus":"UNKNOWN","labels":[{"name":"afk-review"}]},{"number":15,"title":"No required checks","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/15","body":"Closes #105\n\n## Evidence\n- No checks configured\n\n## Workflow telemetry\n| Final workflow outcome | Closes |\n\n## Follow-ups\nNone.","mergeStateStatus":"CLEAN","labels":[{"name":"afk-review"}]},{"number":16,"title":"Stale pull request hit","state":"OPEN","mergedAt":null,"url":"https://github.com/acme/widget/pull/16","body":"","mergeStateStatus":"CLEAN","labels":[]}]
 JSON
     ;;
   "pr checks 10 --required --json name,state,bucket,link") printf '%s\n' '[{"name":"test","state":"COMPLETED","bucket":"pass","link":"https://ci/10"}]' ;;
@@ -38,9 +38,9 @@ JSON
   "issue view 103 --json number,title,state,url,labels") printf '%s\n' '{"number":103,"title":"Blocked issue","state":"OPEN","url":"https://github.com/acme/widget/issues/103","labels":[]}' ;;
   "issue view 105 --json number,title,state,url,labels") printf '%s\n' '{"number":105,"title":"No-check issue","state":"OPEN","url":"https://github.com/acme/widget/issues/105","labels":[]}' ;;
   "issue list --state all --label afk-review --limit 1000 --json number,title,state,url,labels")
-    printf '%s\n' '[{"number":201,"title":"Discovered edge case","state":"OPEN","url":"https://github.com/acme/widget/issues/201","labels":[{"name":"afk-review"},{"name":"needs-triage"}]}]' ;;
+    printf '%s\n' '[{"number":201,"title":"Discovered edge case","state":"OPEN","url":"https://github.com/acme/widget/issues/201","labels":[{"name":"afk-review"},{"name":"needs-triage"}]},{"number":203,"title":"Stale discovered issue hit","state":"OPEN","url":"https://github.com/acme/widget/issues/203","labels":[{"name":"needs-triage"}]}]' ;;
   "issue list --state open --label Sandcastle --limit 1000 --json number,title,state,url,labels")
-    printf '%s\n' '[{"number":202,"title":"Queued work","state":"OPEN","url":"https://github.com/acme/widget/issues/202","labels":[{"name":"ready-for-agent"},{"name":"Sandcastle"}]}]' ;;
+    printf '%s\n' '[{"number":202,"title":"Queued work","state":"OPEN","url":"https://github.com/acme/widget/issues/202","labels":[{"name":"ready-for-agent"},{"name":"Sandcastle"}]},{"number":204,"title":"Stale queue hit","state":"OPEN","url":"https://github.com/acme/widget/issues/204","labels":[{"name":"ready-for-agent"}]}]' ;;
   "pr view "*" -R acme/widget --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"}]}' ;;
   "issue view 201 -R acme/widget --json labels") printf '%s\n' '{"labels":[{"name":"afk-review"},{"name":"needs-triage"}]}' ;;
   "issue view 202 -R acme/widget --json labels") printf '%s\n' '{"labels":[{"name":"Sandcastle"}]}' ;;
@@ -71,11 +71,23 @@ grep -Fq '**Evidence:** integration: failed' "$report"
 grep -Fq '**Telemetry:** | Final workflow outcome | Closes |' "$report"
 grep -Fq '**Follow-ups:** #301' "$report"
 grep -Fq 'issue:201 — [#201 Discovered edge case](https://github.com/acme/widget/issues/201)' "$report"
+if grep -Fq 'Stale discovered issue hit' "$report"; then
+  printf 'Issue without afk-review appeared in discovered issues\n' >&2
+  exit 1
+fi
 grep -Fq '[#202 Queued work](https://github.com/acme/widget/issues/202)' "$report"
+if grep -Fq 'Stale queue hit' "$report"; then
+  printf 'Issue without Sandcastle appeared in authorized queue\n' >&2
+  exit 1
+fi
 grep -Fq 'pr:15 — [#15 No required checks](https://github.com/acme/widget/pull/15)' "$report"
 grep -A5 -F 'pr:15 —' "$report" | grep -Fq '**Required checks:** None reported'
 if grep -Fq 'Closed without merge' "$report"; then
   printf 'Closed-unmerged pull request appeared in report\n' >&2
+  exit 1
+fi
+if grep -Fq 'Stale pull request hit' "$report"; then
+  printf 'Pull request without afk-review appeared in report\n' >&2
   exit 1
 fi
 

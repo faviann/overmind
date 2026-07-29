@@ -10,7 +10,7 @@ import sys
 from typing import Any
 
 
-PR_FIELDS = "number,title,state,mergedAt,url,body,mergeStateStatus"
+PR_FIELDS = "number,title,state,mergedAt,url,body,mergeStateStatus,labels"
 ISSUE_FIELDS = "number,title,state,url,labels"
 ARTIFACT_PATTERN = re.compile(r"^(pr|issue):([1-9][0-9]*)$")
 REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -30,6 +30,10 @@ def gh(*args: str) -> str:
 def gh_json(*args: str) -> Any:
     output = gh(*args).strip()
     return json.loads(output or "[]")
+
+
+def has_label(artifact: dict[str, Any], name: str) -> bool:
+    return any(label.get("name") == name for label in artifact.get("labels", []))
 
 
 def section(body: str, names: list[str]) -> str:
@@ -152,13 +156,28 @@ def report() -> None:
     prs = gh_json(
         "pr", "list", "--state", "all", "--label", "afk-review", "--limit", "1000", "--json", PR_FIELDS
     )
-    prs = [pr for pr in prs if pr.get("state") == "OPEN" or pr.get("mergedAt")]
+    prs = [
+        pr
+        for pr in prs
+        if has_label(pr, "afk-review")
+        and (pr.get("state") == "OPEN" or pr.get("mergedAt"))
+    ]
     discoveries = gh_json(
         "issue", "list", "--state", "all", "--label", "afk-review", "--limit", "1000", "--json", ISSUE_FIELDS
     )
+    discoveries = [
+        issue
+        for issue in discoveries
+        if has_label(issue, "afk-review")
+    ]
     queue = gh_json(
         "issue", "list", "--state", "open", "--label", "Sandcastle", "--limit", "1000", "--json", ISSUE_FIELDS
     )
+    queue = [
+        issue
+        for issue in queue
+        if has_label(issue, "Sandcastle")
+    ]
     print(f"# AFK review inbox — {repo_name}")
     print()
     print("## Pull requests")

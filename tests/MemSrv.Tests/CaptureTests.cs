@@ -841,7 +841,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "2",
+                    "3",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -869,7 +869,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "2",
+                    "3",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -956,6 +956,184 @@ public sealed class CaptureTests : HttpSeamTestBase
                     .Select(item => item.GetProperty("traceUuid").GetGuid()),
                 retried.SelectMany(receipt => receipt.GetProperty("events").EnumerateArray())
                     .Select(item => item.GetProperty("traceUuid").GetGuid()));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerAndOperatorKeepCodexContextEvidenceAndClocksDistinct()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"codex-context-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-context-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string transcriptPath = Path.Combine(transcriptRoot, "context.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        File.Copy(
+            Path.Combine(
+                _root,
+                "fixtures/adapter-conformance/codex-cli-0.144.context.synthetic.jsonl"),
+            transcriptPath);
+
+        var environment = new Dictionary<string, string>
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        try
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(environment);
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            var receipts = new JsonElement[4];
+            try
+            {
+                for (int index = 0; index < receipts.Length; index++)
+                {
+                    receipts[index] = await ReadTracerReceiptAsync(process);
+                }
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                await stderr;
+            }
+
+            Assert.All(
+                receipts,
+                receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
+            Assert.All(receipts, receipt =>
+            {
+                JsonElement observation = receipt.GetProperty("observation");
+                Assert.Equal(
+                    "3",
+                    observation.GetProperty("adapter").GetProperty("version").GetString());
+                JsonElement capturedEvent =
+                    Assert.Single(receipt.GetProperty("events").EnumerateArray());
+                Assert.Equal("context", capturedEvent.GetProperty("kind").GetString());
+                Assert.Equal("harness", capturedEvent.GetProperty("actor").GetString());
+            });
+            Assert.Equal(
+                "0.144.top-level-session",
+                receipts[0].GetProperty("observation").GetProperty("source")
+                    .GetProperty("harnessVersion").GetString());
+            Assert.Equal(
+                "0.144.top-level-turn",
+                receipts[1].GetProperty("observation").GetProperty("source")
+                    .GetProperty("harnessVersion").GetString());
+            Assert.Equal(
+                "0.144.payload-fallback",
+                receipts[2].GetProperty("observation").GetProperty("source")
+                    .GetProperty("harnessVersion").GetString());
+            Assert.Equal(
+                JsonValueKind.Null,
+                receipts[3].GetProperty("observation").GetProperty("source")
+                    .GetProperty("harnessVersion").ValueKind);
+
+            string sessionShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipts[0].GetProperty("observationUuid").GetGuid().ToString());
+            JsonElement sessionEnvelope =
+                JsonDocument.Parse(sessionShown).RootElement.Clone();
+            JsonElement sessionObservation = sessionEnvelope.GetProperty("observation");
+            JsonElement sessionEvent = sessionEnvelope.GetProperty("event");
+            JsonElement sessionPayload = sessionEvent.GetProperty("payload");
+
+            Assert.Equal(
+                "2026-06-03T10:00:00.000Z",
+                sessionObservation.GetProperty("sourceTimestamp")
+                    .GetProperty("raw").GetString());
+            Assert.Equal(
+                DateTimeOffset.Parse("2026-06-03T10:00:00.000Z"),
+                sessionObservation.GetProperty("sourceTimestamp")
+                    .GetProperty("parsed").GetDateTimeOffset());
+            Assert.Equal(
+                DateTimeOffset.Parse("2026-06-03T09:59:58.000Z"),
+                sessionEvent.GetProperty("occurredAt").GetDateTimeOffset());
+            DateTimeOffset capturedAt =
+                sessionObservation.GetProperty("capturedAt").GetDateTimeOffset();
+            Assert.NotEqual(
+                sessionObservation.GetProperty("sourceTimestamp")
+                    .GetProperty("parsed").GetDateTimeOffset(),
+                capturedAt);
+            Assert.NotEqual(sessionEvent.GetProperty("occurredAt").GetDateTimeOffset(), capturedAt);
+            Assert.Equal(
+                "synthetic-session-provider",
+                sessionObservation.GetProperty("source").GetProperty("provider").GetString());
+            Assert.Equal(
+                JsonValueKind.Null,
+                sessionObservation.GetProperty("source").GetProperty("model").ValueKind);
+            Assert.Equal("session", sessionPayload.GetProperty("scope").GetString());
+            Assert.Equal(
+                "codex-session-synthetic-1",
+                sessionPayload.GetProperty("scopeId").GetString());
+            Assert.Equal(
+                "exposed",
+                sessionPayload.GetProperty("instructionEvidence")
+                    .GetProperty("base").GetString());
+            Assert.Equal(
+                "unavailable",
+                sessionPayload.GetProperty("instructionEvidence")
+                    .GetProperty("builtIn").GetString());
+            Assert.True(
+                sessionPayload.GetProperty("values")
+                    .GetProperty("futureSessionSetting").GetProperty("retained").GetBoolean());
+            Assert.Equal(
+                sessionObservation.GetProperty("safeSourcePayload").GetProperty("payload")
+                    .GetRawText(),
+                sessionPayload.GetProperty("values").GetRawText());
+
+            string turnShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipts[1].GetProperty("observationUuid").GetGuid().ToString());
+            JsonElement turnEnvelope = JsonDocument.Parse(turnShown).RootElement.Clone();
+            JsonElement turnObservation = turnEnvelope.GetProperty("observation");
+            JsonElement turnEvent = turnEnvelope.GetProperty("event");
+            JsonElement turnPayload = turnEvent.GetProperty("payload");
+
+            Assert.Equal(
+                "not-a-source-time",
+                turnObservation.GetProperty("sourceTimestamp").GetProperty("raw").GetString());
+            Assert.Equal(
+                JsonValueKind.Null,
+                turnObservation.GetProperty("sourceTimestamp").GetProperty("parsed").ValueKind);
+            Assert.Equal(JsonValueKind.Null, turnEvent.GetProperty("occurredAt").ValueKind);
+            Assert.NotEqual(
+                default,
+                turnObservation.GetProperty("capturedAt").GetDateTimeOffset());
+            Assert.Equal(
+                "codex-synthetic-turn-model",
+                turnObservation.GetProperty("source").GetProperty("model").GetString());
+            Assert.Equal(
+                JsonValueKind.Null,
+                turnObservation.GetProperty("source").GetProperty("provider").ValueKind);
+            Assert.Equal("turn", turnPayload.GetProperty("scope").GetString());
+            Assert.Equal(
+                "codex-turn-synthetic-1",
+                turnPayload.GetProperty("scopeId").GetString());
+            Assert.Equal(
+                "unavailable",
+                turnPayload.GetProperty("instructionEvidence").GetProperty("base").GetString());
+            Assert.True(
+                turnPayload.GetProperty("values")
+                    .GetProperty("futureTurnSetting").GetProperty("retained").GetBoolean());
+            Assert.Empty(turnEnvelope.GetProperty("relationships").EnumerateArray());
         }
         finally
         {

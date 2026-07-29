@@ -60,12 +60,31 @@ Part keys come from a stable source path or native part identity and are
 deterministic for the same immutable observation. Source timestamps are never
 promoted to event occurrence timestamps.
 
+Codex `session_meta` and `turn_context` records are canonical `context` events
+with actor `harness`. Their payload is
+`{ scope, scopeId, values, instructionEvidence }`: `values` is the complete
+source payload clone, scope is `session` or `turn`, and `scopeId` is populated
+only from the source-stated session/turn id. `instructionEvidence.base` is
+`exposed` only when the record contains non-null `base_instructions`;
+`builtIn` and `loaded` remain explicitly `unavailable`. Model, provider, and
+harness version remain facts of the individual observation: they are neither
+propagated between records nor inferred from each other.
+
+The top-level Codex rollout timestamp remains the observation
+`sourceTimestamp` and is never used as an event-occurrence fallback.
+Separately, a parseable `session_meta.payload.timestamp` is explicit
+event-occurrence evidence and supplies that context event's `occurredAt`;
+missing or invalid payload timestamps remain null, and `turn_context` has no
+occurrence time. Neither clock falls back to the other or to server-authored
+capture time.
+
 ## Conformance fixtures and disposable Claude spike
 
 The synthetic, version-labelled families are:
 
 - `fixtures/adapter-conformance/codex-cli-0.144.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.messages.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.144.context.synthetic.jsonl`
 - `fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl`
 
 The Codex and Claude general families pass through the same conformance
@@ -74,7 +93,10 @@ compaction, subagents, unknown records, drift shapes, provenance,
 relationships, and deterministic part identities. The Codex message family
 also covers model-facing user, assistant, developer, and system-stated
 messages, deterministic content-part fan-out, and duplicate UI-view
-annotations.
+annotations. The Codex context family covers session/turn scope, complete
+additive setting preservation, explicitly exposed base-instruction evidence,
+observation-local model/provider and CLI-version provenance, and the three
+non-fallback clocks.
 
 `CodexJsonlAdapter` is the only adapter referenced by the separately built
 disabled tracer image. `DisposableClaudeJsonlAdapter` is defined in the test

@@ -79,9 +79,14 @@ Compaction has two complementary records: `event_msg/context_compacted` is only 
 Model/provider provenance is hierarchical rather than per event:
 
 - `session_meta.model_provider` is optional and session-scoped;
-- `turn_context.model` is the effective model for a turn and must be carried forward only within that turn;
+- `turn_context.model` is the effective model stated for that turn;
 - current hook invocations contain the active model but no provider;
 - model reroute events, when present, override the requested model for the affected turn.
+
+Canonical capture preserves each of those as a source-scoped context
+observation only where the individual record states it. Applying a session
+provider or turn model to other events is a future evidence-qualified resolved
+context projection, not adapter propagation.
 
 ### Codex drift observed locally
 

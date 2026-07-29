@@ -8,6 +8,143 @@ namespace MemSrv.Tests;
 public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 {
     [Fact]
+    public async Task CodexContextRecordsPreserveScopedValuesInstructionsAndIndependentClocks()
+    {
+        var adapter = new CodexJsonlAdapter();
+        string fixture = Path.Combine(
+            _root, "fixtures/adapter-conformance/codex-cli-0.144.context.synthetic.jsonl");
+        var source = await JsonlSourceReader.ReadAsync(
+            fixture, "synthetic-codex-context", terminalAtEndOfFile: true);
+
+        var terminal = source.Select(adapter.Adapt)
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .ToArray();
+
+        Assert.Equal(4, terminal.Length);
+        Assert.All(terminal, outcome =>
+        {
+            CaptureEvent capturedEvent = Assert.Single(outcome.Observation.Events);
+            Assert.Equal("context", capturedEvent.Kind);
+            Assert.Equal("harness", capturedEvent.Actor);
+            Assert.Empty(capturedEvent.Relationships!);
+        });
+        Assert.All(
+            terminal,
+            outcome => Assert.Equal("3", outcome.Observation.Adapter.Version));
+
+        CaptureObservationRequest session = terminal[0].Observation;
+        CaptureEvent sessionContext = Assert.Single(session.Events);
+        Assert.Equal("session_meta", session.Source.RecordType);
+        Assert.Equal("0.144.top-level-session", session.Source.HarnessVersion);
+        Assert.Null(session.Source.Model);
+        Assert.Equal("synthetic-session-provider", session.Source.Provider);
+        Assert.Equal("2026-06-03T10:00:00.000Z", session.SourceTimestamp!.Raw);
+        Assert.Equal(
+            DateTimeOffset.Parse("2026-06-03T10:00:00.000Z"),
+            session.SourceTimestamp.Parsed);
+        Assert.Equal(
+            DateTimeOffset.Parse("2026-06-03T09:59:58.000Z"),
+            sessionContext.OccurredAt);
+        Assert.Equal("session", sessionContext.Payload.GetProperty("scope").GetString());
+        Assert.Equal(
+            "codex-session-synthetic-1",
+            sessionContext.Payload.GetProperty("scopeId").GetString());
+        Assert.Equal(
+            session.SourcePayload.GetProperty("payload").GetRawText(),
+            sessionContext.Payload.GetProperty("values").GetRawText());
+        Assert.Equal(
+            "exposed",
+            sessionContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("base").GetString());
+        Assert.Equal(
+            "unavailable",
+            sessionContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("builtIn").GetString());
+        Assert.Equal(
+            "unavailable",
+            sessionContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("loaded").GetString());
+        Assert.True(
+            sessionContext.Payload.GetProperty("values")
+                .GetProperty("futureSessionSetting").GetProperty("retained").GetBoolean());
+
+        CaptureObservationRequest turn = terminal[1].Observation;
+        CaptureEvent turnContext = Assert.Single(turn.Events);
+        Assert.Equal("0.144.top-level-turn", turn.Source.HarnessVersion);
+        Assert.Equal("codex-synthetic-turn-model", turn.Source.Model);
+        Assert.Null(turn.Source.Provider);
+        Assert.Equal("not-a-source-time", turn.SourceTimestamp!.Raw);
+        Assert.Null(turn.SourceTimestamp.Parsed);
+        Assert.Null(turnContext.OccurredAt);
+        Assert.Equal("turn", turnContext.Payload.GetProperty("scope").GetString());
+        Assert.Equal(
+            "codex-turn-synthetic-1",
+            turnContext.Payload.GetProperty("scopeId").GetString());
+        Assert.Equal(
+            turn.SourcePayload.GetProperty("payload").GetRawText(),
+            turnContext.Payload.GetProperty("values").GetRawText());
+        Assert.Equal(
+            "unavailable",
+            turnContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("base").GetString());
+        JsonElement turnValues = turnContext.Payload.GetProperty("values");
+        Assert.Equal(
+            "codex-synthetic-turn-model",
+            turnValues.GetProperty("model").GetString());
+        Assert.Equal(
+            "/synthetic/turn-workspace",
+            turnValues.GetProperty("cwd").GetString());
+        Assert.Equal(
+            ["synthetic-context"],
+            sessionContext.Payload.GetProperty("values").GetProperty("git")
+                .EnumerateObject()
+                .Where(property => property.Name == "branch")
+                .Select(property => property.Value.GetString()));
+        Assert.True(
+            turnValues.GetProperty("multi_agent").GetProperty("enabled").GetBoolean());
+        Assert.True(
+            turnValues.GetProperty("futureTurnSetting").GetProperty("retained").GetBoolean());
+
+        CaptureObservationRequest secondSession = terminal[2].Observation;
+        CaptureEvent secondSessionContext = Assert.Single(secondSession.Events);
+        Assert.Equal("0.144.payload-fallback", secondSession.Source.HarnessVersion);
+        Assert.Equal("explicit-session-model", secondSession.Source.Model);
+        Assert.Null(secondSession.Source.Provider);
+        Assert.Equal(
+            "codex-session-synthetic-2",
+            secondSessionContext.Payload.GetProperty("scopeId").GetString());
+        Assert.Null(secondSessionContext.OccurredAt);
+        Assert.Equal(
+            "unavailable",
+            secondSessionContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("base").GetString());
+        Assert.Equal(
+            "not-an-occurrence-time",
+            secondSessionContext.Payload.GetProperty("values")
+                .GetProperty("timestamp").GetString());
+
+        CaptureObservationRequest providerTurn = terminal[3].Observation;
+        CaptureEvent providerTurnContext = Assert.Single(providerTurn.Events);
+        Assert.Null(providerTurn.Source.Model);
+        Assert.Equal("explicit-turn-provider", providerTurn.Source.Provider);
+        Assert.Null(providerTurnContext.Payload.GetProperty("scopeId").GetString());
+        Assert.Null(providerTurnContext.OccurredAt);
+        Assert.Equal(
+            "exposed",
+            providerTurnContext.Payload.GetProperty("instructionEvidence")
+                .GetProperty("base").GetString());
+
+        string first = JsonSerializer.Serialize(
+            terminal.Select(outcome => outcome.Observation), WebJson);
+        string retry = JsonSerializer.Serialize(
+            source.Select(adapter.Adapt)
+                .Cast<CaptureSourcePositionOutcome.Terminal>()
+                .Select(outcome => outcome.Observation),
+            WebJson);
+        Assert.Equal(first, retry);
+    }
+
+    [Fact]
     public void CodexValidUnsupportedJsonShapesRemainDeterministicOpaqueEvidence()
     {
         string[] records =
@@ -305,7 +442,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .ToArray();
 
         Assert.Equal(6, terminal.Length);
-        Assert.Equal("2", terminal[0].Observation.Adapter.Version);
+        Assert.Equal("3", terminal[0].Observation.Adapter.Version);
         Assert.Equal(
             [2, 1, 1, 1, 2, 1],
             terminal.Select(outcome => outcome.Observation.Events.Count));

@@ -4770,26 +4770,22 @@ public sealed class CaptureTests : HttpSeamTestBase
                 {
                     new
                     {
-                        partKey = "tool_result:exec-upgrade",
+                        partKey = "opaque/0",
                         partOrder = 0,
-                        kind = "tool_result",
-                        actor = "tool",
+                        kind = "opaque",
+                        actor = "unknown",
                         payload = new
                         {
-                            callId = "exec-upgrade",
-                            outcome = "succeeded",
-                            output = "unchanged output"
-                        },
-                        relationships = new[]
-                        {
-                            new
+                            recordType = "event_msg",
+                            payloadType = "exec_command_end",
+                            source = new
                             {
-                                type = "result_for",
-                                target = new
-                                {
-                                    nativeId = "exec-upgrade",
-                                    kind = "tool_call"
-                                }
+                                type = "exec_command_end",
+                                call_id = "exec-upgrade",
+                                status = "completed",
+                                stdout = "unchanged output",
+                                stderr = "",
+                                exit_code = 0
                             }
                         }
                     }

@@ -47,6 +47,12 @@ Adapters are versioned tolerant tagged unions:
   their scanned source representation;
 - unknown additive fields remain in `sourcePayload`;
 - content and output accept string or array forms;
+- message content objects become canonical parts only when a known text-part
+  discriminator carries an explicit string `text`; nominal text parts without
+  that field remain opaque evidence rather than becoming serialized JSON text;
+- empty message content arrays, missing content, and unsupported non-array
+  shapes remain deterministic opaque source evidence rather than inferred
+  canonical messages;
 - known migrating fields accept scalar or object forms;
 - tool arguments accept structured values or JSON-encoded strings.
 
@@ -59,11 +65,16 @@ promoted to event occurrence timestamps.
 The synthetic, version-labelled families are:
 
 - `fixtures/adapter-conformance/codex-cli-0.144.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.144.messages.synthetic.jsonl`
 - `fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl`
 
-Both pass through the same conformance assertions for messages, successful and
-failed tools, turn failures, compaction, subagents, unknown records, drift
-shapes, provenance, relationships, and deterministic part identities.
+The Codex and Claude general families pass through the same conformance
+assertions for messages, successful and failed tools, turn failures,
+compaction, subagents, unknown records, drift shapes, provenance,
+relationships, and deterministic part identities. The Codex message family
+also covers model-facing user, assistant, developer, and system-stated
+messages, deterministic content-part fan-out, and duplicate UI-view
+annotations.
 
 `CodexJsonlAdapter` is the only adapter referenced by the separately built
 disabled tracer image. `DisposableClaudeJsonlAdapter` is defined in the test

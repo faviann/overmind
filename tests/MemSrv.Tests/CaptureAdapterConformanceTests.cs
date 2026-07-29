@@ -8,6 +8,378 @@ namespace MemSrv.Tests;
 public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 {
     [Fact]
+    public void CodexValidUnsupportedJsonShapesRemainDeterministicOpaqueEvidence()
+    {
+        string[] records =
+        [
+            "null",
+            "[]",
+            """["future"]""",
+            "\"future\"",
+            "42",
+            "true",
+            """{"payload":null}""",
+            """{"payload":[]}""",
+            """{"payload":"future"}""",
+            """{"payload":42}""",
+            """{"payload":true}"""
+        ];
+        JsonValueKind[] expectedEvidenceKinds =
+        [
+            JsonValueKind.Null,
+            JsonValueKind.Array,
+            JsonValueKind.Array,
+            JsonValueKind.String,
+            JsonValueKind.Number,
+            JsonValueKind.True,
+            JsonValueKind.Null,
+            JsonValueKind.Array,
+            JsonValueKind.String,
+            JsonValueKind.Number,
+            JsonValueKind.True
+        ];
+        var adapter = new CodexJsonlAdapter();
+
+        for (int index = 0; index < records.Length; index++)
+        {
+            var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(Source(records[index], isTerminal: true)));
+            CaptureEvent evidence = Assert.Single(terminal.Observation.Events);
+
+            Assert.Equal("record:opaque", evidence.PartKey);
+            Assert.Equal(0, evidence.PartOrder);
+            Assert.Equal("opaque", evidence.Kind);
+            Assert.Equal("unknown", evidence.Actor);
+            Assert.Null(terminal.Observation.Source.RecordType);
+            Assert.Null(terminal.Observation.Source.Model);
+            Assert.Null(terminal.Observation.Source.Provider);
+            Assert.Equal(
+                JsonDocument.Parse(records[index]).RootElement.GetRawText(),
+                terminal.Observation.SourcePayload.GetRawText());
+            Assert.Equal(
+                expectedEvidenceKinds[index],
+                evidence.Payload.GetProperty("source").ValueKind);
+
+            var retry = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(Source(records[index], isTerminal: true)));
+            Assert.Equal(
+                JsonSerializer.Serialize(terminal.Observation, WebJson),
+                JsonSerializer.Serialize(retry.Observation, WebJson));
+        }
+    }
+
+    [Fact]
+    public void CodexNominalTextPartsWithoutExplicitStringTextRemainOpaqueEvidence()
+    {
+        const string record = """
+            {
+              "type": "response_item",
+              "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                  {"type":"input_text","future":"first"},
+                  {"type":"output_text","text":{"future":"second"}},
+                  {"type":"text","text":42,"future":"third"}
+                ]
+              }
+            }
+            """;
+
+        var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+            new CodexJsonlAdapter().Adapt(Source(record, isTerminal: true)));
+
+        Assert.Equal(
+            ["content/0:opaque", "content/1:opaque", "content/2:opaque"],
+            terminal.Observation.Events.Select(item => item.PartKey));
+        Assert.Equal(
+            [0, 1, 2],
+            terminal.Observation.Events.Select(item => item.PartOrder));
+        Assert.All(terminal.Observation.Events, item =>
+        {
+            Assert.Equal("opaque", item.Kind);
+            Assert.Equal("unknown", item.Actor);
+            Assert.False(item.Payload.TryGetProperty("text", out _));
+        });
+        Assert.Equal(
+            ["input_text", "output_text", "text"],
+            terminal.Observation.Events.Select(
+                item => item.Payload.GetProperty("contentType").GetString()));
+        Assert.Equal(
+            "first",
+            terminal.Observation.Events[0].Payload.GetProperty("source")
+                .GetProperty("future").GetString());
+        Assert.Equal(
+            "second",
+            terminal.Observation.Events[1].Payload.GetProperty("source")
+                .GetProperty("text").GetProperty("future").GetString());
+        Assert.Equal(
+            42,
+            terminal.Observation.Events[2].Payload.GetProperty("source")
+                .GetProperty("text").GetInt32());
+    }
+
+    [Fact]
+    public void CodexEmptyMessageContentArrayRemainsOpaqueSourceShape()
+    {
+        const string record = """
+            {
+              "type": "response_item",
+              "payload": {"type":"message","role":"developer","content":[]}
+            }
+            """;
+        var adapter = new CodexJsonlAdapter();
+
+        var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+            adapter.Adapt(Source(record, isTerminal: true)));
+        CaptureEvent evidence = Assert.Single(terminal.Observation.Events);
+
+        Assert.Equal("content:opaque", evidence.PartKey);
+        Assert.Equal(0, evidence.PartOrder);
+        Assert.Equal("opaque", evidence.Kind);
+        Assert.Equal("unknown", evidence.Actor);
+        Assert.Equal("message_content", evidence.Payload.GetProperty("contentType").GetString());
+        Assert.Equal(JsonValueKind.Array, evidence.Payload.GetProperty("source").ValueKind);
+        Assert.Empty(evidence.Payload.GetProperty("source").EnumerateArray());
+        Assert.False(evidence.Payload.TryGetProperty("text", out _));
+
+        var retry = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+            adapter.Adapt(Source(record, isTerminal: true)));
+        Assert.Equal(
+            JsonSerializer.Serialize(terminal.Observation.Events, WebJson),
+            JsonSerializer.Serialize(retry.Observation.Events, WebJson));
+    }
+
+    [Fact]
+    public void CodexUnsupportedNonArrayMessageContentRemainsOpaqueEvidence()
+    {
+        string[] records =
+        [
+            """{"type":"response_item","payload":{"type":"message","role":"user"}}""",
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":{"future":"object"}}}""",
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":42}}""",
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":true}}""",
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":null}}"""
+        ];
+        var adapter = new CodexJsonlAdapter();
+
+        CaptureEvent[] evidence = records.Select(record =>
+        {
+            var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(Source(record, isTerminal: true)));
+            return Assert.Single(terminal.Observation.Events);
+        }).ToArray();
+
+        Assert.All(evidence, item =>
+        {
+            Assert.Equal("content:opaque", item.PartKey);
+            Assert.Equal(0, item.PartOrder);
+            Assert.Equal("opaque", item.Kind);
+            Assert.Equal("unknown", item.Actor);
+            Assert.Equal(
+                "message_content",
+                item.Payload.GetProperty("contentType").GetString());
+            Assert.False(item.Payload.TryGetProperty("text", out _));
+        });
+        Assert.Equal(JsonValueKind.Object, evidence[0].Payload.GetProperty("source").ValueKind);
+        Assert.False(evidence[0].Payload.GetProperty("source").TryGetProperty("content", out _));
+        Assert.Equal(
+            "object",
+            evidence[1].Payload.GetProperty("source").GetProperty("future").GetString());
+        Assert.Equal(42, evidence[2].Payload.GetProperty("source").GetInt32());
+        Assert.True(evidence[3].Payload.GetProperty("source").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, evidence[4].Payload.GetProperty("source").ValueKind);
+    }
+
+    [Fact]
+    public void CodexUiViewsWithoutExplicitStringMessagesRemainOpaqueEvidence()
+    {
+        string[] views = ["user_message", "agent_message"];
+        string[] messageShapes =
+        [
+            "",
+            ""","message":{"future":"object"}""",
+            ""","message":42""",
+            ""","message":true""",
+            ""","message":["future"]""",
+            ""","message":null"""
+        ];
+        JsonValueKind?[] expectedKinds =
+        [
+            null,
+            JsonValueKind.Object,
+            JsonValueKind.Number,
+            JsonValueKind.True,
+            JsonValueKind.Array,
+            JsonValueKind.Null
+        ];
+        var adapter = new CodexJsonlAdapter();
+
+        foreach (string view in views)
+        {
+            for (int shapeIndex = 0; shapeIndex < messageShapes.Length; shapeIndex++)
+            {
+                string messageShape = messageShapes[shapeIndex];
+                string record =
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\""
+                    + view
+                    + "\""
+                    + messageShape
+                    + ",\"futureViewField\":\"retained\"}}";
+                var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(Source(record, isTerminal: true)));
+                CaptureEvent evidence = Assert.Single(terminal.Observation.Events);
+
+                Assert.Equal($"view:{view}:opaque", evidence.PartKey);
+                Assert.Equal(0, evidence.PartOrder);
+                Assert.Equal("opaque", evidence.Kind);
+                Assert.Equal("unknown", evidence.Actor);
+                Assert.Equal(
+                    "event_msg",
+                    evidence.Payload.GetProperty("recordType").GetString());
+                Assert.Equal(
+                    view,
+                    evidence.Payload.GetProperty("payloadType").GetString());
+                Assert.Equal(
+                    "retained",
+                    evidence.Payload.GetProperty("source")
+                        .GetProperty("futureViewField").GetString());
+                JsonElement source = evidence.Payload.GetProperty("source");
+                if (expectedKinds[shapeIndex] is { } expectedKind)
+                {
+                    Assert.Equal(expectedKind, source.GetProperty("message").ValueKind);
+                }
+                else
+                {
+                    Assert.False(source.TryGetProperty("message", out _));
+                }
+                if (shapeIndex == 1)
+                {
+                    Assert.Equal(
+                        "object",
+                        source.GetProperty("message").GetProperty("future").GetString());
+                }
+                if (shapeIndex == 2)
+                {
+                    Assert.Equal(42, source.GetProperty("message").GetInt32());
+                }
+                if (shapeIndex == 3)
+                {
+                    Assert.True(source.GetProperty("message").GetBoolean());
+                }
+                if (shapeIndex == 4)
+                {
+                    Assert.Equal(
+                        "future",
+                        Assert.Single(source.GetProperty("message").EnumerateArray()).GetString());
+                }
+                Assert.False(evidence.Payload.TryGetProperty("text", out _));
+
+                var retry = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(Source(record, isTerminal: true)));
+                Assert.Equal(
+                    JsonSerializer.Serialize(terminal.Observation.Events, WebJson),
+                    JsonSerializer.Serialize(retry.Observation.Events, WebJson));
+
+                var moved = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(Source(record, isTerminal: true, sourcePosition: 37)));
+                Assert.Equal(37, moved.SourcePosition);
+                Assert.Equal(37, moved.Observation.SourcePosition);
+                Assert.Equal(
+                    JsonSerializer.Serialize(terminal.Observation.Events, WebJson),
+                    JsonSerializer.Serialize(moved.Observation.Events, WebJson));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CodexModelFacingMessagesFanOutInSourceOrderWhileUiViewsRemainAnnotations()
+    {
+        var adapter = new CodexJsonlAdapter();
+        string fixture = Path.Combine(
+            _root, "fixtures/adapter-conformance/codex-cli-0.144.messages.synthetic.jsonl");
+        var source = await JsonlSourceReader.ReadAsync(
+            fixture, "synthetic-codex-messages", terminalAtEndOfFile: true);
+        var terminal = source.Select(adapter.Adapt)
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .ToArray();
+
+        Assert.Equal(6, terminal.Length);
+        Assert.Equal("2", terminal[0].Observation.Adapter.Version);
+        Assert.Equal(
+            [2, 1, 1, 1, 2, 1],
+            terminal.Select(outcome => outcome.Observation.Events.Count));
+        Assert.Equal(
+            ["message", "message"],
+            terminal[0].Observation.Events.Select(item => item.Kind));
+        Assert.Equal(
+            ["user", "user"],
+            terminal[0].Observation.Events.Select(item => item.Actor));
+        Assert.Equal(
+            ["content/0:message", "content/1:message"],
+            terminal[0].Observation.Events.Select(item => item.PartKey));
+        Assert.Equal(
+            [0, 1],
+            terminal[0].Observation.Events.Select(item => item.PartOrder));
+        Assert.Equal(
+            ["First user part.", "Second user part."],
+            terminal[0].Observation.Events.Select(
+                item => item.Payload.GetProperty("text").GetString()));
+
+        Assert.Equal("annotation", terminal[1].Observation.Events[0].Kind);
+        Assert.Equal("harness", terminal[1].Observation.Events[0].Actor);
+        Assert.Equal("view:user_message", terminal[1].Observation.Events[0].PartKey);
+        Assert.Equal(
+            "user_message",
+            terminal[1].Observation.Events[0].Payload.GetProperty("view").GetString());
+
+        Assert.Equal("developer", terminal[2].Observation.Events[0].Actor);
+        Assert.Equal(
+            "Developer instruction.",
+            terminal[2].Observation.Events[0].Payload.GetProperty("text").GetString());
+        Assert.Equal("system", terminal[3].Observation.Events[0].Actor);
+        Assert.Equal(
+            "System instruction.",
+            terminal[3].Observation.Events[0].Payload.GetProperty("text").GetString());
+
+        Assert.Equal(
+            ["assistant", "assistant"],
+            terminal[4].Observation.Events.Select(item => item.Actor));
+        Assert.Equal(
+            ["content/0:message", "content/1:message"],
+            terminal[4].Observation.Events.Select(item => item.PartKey));
+        Assert.Equal(
+            [0, 1],
+            terminal[4].Observation.Events.Select(item => item.PartOrder));
+        Assert.Equal("annotation", terminal[5].Observation.Events[0].Kind);
+        Assert.Equal("view:agent_message", terminal[5].Observation.Events[0].PartKey);
+
+        Assert.True(
+            terminal[0].Observation.SourcePayload
+                .GetProperty("additiveMessageFixtureField").GetProperty("retained").GetBoolean());
+        Assert.Equal(
+            "AKIA" + "SYNTHETICFIXTURE",
+            terminal[0].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("content")[0].GetProperty("futureContentField").GetString());
+        Assert.Equal(
+            "retained",
+            terminal[3].Observation.SourcePayload.GetProperty("payload")
+                .GetProperty("futureMessageField").GetString());
+        Assert.False(
+            terminal[3].Observation.Events[0].Payload.TryGetProperty(
+                "futureMessageField", out _));
+
+        string first = JsonSerializer.Serialize(
+            terminal.Select(outcome => outcome.Observation.Events), WebJson);
+        string retry = JsonSerializer.Serialize(
+            source.Select(adapter.Adapt)
+                .Cast<CaptureSourcePositionOutcome.Terminal>()
+                .Select(outcome => outcome.Observation.Events),
+            WebJson);
+        Assert.Equal(first, retry);
+    }
+
+    [Fact]
     public async Task CodexAndClaudeFixturesSatisfyTheSameAdapterContract()
     {
         var cases = new[]
@@ -277,10 +649,13 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         }
     }
 
-    private static TrustedSourceObservation Source(string json, bool isTerminal) =>
+    private static TrustedSourceObservation Source(
+        string json,
+        bool isTerminal,
+        long sourcePosition = 0) =>
         new(
             "synthetic-source-session",
-            SourcePosition: 0,
+            sourcePosition,
             new CaptureSourceLocator.NativeId("synthetic-native-record"),
             CaptureSourceMaterialKind.PersistedRecord,
             JsonDocument.Parse(json).RootElement.Clone(),

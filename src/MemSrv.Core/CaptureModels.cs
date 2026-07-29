@@ -246,12 +246,22 @@ public sealed record CaptureObservationCommand(
                 "sourceSessionId must match sourceIdentity.externalSessionId when both are supplied.");
         }
 
+        CaptureSourceIdentity sourceIdentity = request.SourceIdentity
+            ?? new CaptureSourceIdentity(request.SourceSessionId ?? "");
+        CaptureLedger.Require(
+            sourceIdentity.ExternalSessionId,
+            "sourceIdentity.externalSessionId");
+        if (sourceIdentity.ChildId is not null)
+        {
+            CaptureLedger.Require(sourceIdentity.ChildId, "sourceIdentity.childId");
+        }
+        CaptureSourceLocator locator = CaptureSourceLocator.Parse(request.Locator);
+
         return new(
             request.ContractVersion,
-            request.SourceIdentity
-                ?? new CaptureSourceIdentity(request.SourceSessionId ?? ""),
+            sourceIdentity,
             request.SourcePosition,
-            CaptureSourceLocator.Parse(request.Locator),
+            locator,
             request.SourceTimestamp,
             request.Source,
             request.Adapter,

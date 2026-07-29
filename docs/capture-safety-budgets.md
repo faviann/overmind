@@ -44,6 +44,15 @@ are neither truncated nor replaced by unkeyed content fingerprints.
 Operational scanner failures while processing either representation still
 persist nothing and do not advance the checkpoint.
 
+Before either fidelity cap is applied, JSON byte measurement streams into a
+discarding counter rather than creating a whole-original serialized string.
+The counter checks the fixed published `MaxScanTime` deadline as serialization
+progresses; deadline exhaustion is an operational fail-closed outcome, records
+no invented original byte count, and occurs before claim or append. Only an
+original proven within its effective cap is materialized. An over-limit
+observation materializes only its compact omission, while ingestion streams
+the original retry-signature representation directly into the keyed hash.
+
 ### `MaxDecoderCandidateLength` is an accepted residual risk
 
 `MaxDecoderCandidateLength` is deliberately **not** a fail-closed budget, and it
@@ -140,7 +149,9 @@ How each default follows from those numbers:
 - **`MaxScanTime` = 30 s.** A leaf at the 64 MiB limit costs 2.3 s warm and up
   to 3.8 s cold in Release. Thirty seconds leaves roughly an 8× margin for a
   Debug build, a loaded host, and four concurrent test shards, while still
-  bounding the worst case.
+  bounding the worst case. The same fixed deadline governs streaming fidelity
+  byte counting and keyed-signature serialization; unlike scanner budgets, it
+  is not caller-injectable through a smaller fidelity cap.
 - **`MaxRuleTime` = 5 s.** The slowest single matcher over a limit-sized leaf is
   Base64 candidate extraction, measured at 687–775 ms since the alphabet was
   widened to base64url. Five seconds is still a ~6× margin. A shorter timeout —

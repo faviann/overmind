@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -491,6 +492,79 @@ public sealed class CaptureRuntimeStateTests
         {
             Directory.Delete(directory, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task ConflictingDualIdentityBeyondTransportLimitClaimsNothing()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-conflicting-identity-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"synthetic"}""" + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            ArgumentException failure =
+                await Assert.ThrowsAsync<ArgumentException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new ConflictingDualIdentityAdapter(),
+                        transcript,
+                        "transport-identity",
+                        state,
+                        new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                        maxTransportBytes: 512));
+
+            Assert.Contains(
+                "sourceSessionId must match sourceIdentity.externalSessionId",
+                failure.Message,
+                StringComparison.Ordinal);
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PathologicalTransportInputIsCountedWithBoundedAllocationAndTime()
+    {
+        JsonElement smallPayload =
+            JsonSerializer.SerializeToElement(new { padding = "warm" });
+        CaptureObservationRequest warm =
+            ResourceBoundObservation(smallPayload, "resource-bound-warm");
+        CaptureFidelityPolicy.SerializeForTransport(warm, 1_024);
+
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            padding = new string('p', 8 * 1024 * 1024)
+        });
+        CaptureObservationRequest pathological =
+            ResourceBoundObservation(payload, "resource-bound-pathological");
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var clock = Stopwatch.StartNew();
+
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+            CaptureFidelityPolicy.SerializeForTransport(pathological, 1_024);
+
+        clock.Stop();
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(bounded.WasOmitted);
+        Assert.True(
+            allocated < 4L * 1024 * 1024,
+            $"Streaming count allocated {allocated:N0} bytes; the bounded " +
+            "counting path should not materialize the 16 MiB original JSON.");
+        Assert.True(
+            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            $"Streaming count took {clock.Elapsed}; the published deadline is " +
+            $"{SafetyBudgets.Default.MaxScanTime}.");
     }
 
     [Theory]
@@ -2382,4 +2456,75 @@ public sealed class CaptureRuntimeStateTests
                     SourceIdentity: new CaptureSourceIdentity(externalSessionId)));
         }
     }
+
+    private sealed class ConflictingDualIdentityAdapter : ICaptureSourceAdapter
+    {
+        public string Harness => "codex";
+        public CaptureAdapter Identity => new("test", "1");
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            JsonElement payload = JsonSerializer.SerializeToElement(new
+            {
+                padding = new string('p', 4_096)
+            });
+            var locator = Assert.IsType<CaptureSourceLocator.ByteRange>(source.Locator);
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    "legacy-identity",
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        locator.Kind,
+                        null,
+                        locator.Offset,
+                        locator.Length,
+                        locator.SourceContentSha256),
+                    null,
+                    new CaptureSource(Harness, null, null, null, null, null),
+                    Identity,
+                    payload,
+                    [
+                        new CaptureEvent(
+                            "synthetic/0",
+                            0,
+                            "opaque",
+                            "harness",
+                            payload,
+                            null,
+                            [])
+                    ],
+                    SourceIdentity: new CaptureSourceIdentity("current-identity")));
+        }
+    }
+
+    private static CaptureObservationRequest ResourceBoundObservation(
+        JsonElement payload,
+        string identity) =>
+        new(
+            1,
+            identity,
+            0,
+            new CaptureLocator(
+                "native_id",
+                "resource-bound-locator",
+                null,
+                null,
+                null),
+            null,
+            new CaptureSource("codex", null, null, null, null, null),
+            new CaptureAdapter("test", "1"),
+            payload,
+            [
+                new CaptureEvent(
+                    "synthetic/0",
+                    0,
+                    "opaque",
+                    "harness",
+                    payload,
+                    null,
+                    [])
+            ],
+            SourceIdentity: new CaptureSourceIdentity(identity));
 }

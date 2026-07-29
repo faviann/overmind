@@ -81,7 +81,16 @@ those mechanisms.
 The transport-omission mechanism is also authorized at the
 `CodexCaptureClaimer` durable-state and `DisabledCaptureRuntime` delivery module
 seams. A test may inject a smaller positive transport bound to make omission
-and mandatory-identity refusal mechanically observable, but the injected value
+and mandatory-identity refusal mechanically observable, including refusal of a
+conflicting legacy/current identity before durable claim. `CaptureFidelityPolicy`
+is the authorized mechanism seam for proving that pathological over-limit JSON
+is streaming-counted with bounded additional allocation and elapsed time under
+the fixed published `MaxScanTime`; `CaptureIngestion` is the corresponding seam
+for proving content compaction and keyed-signature streaming before append.
+Because the production deadline is deliberately not caller-injectable and the
+serializer has no honest deterministic clock seam, tests exercise elapsed time
+under the production deadline rather than adding test-only deadline machinery.
+The injected value
 can only tighten the fixed 1,000,000-byte production bound; a larger request
 must never loosen it. These focused tests do not replace packaged-apphost proof:
 the real tracer must retain an observation whose adapted request is exactly

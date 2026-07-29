@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 using Dapper;
 using Npgsql;
 
@@ -36,7 +37,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         long originalByteCount = bounded.OriginalByteCount;
         command = bounded.Observation;
 
-        string signatureContent = JsonSerializer.Serialize(
+        string contentSignature = Sign(
             new CaptureSignatureContent(
                 originalCommand.ContractVersion,
                 originalCommand.SourceIdentity,
@@ -47,8 +48,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 originalCommand.SourcePayload,
                 originalCommand.Events,
                 originalCommand.RouteEvidence),
-            CaptureLedger.JsonOptions);
-        string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
+            binding.ContentSignatureKey);
         bool observationWasOmitted = bounded.WasOmitted;
         // The fidelity policy already proves the chosen serialized
         // representation fits. The gate independently enforces its configured
@@ -417,10 +417,15 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         }
     }
 
-    private static string Sign(string value, byte[] key)
+    private static string Sign<T>(T value, byte[] key)
     {
-        using var hmac = new HMACSHA256(key);
-        return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+        using var hash = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, key);
+        using var stream = new HashingSerializationStream(
+            hash,
+            SafetyBudgets.Default.MaxScanTime);
+        JsonSerializer.Serialize(stream, value, CaptureLedger.JsonOptions);
+        stream.AssertWithinDeadline();
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
     // For every record kind whose derived events a version bump left alone,
@@ -449,7 +454,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         foreach (string version in PreUpgradeCodexAdapterVersions)
         {
             var legacyAdapter = command.Adapter with { Version = version };
-            string currentIdentityLegacy = JsonSerializer.Serialize(
+            signatures.Add(Sign(
                 new CaptureSignatureContent(
                     command.ContractVersion,
                     command.SourceIdentity,
@@ -460,8 +465,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                     command.SourcePayload,
                     command.Events,
                     command.RouteEvidence),
-                CaptureLedger.JsonOptions);
-            string historicalLegacy = JsonSerializer.Serialize(
+                key));
+            signatures.Add(Sign(
                 new LegacyCaptureSignatureContent(
                     command.ContractVersion,
                     legacySourceSessionId,
@@ -472,12 +477,77 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                     command.SourcePayload,
                     command.Events,
                     command.RouteEvidence),
-                CaptureLedger.JsonOptions);
-            signatures.Add(Sign(currentIdentityLegacy, key));
-            signatures.Add(Sign(historicalLegacy, key));
+                key));
         }
 
         return signatures;
+    }
+
+    private sealed class HashingSerializationStream(
+        IncrementalHash hash,
+        TimeSpan deadline) : Stream
+    {
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private long _position;
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _position;
+        public override long Position
+        {
+            get => _position;
+            set => throw new NotSupportedException();
+        }
+
+        public void AssertWithinDeadline()
+        {
+            if (_clock.Elapsed > deadline)
+            {
+                throw new SafetyScanException(
+                    "capture serialization exceeded the governed " +
+                    $"{deadline.TotalSeconds:0}-second deadline");
+            }
+        }
+
+        public override void Flush() => AssertWithinDeadline();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            ArgumentNullException.ThrowIfNull(buffer);
+            ArgumentOutOfRangeException.ThrowIfNegative(offset);
+            ArgumentOutOfRangeException.ThrowIfNegative(count);
+            if (offset > buffer.Length - count)
+            {
+                throw new ArgumentException("The buffer range is invalid.");
+            }
+            Add(buffer.AsSpan(offset, count));
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer) => Add(buffer);
+
+        public override void WriteByte(byte value)
+        {
+            Span<byte> buffer = stackalloc byte[1];
+            buffer[0] = value;
+            Add(buffer);
+        }
+
+        private void Add(ReadOnlySpan<byte> buffer)
+        {
+            AssertWithinDeadline();
+            hash.AppendData(buffer);
+            _position = checked(_position + buffer.Length);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
     }
 
     private static string CanonicalSessionId(

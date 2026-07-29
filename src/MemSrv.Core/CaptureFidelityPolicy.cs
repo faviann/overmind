@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -30,10 +31,15 @@ public static class CaptureFidelityPolicy
         int effectiveBound = Math.Min(
             maxTransportBytes,
             ProductionTransportBytes);
+        CaptureObservationCommand validated =
+            CaptureObservationCommand.FromRequest(observation);
         return SerializeWithinLimit(
             observation,
             effectiveBound,
-            OmitForTransport,
+            (request, originalByteCount) => OmitForTransport(
+                request,
+                originalByteCount,
+                validated.SourceIdentity),
             omittedByteCount => new InvalidOperationException(
                 "The required capture source identity and locator cannot fit " +
                 $"within the {effectiveBound}-byte transport limit " +
@@ -84,10 +90,9 @@ public static class CaptureFidelityPolicy
 
     private static CaptureObservationRequest OmitForTransport(
         CaptureObservationRequest observation,
-        long originalByteCount)
+        long originalByteCount,
+        CaptureSourceIdentity canonicalIdentity)
     {
-        CaptureSourceIdentity canonicalIdentity = observation.SourceIdentity
-            ?? new CaptureSourceIdentity(observation.SourceSessionId ?? "");
         JsonElement provenance = Provenance(
             TransportLimitReason,
             originalByteCount,
@@ -113,12 +118,12 @@ public static class CaptureFidelityPolicy
         Func<T, long, T> omit,
         Func<long, Exception> compactOverflow)
     {
-        string originalJson = JsonSerializer.Serialize(
-            observation,
-            CaptureLedger.JsonOptions);
-        long originalByteCount = Encoding.UTF8.GetByteCount(originalJson);
+        long originalByteCount = CountSerializedBytes(observation);
         if (originalByteCount <= byteLimit)
         {
+            string originalJson = JsonSerializer.Serialize(
+                observation,
+                CaptureLedger.JsonOptions);
             return new(
                 observation,
                 originalJson,
@@ -141,6 +146,18 @@ public static class CaptureFidelityPolicy
             omittedJson,
             originalByteCount,
             WasOmitted: true);
+    }
+
+    private static long CountSerializedBytes<T>(T observation)
+    {
+        using var counter = new SerializationCountingStream(
+            SafetyBudgets.Default.MaxScanTime);
+        JsonSerializer.Serialize(
+            counter,
+            observation,
+            CaptureLedger.JsonOptions);
+        counter.AssertWithinDeadline();
+        return counter.BytesWritten;
     }
 
     private static JsonElement Provenance(
@@ -185,6 +202,66 @@ public static class CaptureFidelityPolicy
                 CaptureLedger.JsonOptions),
             null,
             []);
+
+    private sealed class SerializationCountingStream(TimeSpan deadline) : Stream
+    {
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+
+        public long BytesWritten { get; private set; }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => BytesWritten;
+        public override long Position
+        {
+            get => BytesWritten;
+            set => throw new NotSupportedException();
+        }
+
+        public void AssertWithinDeadline()
+        {
+            if (_clock.Elapsed > deadline)
+            {
+                throw new SafetyScanException(
+                    "capture serialization exceeded the governed " +
+                    $"{deadline.TotalSeconds:0}-second deadline");
+            }
+        }
+
+        public override void Flush() => AssertWithinDeadline();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            ArgumentNullException.ThrowIfNull(buffer);
+            ArgumentOutOfRangeException.ThrowIfNegative(offset);
+            ArgumentOutOfRangeException.ThrowIfNegative(count);
+            if (offset > buffer.Length - count)
+            {
+                throw new ArgumentException("The buffer range is invalid.");
+            }
+            Add(count);
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer) => Add(buffer.Length);
+
+        public override void WriteByte(byte value) => Add(1);
+
+        private void Add(int count)
+        {
+            AssertWithinDeadline();
+            BytesWritten = checked(BytesWritten + count);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+    }
 }
 
 public sealed record BoundedCaptureRepresentation<T>(

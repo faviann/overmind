@@ -176,6 +176,92 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task OversizedContentIsCompactedAndSignedWithoutWholeOriginalAllocation()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"content-resource-bound-{Guid.NewGuid():N}", captureKey);
+        var binding = await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey);
+        Assert.NotNull(binding);
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            padding = new string('p', 4 * 1024 * 1024)
+        });
+        var command = CaptureObservationCommand.FromRequest(
+            new CaptureObservationRequest(
+                1,
+                sourceSessionId,
+                0,
+                new CaptureLocator(
+                    "native_id",
+                    $"content-resource-bound-{Guid.NewGuid():N}",
+                    null,
+                    null,
+                    null),
+                null,
+                new CaptureSource("codex", null, null, null, null, null),
+                new CaptureAdapter("test", "1"),
+                payload,
+                [
+                    new CaptureEvent(
+                        "synthetic/0",
+                        0,
+                        "opaque",
+                        "harness",
+                        payload,
+                        null,
+                        [])
+                ],
+                SourceIdentity: new CaptureSourceIdentity(sourceSessionId)));
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxObservationBytes = 2_048 }));
+        JsonElement warmPayload =
+            JsonSerializer.SerializeToElement(new { padding = "warm" });
+        string warmIdentity = UniqueSession();
+        await ingestion.ImportAsync(
+            binding!,
+            command with
+            {
+                SourceIdentity = new CaptureSourceIdentity(warmIdentity),
+                Locator = new CaptureSourceLocator.NativeId(
+                    $"content-resource-warm-{Guid.NewGuid():N}"),
+                SourcePayload = warmPayload,
+                Events =
+                [
+                    new CaptureEvent(
+                        "synthetic/0",
+                        0,
+                        "opaque",
+                        "harness",
+                        warmPayload,
+                        null,
+                        [])
+                ]
+            });
+        GC.Collect();
+        long before = GC.GetTotalAllocatedBytes(precise: true);
+
+        CaptureImportReceipt receipt = await ingestion.ImportAsync(binding!, command);
+
+        long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        Assert.Equal("new", receipt.Status);
+        Assert.Equal(
+            CaptureFidelityPolicy.ContentLimitReason,
+            receipt.Observation.SafeSourcePayload
+                .GetProperty("omission")
+                .GetProperty("reason")
+                .GetString());
+        Assert.True(
+            allocated < 12L * 1024 * 1024,
+            $"Bounded content ingestion allocated {allocated:N0} bytes; it " +
+            "should not materialize the roughly 8 MiB original JSON for signing.");
+    }
+
+    [Fact]
     public async Task RetainedMetadataBeyondInjectedContentLimitAdvancesAsABoundedOmission()
     {
         string captureKey = CaptureCredential();

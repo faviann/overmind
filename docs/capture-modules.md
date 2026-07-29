@@ -33,17 +33,25 @@ both project into canonical facts.
 ## Invariants each interface hides
 
 **`CaptureFidelityPolicy`** — owns the complete deterministic serialization
-boundary: serialize the original, count its UTF-8 bytes, retain it or replace
-it with the versioned whole-observation omission, serialize that result, and
-refuse if the compact representation itself does not fit. Callers receive the
-chosen value and its exact serialized representation as one outcome; they do
-not repeat byte counting, reconstruct policy output, or infer omission from
-object identity. An injected transport bound can only tighten the fixed
+boundary: stream the original serialization through a byte-counting discard
+sink, retain and materialize it only after proving it fits or replace it with
+the versioned whole-observation omission, serialize that result, and refuse if
+the compact representation itself does not fit. Counting uses the published
+`MaxScanTime` as a fixed deadline and fails closed without reporting a guessed
+original byte count if serialization cannot finish. Callers receive the chosen
+value and its exact serialized representation as one outcome; they do not
+repeat byte counting, reconstruct policy output, or infer omission from object
+identity. Content-signature JSON likewise streams directly into its keyed hash
+instead of materializing the original. An injected transport bound can only tighten the fixed
 1,000,000-byte production bound and must be positive. Transport compaction
-canonicalizes the supported legacy `sourceSessionId` shape into top-level
-`sourceIdentity` before clearing the legacy field, and repeats that same
-identity in omission provenance. Mandatory source identity and locator values
-are never truncated or fingerprinted to make either bound fit.
+first runs the original request through
+`CaptureObservationCommand.FromRequest`: conflicting dual identity, a missing
+mandatory identity, and an invalid locator are refused before counting,
+compaction, claim, or delivery. A supported legacy-only `sourceSessionId`
+canonicalizes into top-level `sourceIdentity` in the omission before the legacy
+field is cleared, and that same identity is repeated in omission provenance.
+Mandatory source identity and locator values are never truncated or
+fingerprinted to make either bound fit.
 
 **`NeverStoreGate`** — the single governed policy point every write path
 crosses, and the only type that knows rules exist. It hides the rule-set schema

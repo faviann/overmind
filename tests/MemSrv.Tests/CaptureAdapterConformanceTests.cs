@@ -8,6 +8,67 @@ namespace MemSrv.Tests;
 public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 {
     [Fact]
+    public void CodexValidUnsupportedJsonShapesRemainDeterministicOpaqueEvidence()
+    {
+        string[] records =
+        [
+            "null",
+            "[]",
+            """["future"]""",
+            "\"future\"",
+            "42",
+            "true",
+            """{"payload":null}""",
+            """{"payload":[]}""",
+            """{"payload":"future"}""",
+            """{"payload":42}""",
+            """{"payload":true}"""
+        ];
+        JsonValueKind[] expectedEvidenceKinds =
+        [
+            JsonValueKind.Null,
+            JsonValueKind.Array,
+            JsonValueKind.Array,
+            JsonValueKind.String,
+            JsonValueKind.Number,
+            JsonValueKind.True,
+            JsonValueKind.Null,
+            JsonValueKind.Array,
+            JsonValueKind.String,
+            JsonValueKind.Number,
+            JsonValueKind.True
+        ];
+        var adapter = new CodexJsonlAdapter();
+
+        for (int index = 0; index < records.Length; index++)
+        {
+            var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(Source(records[index], isTerminal: true)));
+            CaptureEvent evidence = Assert.Single(terminal.Observation.Events);
+
+            Assert.Equal("record:opaque", evidence.PartKey);
+            Assert.Equal(0, evidence.PartOrder);
+            Assert.Equal("opaque", evidence.Kind);
+            Assert.Equal("unknown", evidence.Actor);
+            Assert.Null(terminal.Observation.Source.RecordType);
+            Assert.Null(terminal.Observation.Source.Model);
+            Assert.Null(terminal.Observation.Source.Provider);
+            Assert.Equal(
+                JsonDocument.Parse(records[index]).RootElement.GetRawText(),
+                terminal.Observation.SourcePayload.GetRawText());
+            Assert.Equal(
+                expectedEvidenceKinds[index],
+                evidence.Payload.GetProperty("source").ValueKind);
+
+            var retry = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(Source(records[index], isTerminal: true)));
+            Assert.Equal(
+                JsonSerializer.Serialize(terminal.Observation, WebJson),
+                JsonSerializer.Serialize(retry.Observation, WebJson));
+        }
+    }
+
+    [Fact]
     public void CodexNominalTextPartsWithoutExplicitStringTextRemainOpaqueEvidence()
     {
         const string record = """
@@ -169,7 +230,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                     adapter.Adapt(Source(record, isTerminal: true)));
                 CaptureEvent evidence = Assert.Single(terminal.Observation.Events);
 
-                Assert.Equal("opaque/0", evidence.PartKey);
+                Assert.Equal($"view:{view}:opaque", evidence.PartKey);
                 Assert.Equal(0, evidence.PartOrder);
                 Assert.Equal("opaque", evidence.Kind);
                 Assert.Equal("unknown", evidence.Actor);
@@ -219,6 +280,14 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
                 Assert.Equal(
                     JsonSerializer.Serialize(terminal.Observation.Events, WebJson),
                     JsonSerializer.Serialize(retry.Observation.Events, WebJson));
+
+                var moved = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(Source(record, isTerminal: true, sourcePosition: 37)));
+                Assert.Equal(37, moved.SourcePosition);
+                Assert.Equal(37, moved.Observation.SourcePosition);
+                Assert.Equal(
+                    JsonSerializer.Serialize(terminal.Observation.Events, WebJson),
+                    JsonSerializer.Serialize(moved.Observation.Events, WebJson));
             }
         }
     }
@@ -580,10 +649,13 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         }
     }
 
-    private static TrustedSourceObservation Source(string json, bool isTerminal) =>
+    private static TrustedSourceObservation Source(
+        string json,
+        bool isTerminal,
+        long sourcePosition = 0) =>
         new(
             "synthetic-source-session",
-            SourcePosition: 0,
+            sourcePosition,
             new CaptureSourceLocator.NativeId("synthetic-native-record"),
             CaptureSourceMaterialKind.PersistedRecord,
             JsonDocument.Parse(json).RootElement.Clone(),

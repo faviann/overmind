@@ -834,6 +834,16 @@ public sealed class CaptureTests : HttpSeamTestBase
                 accepted[0].GetProperty("observation").GetProperty("safeSourcePayload")
                     .GetProperty("additiveMessageFixtureField")
                     .GetProperty("retained").GetBoolean());
+            Assert.All(accepted, receipt =>
+            {
+                JsonElement observation = receipt.GetProperty("observation");
+                Assert.Equal(
+                    "0.144.synthetic",
+                    observation.GetProperty("source").GetProperty("harnessVersion").GetString());
+                Assert.Equal(
+                    "2",
+                    observation.GetProperty("adapter").GetProperty("version").GetString());
+            });
 
             JsonElement[] userEnvelopes = await ReadOperatorReceiptAsync(accepted[0]);
             JsonElement userViewEnvelope = Assert.Single(
@@ -843,6 +853,25 @@ public sealed class CaptureTests : HttpSeamTestBase
             JsonElement[] assistantEnvelopes = await ReadOperatorReceiptAsync(accepted[4]);
             JsonElement agentViewEnvelope = Assert.Single(
                 await ReadOperatorReceiptAsync(accepted[5]));
+            JsonElement[] operatorEnvelopes =
+            [
+                .. userEnvelopes,
+                userViewEnvelope,
+                .. developerEnvelopes,
+                .. systemEnvelopes,
+                .. assistantEnvelopes,
+                agentViewEnvelope
+            ];
+            Assert.All(operatorEnvelopes, envelope =>
+            {
+                JsonElement observation = envelope.GetProperty("observation");
+                Assert.Equal(
+                    "0.144.synthetic",
+                    observation.GetProperty("source").GetProperty("harnessVersion").GetString());
+                Assert.Equal(
+                    "2",
+                    observation.GetProperty("adapter").GetProperty("version").GetString());
+            });
 
             AssertViewEnvelope(
                 userViewEnvelope,

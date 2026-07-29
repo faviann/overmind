@@ -21,30 +21,44 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         }
 
         JsonElement record = source.SourcePayload;
-        string? recordType = JsonAdapterHelpers.NullableString(record, "type");
-        string? harnessVersion =
-            JsonAdapterHelpers.NullableString(record, "cli_version")
-            ?? JsonAdapterHelpers.NullableString(record, "version");
-        string? model = JsonAdapterHelpers.NullableString(record, "model");
-        string? provider =
-            JsonAdapterHelpers.NullableString(record, "model_provider")
-            ?? JsonAdapterHelpers.NullableString(record, "provider");
-        JsonElement payload = record.TryGetProperty("payload", out var nested)
-            ? nested
-            : record;
-        model ??= JsonAdapterHelpers.NullableString(payload, "model");
-        provider ??=
-            JsonAdapterHelpers.NullableString(payload, "model_provider")
-            ?? JsonAdapterHelpers.NullableString(payload, "provider");
+        bool isObjectRecord = record.ValueKind == JsonValueKind.Object;
+        string? recordType = isObjectRecord
+            ? JsonAdapterHelpers.NullableString(record, "type")
+            : null;
+        string? harnessVersion = isObjectRecord
+            ? JsonAdapterHelpers.NullableString(record, "cli_version")
+                ?? JsonAdapterHelpers.NullableString(record, "version")
+            : null;
+        string? model = isObjectRecord
+            ? JsonAdapterHelpers.NullableString(record, "model")
+            : null;
+        string? provider = isObjectRecord
+            ? JsonAdapterHelpers.NullableString(record, "model_provider")
+                ?? JsonAdapterHelpers.NullableString(record, "provider")
+            : null;
+        JsonElement nested = default;
+        bool hasPayload = isObjectRecord
+            && record.TryGetProperty("payload", out nested);
+        JsonElement payload = hasPayload ? nested : record;
+        bool isUnsupportedShape = !isObjectRecord
+            || (hasPayload && payload.ValueKind != JsonValueKind.Object);
+        if (!isUnsupportedShape)
+        {
+            model ??= JsonAdapterHelpers.NullableString(payload, "model");
+            provider ??=
+                JsonAdapterHelpers.NullableString(payload, "model_provider")
+                ?? JsonAdapterHelpers.NullableString(payload, "provider");
+        }
 
-        IReadOnlyList<CaptureEvent> events = Interpret(
-            recordType, payload, source.SourcePosition);
+        IReadOnlyList<CaptureEvent> events = isUnsupportedShape
+            ? [Opaque(recordType, null, payload, "record:opaque")]
+            : Interpret(recordType, payload, source.SourcePosition);
         var request = new CaptureObservationRequest(
             ContractVersion: 1,
             source.SourceSessionId,
             source.SourcePosition,
             ToWireLocator(source.Locator),
-            JsonAdapterHelpers.SourceTimestamp(record),
+            isObjectRecord ? JsonAdapterHelpers.SourceTimestamp(record) : null,
             new CaptureSource(
                 Harness,
                 harnessVersion,
@@ -85,7 +99,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             return payloadType switch
             {
                 "user_message" or "agent_message" =>
-                    [MessageView(payload, payloadType, position)],
+                    [MessageView(payload, payloadType)],
                 "error" or "turn_aborted" => [Error(payload, position)],
                 "subagent_start" => [Subagent(payload, position)],
                 _ => [Opaque(recordType, payloadType, payload, position)]
@@ -165,12 +179,12 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             : events;
     }
 
-    private static CaptureEvent MessageView(JsonElement payload, string view, long position)
+    private static CaptureEvent MessageView(JsonElement payload, string view)
     {
         if (!payload.TryGetProperty("message", out var message)
             || message.ValueKind != JsonValueKind.String)
         {
-            return Opaque("event_msg", view, payload, position);
+            return Opaque("event_msg", view, payload, $"view:{view}:opaque");
         }
 
         return Event(
@@ -277,8 +291,12 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 
     private static CaptureEvent Opaque(
         string? recordType, string? payloadType, JsonElement payload, long position) =>
+        Opaque(recordType, payloadType, payload, $"opaque/{position}");
+
+    private static CaptureEvent Opaque(
+        string? recordType, string? payloadType, JsonElement payload, string partKey) =>
         Event(
-            $"opaque/{position}",
+            partKey,
             "opaque",
             "unknown",
             new { recordType, payloadType, source = payload.Clone() });

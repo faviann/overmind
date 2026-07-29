@@ -142,9 +142,25 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         string partType,
         List<CaptureEvent> events)
     {
-        if (!payload.TryGetProperty(propertyName, out JsonElement parts)
-            || parts.ValueKind != JsonValueKind.Array)
+        if (!payload.TryGetProperty(propertyName, out JsonElement parts))
         {
+            return;
+        }
+
+        if (parts.ValueKind != JsonValueKind.Array)
+        {
+            events.Add(Event(
+                $"{propertyName}:opaque",
+                "opaque",
+                "unknown",
+                new
+                {
+                    contentType = parts.ValueKind == JsonValueKind.Object
+                        ? JsonAdapterHelpers.NullableString(parts, "type")
+                        : null,
+                    source = parts.Clone()
+                },
+                partOrder: events.Count));
             return;
         }
 

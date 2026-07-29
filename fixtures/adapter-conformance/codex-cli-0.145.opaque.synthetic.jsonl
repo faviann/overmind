@@ -1,2 +1,2 @@
-{"timestamp":"2026-06-04T10:00:01.000Z","cli_version":"0.145.synthetic","type":"future_rollout_record","payload":{"type":"future_payload","syntheticValue":"preserve me","sensitiveEvidence":"AKIA\u0053YNTHETICFIXTURE"},"futureTopLevelField":{"retained":true}}
+{"timestamp":"2026-06-04T10:00:01.000Z","cli_version":"0.145.synthetic","type":"future_rollout_record","payload":{"type":"future_payload","syntheticValue":"preserve me","sensitiveEvidence":"INERT_EXPLICIT_PLACEHOLDER"},"futureTopLevelField":{"retained":true}}
 {"cli_version":"0.145.synthetic","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"future_content_block","syntheticText":"not canonical text","nested":{"retained":true}}]}}

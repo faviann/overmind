@@ -966,7 +966,9 @@ public sealed class CaptureTests : HttpSeamTestBase
     [Fact]
     public async Task PackagedTracerAndOperatorPreserveCodexReasoningOpaqueAndAnnotationEvidence()
     {
-        const string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
+        const string inertFixturePlaceholder = "INERT_EXPLICIT_PLACEHOLDER";
+        string seededSyntheticSecret = string.Concat(
+            "AK", "IA", "SYNTHETIC", "FIXTURE");
         string captureKey = CaptureCredential();
         await EnrollAsync($"codex-additive-evidence-{Guid.NewGuid():N}", captureKey);
         string directory = Path.Combine(
@@ -985,7 +987,11 @@ public sealed class CaptureTests : HttpSeamTestBase
         await File.WriteAllLinesAsync(
             fixturePath,
             fixtureFamilies.SelectMany(
-                name => File.ReadAllLines(Path.Combine(fixtureRoot, name))));
+                name => File.ReadAllLines(Path.Combine(fixtureRoot, name)))
+                .Select(line => line.Replace(
+                    inertFixturePlaceholder,
+                    seededSyntheticSecret,
+                    StringComparison.Ordinal)));
 
         try
         {
@@ -1001,7 +1007,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
                 });
             Task<string> stderr = process.StandardError.ReadToEndAsync();
-            var receipts = new JsonElement[6];
+            var receipts = new JsonElement[7];
             try
             {
                 for (int index = 0; index < receipts.Length; index++)
@@ -1039,10 +1045,23 @@ public sealed class CaptureTests : HttpSeamTestBase
                 Assert.Single(receipts[1].GetProperty("events").EnumerateArray())
                     .GetProperty("kind").GetString());
             Assert.Equal(
+                ["reasoning", "opaque"],
+                receipts[2].GetProperty("events").EnumerateArray()
+                    .Select(item => item.GetProperty("kind").GetString()));
+            Assert.Equal(
                 ["opaque", "opaque", "annotation", "annotation"],
-                receipts.Skip(2).Select(receipt =>
+                receipts.Skip(3).Select(receipt =>
                     Assert.Single(receipt.GetProperty("events").EnumerateArray())
                         .GetProperty("kind").GetString()));
+            Assert.Equal(
+                "[REDACTED:aws-access-key-id]",
+                receipts[3].GetProperty("observation").GetProperty("safeSourcePayload")
+                    .GetProperty("payload").GetProperty("sensitiveEvidence").GetString());
+            Assert.Equal(
+                "[REDACTED:aws-access-key-id]",
+                Assert.Single(receipts[3].GetProperty("events").EnumerateArray())
+                    .GetProperty("payload").GetProperty("source").GetProperty("payload")
+                    .GetProperty("sensitiveEvidence").GetString());
 
             var envelopes = new List<JsonElement[]>();
             foreach (JsonElement receipt in receipts)
@@ -1073,10 +1092,27 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "unknown",
                     envelope.GetProperty("event").GetProperty("actor").GetString());
                 JsonElement eventPayload = envelope.GetProperty("event").GetProperty("payload");
+                Assert.Equal(
+                    ["text"],
+                    eventPayload.EnumerateObject().Select(property => property.Name));
                 Assert.False(eventPayload.TryGetProperty("encrypted_content", out _));
                 Assert.False(eventPayload.TryGetProperty("signature", out _));
+                Assert.False(eventPayload.TryGetProperty("futureSummaryField", out _));
+                Assert.False(eventPayload.TryGetProperty("futureContentField", out _));
+                Assert.False(eventPayload.TryGetProperty("futureReasoningField", out _));
                 JsonElement safeSourcePayload = envelope.GetProperty("observation")
                     .GetProperty("safeSourcePayload").GetProperty("payload");
+                Assert.Equal(
+                    "retained",
+                    safeSourcePayload.GetProperty("summary")[0]
+                        .GetProperty("futureSummaryField").GetString());
+                Assert.Equal(
+                    "retained",
+                    safeSourcePayload.GetProperty("content")[0]
+                        .GetProperty("futureContentField").GetString());
+                Assert.True(
+                    safeSourcePayload.GetProperty("futureReasoningField")
+                        .GetProperty("retained").GetBoolean());
                 Assert.Equal(
                     "synthetic-encrypted-provider-metadata",
                     safeSourcePayload.GetProperty("encrypted_content").GetString());
@@ -1121,7 +1157,36 @@ public sealed class CaptureTests : HttpSeamTestBase
                 encryptedOnlySafeSource.GetProperty("futureEncryptedField")
                     .GetProperty("retained").GetBoolean());
 
-            JsonElement unknownRecord = Assert.Single(envelopes[2]);
+            Assert.Equal(
+                ["summary/0:reasoning", "content:opaque"],
+                envelopes[2].Select(envelope =>
+                    envelope.GetProperty("event").GetProperty("partKey").GetString()));
+            JsonElement malformedReasoning = envelopes[2][0].GetProperty("event")
+                .GetProperty("payload");
+            Assert.Equal(
+                ["text"],
+                malformedReasoning.EnumerateObject().Select(property => property.Name));
+            Assert.Equal(
+                "Synthetic supported summary beside malformed content.",
+                malformedReasoning.GetProperty("text").GetString());
+            JsonElement malformedContent = envelopes[2][1].GetProperty("event")
+                .GetProperty("payload");
+            Assert.Equal(
+                "future_reasoning_container",
+                malformedContent.GetProperty("contentType").GetString());
+            Assert.Equal(
+                "future_reasoning_container",
+                malformedContent.GetProperty("source").GetProperty("type").GetString());
+            Assert.Equal(
+                "Not promoted from an unsupported container.",
+                malformedContent.GetProperty("source").GetProperty("blocks")[0]
+                    .GetProperty("text").GetString());
+            Assert.True(
+                malformedContent.GetProperty("source")
+                    .GetProperty("futureMalformedSectionField")
+                    .GetProperty("retained").GetBoolean());
+
+            JsonElement unknownRecord = Assert.Single(envelopes[3]);
             JsonElement unknownRecordSource = unknownRecord.GetProperty("event")
                 .GetProperty("payload").GetProperty("source");
             Assert.Equal(
@@ -1161,7 +1226,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 unknownRecordSafeSource.GetProperty("futureTopLevelField")
                     .GetProperty("retained").GetBoolean());
 
-            JsonElement unknownContent = Assert.Single(envelopes[3]);
+            JsonElement unknownContent = Assert.Single(envelopes[4]);
             Assert.Equal(
                 "future_content_block",
                 unknownContent.GetProperty("event").GetProperty("payload")
@@ -1181,21 +1246,21 @@ public sealed class CaptureTests : HttpSeamTestBase
 
             Assert.Equal(
                 ["view:turn_started", "view:agent_reasoning"],
-                envelopes.Skip(4).Select(items => Assert.Single(items)
+                envelopes.Skip(5).Select(items => Assert.Single(items)
                     .GetProperty("event").GetProperty("partKey").GetString()));
             Assert.All(
-                envelopes.Skip(4),
+                envelopes.Skip(5),
                 items => Assert.Equal(
                     "annotation",
                     Assert.Single(items).GetProperty("event").GetProperty("kind").GetString()));
-            JsonElement lifecycleSource = Assert.Single(envelopes[4])
+            JsonElement lifecycleSource = Assert.Single(envelopes[5])
                 .GetProperty("event").GetProperty("payload").GetProperty("source");
             Assert.Equal("synthetic-turn-1", lifecycleSource.GetProperty("turn_id").GetString());
             Assert.Equal(200000, lifecycleSource.GetProperty("context_window").GetInt32());
             Assert.True(
                 lifecycleSource.GetProperty("futureLifecycleField")
                     .GetProperty("retained").GetBoolean());
-            JsonElement reasoningViewSource = Assert.Single(envelopes[5])
+            JsonElement reasoningViewSource = Assert.Single(envelopes[6])
                 .GetProperty("event").GetProperty("payload").GetProperty("source");
             Assert.Equal(
                 "Synthetic duplicate reasoning view.",

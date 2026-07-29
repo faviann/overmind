@@ -87,6 +87,37 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             reasoning[1].Observation.Events,
             item => item.Kind == "reasoning");
 
+        Assert.Equal(
+            ["reasoning", "opaque"],
+            reasoning[2].Observation.Events.Select(item => item.Kind));
+        Assert.Equal(
+            ["summary/0:reasoning", "content:opaque"],
+            reasoning[2].Observation.Events.Select(item => item.PartKey));
+        Assert.Equal(
+            [0, 1],
+            reasoning[2].Observation.Events.Select(item => item.PartOrder));
+        Assert.Equal(
+            "Synthetic supported summary beside malformed content.",
+            reasoning[2].Observation.Events[0].Payload.GetProperty("text").GetString());
+        Assert.Equal(
+            ["text"],
+            reasoning[2].Observation.Events[0].Payload.EnumerateObject()
+                .Select(property => property.Name));
+        JsonElement malformedContent = reasoning[2].Observation.Events[1].Payload;
+        Assert.Equal(
+            "future_reasoning_container",
+            malformedContent.GetProperty("contentType").GetString());
+        Assert.Equal(
+            "future_reasoning_container",
+            malformedContent.GetProperty("source").GetProperty("type").GetString());
+        Assert.Equal(
+            "Not promoted from an unsupported container.",
+            malformedContent.GetProperty("source").GetProperty("blocks")[0]
+                .GetProperty("text").GetString());
+        Assert.True(
+            malformedContent.GetProperty("source").GetProperty("futureMalformedSectionField")
+                .GetProperty("retained").GetBoolean());
+
         var opaque = opaqueSource.Select(adapter.Adapt)
             .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
             .ToArray();
@@ -106,7 +137,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             unknownRecord.Payload.GetProperty("source").GetProperty("payload")
                 .GetProperty("syntheticValue").GetString());
         Assert.Equal(
-            "AKIA" + "SYNTHETICFIXTURE",
+            "INERT_EXPLICIT_PLACEHOLDER",
             unknownRecord.Payload.GetProperty("source").GetProperty("payload")
                 .GetProperty("sensitiveEvidence").GetString());
         Assert.True(

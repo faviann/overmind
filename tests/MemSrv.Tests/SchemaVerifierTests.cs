@@ -402,6 +402,25 @@ public sealed class SchemaVerifierTests
                         """));
             }
 
+            File.Copy(
+                Path.Combine(_root, "migrations", "0008_capture_source_identity.sql"),
+                Path.Combine(migrations, "0008_capture_source_identity.sql"));
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                Assert.Equal(
+                    xminBefore,
+                    await connection.ExecuteScalarAsync<string>(
+                        """
+                        SELECT xmin::text
+                        FROM capture_observations
+                        WHERE observation_uuid = @observationUuid
+                        """,
+                        new { observationUuid }));
+            }
+
             var envelope = Assert.Single(
                 await new OperatorCaptureReads(admin)
                     .ReadCapturedEventEnvelopesAsync(observationUuid));

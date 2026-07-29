@@ -143,20 +143,24 @@ store these logs elsewhere.
 Launch preflight is read-only: it checks policy and prerequisites but never
 creates labels, installs skills, or repairs configuration. After preflight, the
 watcher observes the live `ready-for-agent` + `Sandcastle` queue and claims the
-selected issue by removing `Sandcastle` before agent launch. It then runs the
-full `work-on` lifecycle on a named isolated branch/worktree and labels the
-resulting pull request `afk-review`. It processes authorized issues one at a
-time and starts each selection from the latest verified default branch. An
-empty or unchanged ineligible queue is polled without invoking an agent or
-selector model. When a selection pass chooses no issue, the watcher mutates
-nothing, always reports that no issue was selected — including the selector's
-reason when one is available — and reconsiders the same unchanged authorized
-queue at the first poll after a fixed 900-second cooldown; any real queue,
-dependency, issue-state, or default-branch change is reconsidered on the next
-poll. A first termination signal drains an active issue (or exits immediately
-while idle); a second signal forces termination. The consumed `Sandcastle`
-authorization is one attempt: a retry requires an operator to review the issue
-again and explicitly re-add `Sandcastle`.
+selected issue by removing `Sandcastle` before agent launch. Immediately before
+that mutation, it mechanically reads the selected issue's native open blockers.
+A blocked issue, or one whose dependency data cannot be read, keeps its
+`Sandcastle` authorization and enters the idle cooldown; closing a blocker wakes
+selection on the next poll. The watcher then runs the full `work-on` lifecycle
+on a named isolated branch/worktree and labels the resulting pull request
+`afk-review`. It processes authorized issues one at a time and starts each
+selection from the latest verified default branch. An empty or unchanged
+ineligible queue is polled without invoking an agent or selector model. When a
+selection pass chooses no issue, the watcher mutates nothing, always reports
+that no issue was selected — including the selector's reason when one is
+available — and reconsiders the same unchanged authorized queue at the first
+poll after a fixed 900-second cooldown; any real queue, dependency, issue-state,
+or default-branch change is reconsidered on the next poll. A first termination
+signal drains an active issue (or exits immediately while idle); a second signal
+forces termination. The consumed `Sandcastle` authorization is one attempt: a
+retry requires an operator to review the issue again and explicitly re-add
+`Sandcastle`.
 
 After tagging `afk-review`, the watcher hands the pull request to a guarded merge
 stage. It merges unattended only when every gate holds, and otherwise leaves the

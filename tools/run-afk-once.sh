@@ -335,6 +335,49 @@ while :; do
     continue
   fi
 
+  # Native issue dependencies are the mechanical execution gate. The selector
+  # is advisory, so re-read the selected issue's open blockers immediately
+  # before the claim mutation and preserve authorization on either a blocker or
+  # an unreadable dependency response.
+  if ! blocker_numbers="$(
+    gh api "repos/$repo_name/issues/$issue_number/dependencies/blocked_by" \
+      --paginate --jq '.[].number'
+  )"; then
+    if [[ "$draining" != 0 ]]; then
+      issue_active=0
+      printf 'AFK watcher drained before claim; no issue was claimed\n' >&2
+      exit 0
+    fi
+    printf 'AFK issue #%s remains authorized because its open blockers could not be read\n' \
+      "$issue_number" >&2
+    issue_active=0
+    last_idle_frontier="$frontier"
+    last_idle_at="$(date +%s)"
+    sleep_until_poll
+    continue
+  fi
+  if [[ "$draining" != 0 ]]; then
+    issue_active=0
+    printf 'AFK watcher drained before claim; no issue was claimed\n' >&2
+    exit 0
+  fi
+  if [[ -n "$blocker_numbers" ]]; then
+    blocker_refs="$(sed 's/^/#/' <<<"$blocker_numbers" | paste -sd, -)"
+    blocker_count="$(grep -c . <<<"$blocker_numbers")"
+    if [[ "$blocker_count" -eq 1 ]]; then
+      blocker_kind="issue"
+    else
+      blocker_kind="issues"
+    fi
+    printf 'AFK issue #%s remains authorized but blocked by open %s %s\n' \
+      "$issue_number" "$blocker_kind" "$blocker_refs" >&2
+    issue_active=0
+    last_idle_frontier="$frontier"
+    last_idle_at="$(date +%s)"
+    sleep_until_poll
+    continue
+  fi
+
   # Removing Sandcastle is the single claim mutation. The exclusive watcher
   # lock plus the immediately preceding live validation prevents stale local
   # selections and duplicate attempts.

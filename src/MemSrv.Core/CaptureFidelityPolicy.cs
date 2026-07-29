@@ -32,23 +32,31 @@ public static class CaptureFidelityPolicy
             ProductionTransportBytes);
         CaptureObservationCommand validated =
             CaptureObservationCommand.FromRequest(observation);
-        return SerializeWithinLimit(
-            observation,
-            effectiveBound,
-            (request, originalByteCount) =>
-                validated.Locator is CaptureSourceLocator.NativeId
-                    ? throw new InvalidOperationException(
-                        "An over-limit native_id observation cannot fit safely and " +
-                        "fails closed because transport omission requires " +
-                        "binding-stable content identity.")
-                    : OmitForTransport(
-                        request,
-                        originalByteCount,
-                        validated.SourceIdentity),
-            omittedByteCount => new InvalidOperationException(
-                "The required capture source identity and locator cannot fit " +
-                $"within the {effectiveBound}-byte transport limit " +
-                $"({omittedByteCount} bytes required)."));
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+            SerializeWithinLimit(
+                observation,
+                effectiveBound,
+                (request, originalByteCount) =>
+                    validated.Locator is CaptureSourceLocator.NativeId
+                        ? throw new InvalidOperationException(
+                            "An over-limit native_id observation cannot fit safely and " +
+                            "fails closed because transport omission requires " +
+                            "binding-stable content identity.")
+                        : OmitForTransport(
+                            request,
+                            originalByteCount,
+                            validated.SourceIdentity),
+                omittedByteCount => new InvalidOperationException(
+                    "The required capture source identity and locator cannot fit " +
+                    $"within the {effectiveBound}-byte transport limit " +
+                    $"({omittedByteCount} bytes required)."));
+        CaptureObservationRequest snapshot =
+            JsonSerializer.Deserialize<CaptureObservationRequest>(
+                bounded.Serialized,
+                CaptureLedger.JsonOptions)
+            ?? throw new InvalidOperationException(
+                "The bounded transport representation could not be reconstructed.");
+        return bounded with { Observation = snapshot };
     }
 
     public static BoundedCaptureRepresentation<CaptureObservationCommand>

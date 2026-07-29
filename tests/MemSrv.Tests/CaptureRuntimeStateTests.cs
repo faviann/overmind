@@ -672,6 +672,40 @@ public sealed class CaptureRuntimeStateTests
         Assert.True(bounded.OriginalByteCount > 1_024);
     }
 
+    [Fact]
+    public void MaterializedTransportSnapshotCannotDivergeFromBoundedSerialization()
+    {
+        JsonElement small = JsonSerializer.SerializeToElement(new { value = "small" });
+        JsonElement medium = JsonSerializer.SerializeToElement(new
+        {
+            value = new string('m', 64)
+        });
+        JsonElement large = JsonSerializer.SerializeToElement(new
+        {
+            value = new string('x', 4_096)
+        });
+        var events = new StatefulEventList(
+            new CaptureEvent("small/0", 0, "opaque", "harness", small, null, []),
+            new CaptureEvent("medium/0", 0, "opaque", "harness", medium, null, []),
+            new CaptureEvent("large/0", 0, "opaque", "harness", large, null, []));
+        CaptureObservationRequest observation = ResourceBoundObservation(
+            small,
+            "materialization-snapshot") with
+        {
+            Events = events
+        };
+
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+            CaptureFidelityPolicy.SerializeForTransport(observation, 1_024);
+        string returnedJson = JsonSerializer.Serialize(
+            bounded.Observation,
+            CaptureLedger.JsonOptions);
+
+        Assert.False(bounded.WasOmitted);
+        Assert.Equal(bounded.Serialized, returnedJson);
+        Assert.True(Encoding.UTF8.GetByteCount(returnedJson) <= 1_024);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
@@ -2693,21 +2727,20 @@ public sealed class CaptureRuntimeStateTests
             SourceIdentity: new CaptureSourceIdentity(identity));
 
     private sealed class StatefulEventList(
-        CaptureEvent firstEnumeration,
-        CaptureEvent laterEnumeration) : IReadOnlyList<CaptureEvent>
+        params CaptureEvent[] enumerations) : IReadOnlyList<CaptureEvent>
     {
-        private int _enumerations;
+        private int _enumeration;
 
         public int Count => 1;
         public CaptureEvent this[int index] => index == 0
-            ? (_enumerations == 0 ? firstEnumeration : laterEnumeration)
+            ? enumerations[Math.Min(_enumeration, enumerations.Length - 1)]
             : throw new ArgumentOutOfRangeException(nameof(index));
 
         public IEnumerator<CaptureEvent> GetEnumerator()
         {
-            CaptureEvent item = Interlocked.Increment(ref _enumerations) == 1
-                ? firstEnumeration
-                : laterEnumeration;
+            int enumeration = Interlocked.Increment(ref _enumeration) - 1;
+            CaptureEvent item =
+                enumerations[Math.Min(enumeration, enumerations.Length - 1)];
             yield return item;
         }
 

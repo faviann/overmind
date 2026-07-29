@@ -68,7 +68,7 @@ case "$AFK_TEST_SCENARIO" in
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     fi
     ;;
-  live-add|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override)
+  live-add|static-blocked|dependency-unreadable|blocked-then-unblocked|dependency-drain|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override)
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   drain|force)
     if grep -qx claim-42 "$AFK_TEST_STATE"; then
@@ -109,6 +109,10 @@ case "$AFK_TEST_SCENARIO" in
       printf 'blocker-added\n' >>"$AFK_TEST_STATE"
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     fi
+    ;;
+  dependency-race)
+    printf 'native-blocker-added\n' >>"$AFK_TEST_STATE"
+    printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     ;;
   default-race)
     if ! grep -qx default-advanced "$AFK_TEST_STATE"; then
@@ -175,6 +179,8 @@ case "$AFK_TEST_SCENARIO" in
     if [[ "$count" == 1 ]]; then printf 'authorized\n' >>"$AFK_TEST_STATE"; else kill -TERM "$PPID"; fi ;;
   frontier)
     if [[ "$count" == 1 ]]; then printf 'blocker-closed\n' >>"$AFK_TEST_STATE"; else kill -TERM "$PPID"; fi ;;
+  blocked-then-unblocked)
+    if [[ "$count" == 1 ]]; then printf 'blocker-closed\n' >>"$AFK_TEST_STATE"; else kill -TERM "$PPID"; fi ;;
   token-wait)
     if [[ "$count" -ge 3 ]]; then kill -TERM "$PPID"; fi ;;
   idle-retry)
@@ -203,7 +209,7 @@ case "$AFK_TEST_SCENARIO" in
     else
       kill -TERM "$PPID"
     fi ;;
-  claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override)
+  static-blocked|dependency-unreadable|dependency-race|claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override)
     kill -TERM "$PPID" ;;
   chain|paused-lane|paused-only|idle-artifact|idle-artifact-label-fail|idle-discovery-uncertain|ci-retry-pass|ci-repeat-lane|ci-timeout-only|nonblocking-discovery|blocking-discovery-lane|uncertain-discovery-only)
     kill -TERM "$PPID" ;;
@@ -331,10 +337,22 @@ case "$*" in
       printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/2"},{"name":"test-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/3"},{"name":"reference-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/4"}]'
     fi ;;
   "run rerun 100 --failed") ;;
-  "api repos/acme/widget/issues/42/dependencies/blocked_by --paginate --jq .[].number")
+  api\ repos/acme/widget/issues/*/dependencies/blocked_by\ --paginate\ --jq\ .[].number)
+    issue_path="${2}"; issue="${issue_path#repos/acme/widget/issues/}"; issue="${issue%%/*}"
+    dependency_calls="$(grep -c "^gh api repos/acme/widget/issues/$issue/dependencies/blocked_by " "$AFK_TEST_EVENTS")"
     case "$AFK_TEST_SCENARIO" in
-      blocking-discovery-lane) printf '77\n' ;;
-      uncertain-discovery-only|idle-discovery-uncertain) exit 1 ;;
+      static-blocked) printf '77\n' ;;
+      dependency-unreadable) exit 1 ;;
+      blocked-then-unblocked)
+        grep -qx blocker-closed "$AFK_TEST_STATE" || printf '77\n' ;;
+      dependency-race)
+        grep -qx native-blocker-added "$AFK_TEST_STATE" && printf '77\n' ;;
+      dependency-drain)
+        kill -TERM "$PPID" ;;
+      blocking-discovery-lane)
+        [[ "$dependency_calls" -eq 1 ]] || printf '77\n' ;;
+      uncertain-discovery-only|idle-discovery-uncertain)
+        [[ "$dependency_calls" -eq 1 ]] || exit 1 ;;
     esac ;;
   pr\ view\ *\ --json\ state,mergeable,mergeStateStatus)
     printf '%s\n' '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
@@ -683,6 +701,46 @@ grep -q '^sleep 0$' "$events"
 run_foreground claim-race
 ! grep -q '^claim ' "$events"
 ! grep -q '^agent ' "$events"
+
+run_foreground static-blocked
+[[ "$(grep -c '^selector$' "$events")" == 1 ]]
+! grep -q '^claim ' "$events"
+! grep -q '^agent ' "$events"
+grep -q 'issue #42 remains authorized but blocked by open issue #77' \
+  "$fixture/static-blocked.out"
+[[ "$(grep -c '^sleep 0$' "$events")" -ge 1 ]]
+
+run_foreground dependency-unreadable
+[[ "$(grep -c '^selector$' "$events")" == 1 ]]
+! grep -q '^claim ' "$events"
+! grep -q '^agent ' "$events"
+grep -q 'issue #42 remains authorized because its open blockers could not be read' \
+  "$fixture/dependency-unreadable.out"
+[[ "$(grep -c '^sleep 0$' "$events")" -ge 1 ]]
+
+run_foreground blocked-then-unblocked
+[[ "$(grep -c '^selector$' "$events")" == 2 ]]
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
+grep -q 'issue #42 remains authorized but blocked by open issue #77' \
+  "$fixture/blocked-then-unblocked.out"
+
+run_foreground dependency-race
+[[ "$(grep -c '^selector$' "$events")" == 1 ]]
+! grep -q '^claim ' "$events"
+! grep -q '^agent ' "$events"
+grep -q 'issue #42 remains authorized but blocked by open issue #77' \
+  "$fixture/dependency-race.out" || {
+    cat "$fixture/dependency-race.out" >&2
+    cat "$events" >&2
+    exit 1
+  }
+
+run_foreground dependency-drain
+! grep -q '^claim ' "$events"
+! grep -q '^agent ' "$events"
+grep -q 'drained before claim; no issue was claimed' \
+  "$fixture/dependency-drain.out"
 
 run_foreground eligibility-race
 [[ "$(grep -c '^selector$' "$events")" == 2 ]]

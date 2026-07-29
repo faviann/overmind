@@ -160,6 +160,21 @@ sleep_until_poll() {
   sleep_pid=""
 }
 
+exit_if_draining_before_claim() {
+  [[ "$draining" != 0 ]] || return 0
+
+  issue_active=0
+  printf 'AFK watcher drained before claim; no issue was claimed\n' >&2
+  exit 0
+}
+
+idle_selected_frontier() {
+  issue_active=0
+  last_idle_frontier="$frontier"
+  last_idle_at="$(date +%s)"
+  sleep_until_poll
+}
+
 wait_for_active_issue() {
   local status
   while [[ -n "$active_pid" ]]; do
@@ -317,11 +332,7 @@ while :; do
   # A first stop may arrive after selection validation but before the claim.
   # Honor it before consuming authorization, even when it interrupted the
   # final GitHub read while the issue was considered active.
-  if [[ "$draining" != 0 ]]; then
-    issue_active=0
-    printf 'AFK watcher drained before claim; no issue was claimed\n' >&2
-    exit 0
-  fi
+  exit_if_draining_before_claim
 
   if [[ "$(jq -r '.state' <<<"$preclaim_state")" != OPEN ]] || \
      ! jq -e '(.labels | map(.name) | index("ready-for-agent")) != null' \
@@ -332,6 +343,35 @@ while :; do
       "$issue_number" >&2
     issue_active=0
     last_idle_frontier=""
+    continue
+  fi
+
+  # Native issue dependencies are the mechanical execution gate. The selector
+  # is advisory, so re-read the selected issue's open blockers immediately
+  # before the claim mutation and preserve authorization on either a blocker or
+  # an unreadable dependency response.
+  if ! blocker_numbers="$(
+    gh api "repos/$repo_name/issues/$issue_number/dependencies/blocked_by" \
+      --paginate --jq '.[].number'
+  )"; then
+    exit_if_draining_before_claim
+    printf 'AFK issue #%s remains authorized because its open blockers could not be read\n' \
+      "$issue_number" >&2
+    idle_selected_frontier
+    continue
+  fi
+  exit_if_draining_before_claim
+  if [[ -n "$blocker_numbers" ]]; then
+    blocker_refs="$(sed 's/^/#/' <<<"$blocker_numbers" | paste -sd, -)"
+    blocker_count="$(grep -c . <<<"$blocker_numbers")"
+    if [[ "$blocker_count" -eq 1 ]]; then
+      blocker_kind="issue"
+    else
+      blocker_kind="issues"
+    fi
+    printf 'AFK issue #%s remains authorized but blocked by open %s %s\n' \
+      "$issue_number" "$blocker_kind" "$blocker_refs" >&2
+    idle_selected_frontier
     continue
   fi
 

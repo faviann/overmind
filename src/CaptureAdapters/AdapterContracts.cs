@@ -8,7 +8,7 @@ namespace CaptureAdapters;
 /// A record and a hook fact use the same identity and position contract.
 /// </summary>
 public sealed record TrustedSourceObservation(
-    string SourceSessionId,
+    CaptureSourceIdentity SourceIdentity,
     long SourcePosition,
     CaptureSourceLocator Locator,
     CaptureSourceMaterialKind MaterialKind,

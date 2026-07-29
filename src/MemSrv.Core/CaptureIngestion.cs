@@ -35,7 +35,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         string signatureContent = JsonSerializer.Serialize(
             new CaptureSignatureContent(
                 command.ContractVersion,
-                command.SourceSessionId,
+                command.SourceIdentity,
                 command.Locator,
                 command.SourceTimestamp,
                 command.Source,
@@ -46,7 +46,11 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             CaptureLedger.JsonOptions);
         string contentSignature = Sign(signatureContent, binding.ContentSignatureKey);
         var scan = new ScanAccumulator(neverStore.RuleSetVersion);
-        AssertSafe(command.SourceSessionId, scan);
+        AssertSafe(command.SourceIdentity.ExternalSessionId, scan);
+        if (command.SourceIdentity.ChildId is not null)
+        {
+            AssertSafe(command.SourceIdentity.ChildId, scan);
+        }
         AssertSafe(command.Locator.Kind, scan);
         switch (command.Locator)
         {
@@ -100,14 +104,25 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        Guid deterministicStreamUuid = DeterministicUuid(
+            binding.BindingUuid, command.SourceIdentity, "capture-source-stream/v1");
         var stream = await connection.QuerySingleOrDefaultAsync<StreamRow>(
             """
             SELECT stream_uuid AS StreamUuid, effective_namespace AS EffectiveNamespace,
-                   route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition
+                   route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition,
+                   source_session_id AS SourceSessionId,
+                   trace_session_id AS TraceSessionId
             FROM capture_source_streams
-            WHERE binding_uuid = @BindingUuid AND source_session_id = @SourceSessionId
+            WHERE binding_uuid = @BindingUuid
+              AND external_session_id = @ExternalSessionId
+              AND child_id IS NOT DISTINCT FROM @ChildId
             """,
-            new { binding.BindingUuid, command.SourceSessionId }, transaction);
+            new
+            {
+                binding.BindingUuid,
+                command.SourceIdentity.ExternalSessionId,
+                command.SourceIdentity.ChildId
+            }, transaction);
         bool streamWasEstablished = stream is not null;
         if (stream is null)
         {
@@ -116,16 +131,25 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             stream = await connection.QuerySingleOrDefaultAsync<StreamRow>(
                 """
                 INSERT INTO capture_source_streams
-                  (binding_uuid, source_session_id, effective_namespace, route_basis)
-                VALUES (@BindingUuid, @SourceSessionId, @Namespace, @Basis)
-                ON CONFLICT (binding_uuid, source_session_id) DO NOTHING
+                  (stream_uuid, binding_uuid, source_session_id, external_session_id,
+                   child_id, trace_session_id, effective_namespace, route_basis)
+                VALUES (@StreamUuid, @BindingUuid, @ExternalSessionId, @ExternalSessionId,
+                        @ChildId, @TraceSessionId, @Namespace, @Basis)
+                ON CONFLICT ON CONSTRAINT
+                  capture_source_streams_binding_external_child_unique DO NOTHING
                 RETURNING stream_uuid AS StreamUuid, effective_namespace AS EffectiveNamespace,
-                          route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition
+                          route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition,
+                          source_session_id AS SourceSessionId,
+                          trace_session_id AS TraceSessionId
                 """,
                 new
                 {
                     binding.BindingUuid,
-                    command.SourceSessionId,
+                    StreamUuid = deterministicStreamUuid,
+                    command.SourceIdentity.ExternalSessionId,
+                    command.SourceIdentity.ChildId,
+                    TraceSessionId = CanonicalSessionId(
+                        binding.BindingUuid, command.SourceIdentity),
                     route.Namespace,
                     route.Basis
                 }, transaction);
@@ -135,11 +159,20 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 stream = await connection.QuerySingleAsync<StreamRow>(
                     """
                     SELECT stream_uuid AS StreamUuid, effective_namespace AS EffectiveNamespace,
-                           route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition
+                           route_basis AS RouteBasis, checkpoint_position AS CheckpointPosition,
+                           source_session_id AS SourceSessionId,
+                           trace_session_id AS TraceSessionId
                     FROM capture_source_streams
-                    WHERE binding_uuid = @BindingUuid AND source_session_id = @SourceSessionId
+                    WHERE binding_uuid = @BindingUuid
+                      AND external_session_id = @ExternalSessionId
+                      AND child_id IS NOT DISTINCT FROM @ChildId
                     """,
-                    new { binding.BindingUuid, command.SourceSessionId }, transaction);
+                    new
+                    {
+                        binding.BindingUuid,
+                        command.SourceIdentity.ExternalSessionId,
+                        command.SourceIdentity.ChildId
+                    }, transaction);
             }
         }
         string publicRouteBasis = streamWasEstablished ? "established" : stream.RouteBasis;
@@ -178,7 +211,12 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             if (locatorMatch is not null)
             {
                 if (!string.Equals(
-                    locatorMatch.ContentSignature, contentSignature, StringComparison.Ordinal))
+                        locatorMatch.ContentSignature, contentSignature, StringComparison.Ordinal)
+                    && !CompatibleContentSignatures(
+                            command,
+                            stream.SourceSessionId,
+                            binding.ContentSignatureKey)
+                        .Contains(locatorMatch.ContentSignature, StringComparer.Ordinal))
                 {
                     await transaction.RollbackAsync(cancellationToken);
                     throw ConflictAt(command);
@@ -267,7 +305,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 new
                 {
                     observationUuid,
-                    sessionId = $"capture:{binding.BindingUuid}:{command.SourceSessionId}",
+                    sessionId = stream.TraceSessionId,
                     agentId = binding.AgentId,
                     stream.EffectiveNamespace,
                     item.PartKey,
@@ -327,7 +365,13 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         {
             throw new InvalidOperationException("Only capture contractVersion 1 is supported.");
         }
-        CaptureLedger.Require(command.SourceSessionId, nameof(command.SourceSessionId));
+        CaptureLedger.Require(
+            command.SourceIdentity.ExternalSessionId,
+            "sourceIdentity.externalSessionId");
+        if (command.SourceIdentity.ChildId is not null)
+        {
+            CaptureLedger.Require(command.SourceIdentity.ChildId, "sourceIdentity.childId");
+        }
         if (command.SourceTimestamp is not null)
         {
             CaptureLedger.Require(command.SourceTimestamp.Raw, "sourceTimestamp.raw");
@@ -366,6 +410,87 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 
+    // Adapters v3 through v6 derive identical source provenance from the same
+    // immutable record; only the adapter version and the identity shape of the
+    // signature changed. A retry of an already-accepted position after the
+    // upgrade is therefore the same content under a pre-upgrade signature.
+    private static readonly string[] PreUpgradeCodexAdapterVersions = ["3", "4", "5"];
+
+    private static IReadOnlyList<string> CompatibleContentSignatures(
+        CaptureObservationCommand command,
+        string legacySourceSessionId,
+        byte[] key)
+    {
+        if (!string.Equals(command.Source.Harness, "codex", StringComparison.Ordinal)
+            || !string.Equals(
+                command.Adapter.Name, "codex-synthetic-jsonl", StringComparison.Ordinal)
+            || !string.Equals(command.Adapter.Version, "6", StringComparison.Ordinal))
+        {
+            return [];
+        }
+
+        var signatures = new List<string>(PreUpgradeCodexAdapterVersions.Length * 2);
+        foreach (string version in PreUpgradeCodexAdapterVersions)
+        {
+            var legacyAdapter = command.Adapter with { Version = version };
+            string currentIdentityLegacy = JsonSerializer.Serialize(
+                new CaptureSignatureContent(
+                    command.ContractVersion,
+                    command.SourceIdentity,
+                    command.Locator,
+                    command.SourceTimestamp,
+                    command.Source,
+                    legacyAdapter,
+                    command.SourcePayload,
+                    command.Events,
+                    command.RouteEvidence),
+                CaptureLedger.JsonOptions);
+            string historicalLegacy = JsonSerializer.Serialize(
+                new LegacyCaptureSignatureContent(
+                    command.ContractVersion,
+                    legacySourceSessionId,
+                    command.Locator,
+                    command.SourceTimestamp,
+                    command.Source,
+                    legacyAdapter,
+                    command.SourcePayload,
+                    command.Events,
+                    command.RouteEvidence),
+                CaptureLedger.JsonOptions);
+            signatures.Add(Sign(currentIdentityLegacy, key));
+            signatures.Add(Sign(historicalLegacy, key));
+        }
+
+        return signatures;
+    }
+
+    private static string CanonicalSessionId(
+        Guid bindingUuid, CaptureSourceIdentity sourceIdentity) =>
+        $"capture:v1:{IdentityDigest(bindingUuid, sourceIdentity, "capture-trace-session/v1")}";
+
+    private static Guid DeterministicUuid(
+        Guid bindingUuid, CaptureSourceIdentity sourceIdentity, string domain)
+    {
+        byte[] bytes = Convert.FromHexString(IdentityDigest(bindingUuid, sourceIdentity, domain));
+        bytes[6] = (byte)((bytes[6] & 0x0f) | 0x80);
+        bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);
+        return new Guid(bytes.AsSpan(0, 16), bigEndian: true);
+    }
+
+    private static string IdentityDigest(
+        Guid bindingUuid, CaptureSourceIdentity sourceIdentity, string domain)
+    {
+        string material = JsonSerializer.Serialize(new
+        {
+            domain,
+            bindingUuid,
+            sourceIdentity.ExternalSessionId,
+            sourceIdentity.ChildId
+        }, CaptureLedger.JsonOptions);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)))
+            .ToLowerInvariant();
+    }
+
     // A required identity value is not payload: it cannot be redacted or
     // omitted and still mean what it claims, so a match rejects and an
     // un-inspectable value fails the whole import closed.
@@ -401,6 +526,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         public string EffectiveNamespace { get; set; } = "";
         public string RouteBasis { get; set; } = "";
         public long? CheckpointPosition { get; set; }
+        public string SourceSessionId { get; set; } = "";
+        public string TraceSessionId { get; set; } = "";
     }
 
     private sealed class ExistingObservation
@@ -428,6 +555,16 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     // deliberately excluded: the retry signature covers source identity and
     // content, not the stream position the record happened to arrive at.
     private sealed record CaptureSignatureContent(
+        int ContractVersion,
+        CaptureSourceIdentity SourceIdentity,
+        CaptureSourceLocator Locator,
+        CaptureSourceTimestamp? SourceTimestamp,
+        CaptureSource Source,
+        CaptureAdapter Adapter,
+        JsonElement SourcePayload,
+        IReadOnlyList<CaptureEvent> Events,
+        CaptureRouteEvidence? RouteEvidence);
+    private sealed record LegacyCaptureSignatureContent(
         int ContractVersion,
         string SourceSessionId,
         CaptureSourceLocator Locator,

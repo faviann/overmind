@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-02T00:00:00Z","type":"session_meta","payload":{"session_id":"01970000-0000-7000-8000-000000000010","id":"01970000-0000-7000-8000-000000000011","forked_from_id":"01970000-0000-7000-8000-000000000009","cli_version":"0.90.synthetic","source":{"subagent":{"other":"fork-child"}}}}
+{"timestamp":"2026-07-02T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":"fork-only child"}}

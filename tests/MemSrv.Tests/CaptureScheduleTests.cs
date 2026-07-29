@@ -6,6 +6,175 @@ namespace MemSrv.Tests;
 public sealed class CaptureScheduleTests
 {
     [Theory]
+    [InlineData(
+        "codex-cli-0.77.parent-only.synthetic.jsonl",
+        "01970000-0000-7000-8000-000000000001",
+        "01970000-0000-7000-8000-000000000001")]
+    [InlineData(
+        "codex-cli-0.90.fork-only.synthetic.jsonl",
+        "01970000-0000-7000-8000-000000000010",
+        "01970000-0000-7000-8000-000000000011")]
+    [InlineData(
+        "codex-cli-0.120.parent-fork.synthetic.jsonl",
+        "01970000-0000-7000-8000-000000000020",
+        "01970000-0000-7000-8000-000000000021")]
+    [InlineData(
+        "codex-cli-0.144.nested-child.synthetic.jsonl",
+        "01970000-0000-7000-8000-000000000030",
+        "01970000-0000-7000-8000-000000000031")]
+    [InlineData(
+        "codex-cli-0.144.absent-relationship.synthetic.jsonl",
+        "01970000-0000-7000-8000-000000000040",
+        "01970000-0000-7000-8000-000000000041")]
+    public void VersionedChildFixturesExposeAnExplicitStableIdentityTuple(
+        string fixtureName,
+        string expectedExternalSessionId,
+        string expectedChildId)
+    {
+        string fixture = Path.Combine(
+            TestProcessRunner.RepoRoot, "fixtures", "adapter-conformance", fixtureName);
+
+        CodexTranscriptStream first =
+            Assert.Single(CodexTranscriptDiscovery.Enumerate(fixture));
+        CodexTranscriptStream rediscovered =
+            Assert.Single(CodexTranscriptDiscovery.Enumerate(fixture));
+
+        Assert.Equal(
+            new CaptureSourceIdentity(expectedExternalSessionId, expectedChildId),
+            first.SourceIdentity);
+        Assert.Equal(first.SourceIdentity, rediscovered.SourceIdentity);
+        Assert.Equal(first.SourceStream, rediscovered.SourceStream);
+        Assert.Equal(first.TranscriptIdentity, rediscovered.TranscriptIdentity);
+        if (fixtureName == "codex-cli-0.144.nested-child.synthetic.jsonl")
+        {
+            Assert.Equal("codex-synthetic-4a2ad95466b3c0f3243c1974", first.SourceStream);
+        }
+    }
+
+    [Fact]
+    public void MalformedRecordBeforeSessionMetadataDoesNotReplaceExplicitChildIdentityWithPathIdentity()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-discovery-malformed-prefix-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string initialPath = Path.Combine(directory, "initial.jsonl");
+        string movedPath = Path.Combine(directory, "moved.jsonl");
+        const string externalSessionId = "01970000-0000-7000-8000-000000000149";
+        const string childId = "01970000-0000-7000-8000-000000000150";
+        File.WriteAllText(
+            initialPath,
+            "{malformed-json\n"
+            + $"{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{externalSessionId}\","
+            + $"\"id\":\"{childId}\",\"thread_source\":\"subagent\"}}}}\n");
+
+        try
+        {
+            CodexTranscriptStream first =
+                Assert.Single(CodexTranscriptDiscovery.Enumerate(initialPath));
+            File.Move(initialPath, movedPath);
+            CodexTranscriptStream rediscovered =
+                Assert.Single(CodexTranscriptDiscovery.Enumerate(movedPath));
+
+            Assert.Equal(
+                new CaptureSourceIdentity(externalSessionId, childId),
+                first.SourceIdentity);
+            Assert.Equal(first.SourceIdentity, rediscovered.SourceIdentity);
+            Assert.Equal(first.SourceStream, rediscovered.SourceStream);
+            Assert.Equal(first.TranscriptIdentity, rediscovered.TranscriptIdentity);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RootClassificationMintsNoChildAndOneContradictoryRolloutFailsAlone()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-child-classification-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string root = Path.GetFullPath(Path.Combine(directory, "root.jsonl"));
+        string contradiction = Path.GetFullPath(Path.Combine(directory, "contradiction.jsonl"));
+        File.WriteAllText(
+            root,
+            """{"type":"session_meta","payload":{"session_id":"session","id":"thread","source":"cli","thread_source":"user"}}"""
+            + "\n");
+        File.WriteAllText(
+            contradiction,
+            """{"type":"session_meta","payload":{"session_id":"session","id":"thread","source":"cli","thread_source":"subagent"}}"""
+            + "\n");
+
+        try
+        {
+            IReadOnlyList<CodexTranscriptStream> streams =
+                CodexTranscriptDiscovery.Enumerate(directory);
+            CodexTranscriptStream rootStream =
+                streams.Single(stream => stream.Path == root);
+            CodexTranscriptStream contradictionStream =
+                streams.Single(stream => stream.Path == contradiction);
+
+            Assert.Equal(new CaptureSourceIdentity("session"), rootStream.SourceIdentity);
+            Assert.Null(rootStream.IdentityFailure);
+            Assert.Null(contradictionStream.SourceIdentity);
+            Assert.Null(contradictionStream.TranscriptIdentity);
+            Assert.IsType<InvalidDataException>(contradictionStream.IdentityFailure);
+
+            var scanned = new List<string>();
+            var failures = new List<Exception>();
+            await CodexTranscriptScanCycle.RunAsync(
+                streams,
+                (stream, _) =>
+                {
+                    scanned.Add(stream.Path);
+                    return Task.CompletedTask;
+                },
+                failures.Add);
+
+            Assert.Equal([root], scanned);
+            Assert.IsType<InvalidDataException>(Assert.Single(failures));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DistinctObservedChildrenCannotCollideWithinOneExternalSession()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-child-collision-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string first = Path.Combine(directory, "first.jsonl");
+        string second = Path.Combine(directory, "second.jsonl");
+        File.WriteAllText(
+            first,
+            """{"type":"session_meta","payload":{"session_id":"shared","id":"child-a","thread_source":"subagent"}}"""
+            + "\n");
+        File.WriteAllText(
+            second,
+            """{"type":"session_meta","payload":{"session_id":"shared","id":"child-b","thread_source":"subagent"}}"""
+            + "\n");
+
+        try
+        {
+            IReadOnlyList<CodexTranscriptStream> streams =
+                CodexTranscriptDiscovery.Enumerate(directory);
+            Assert.Equal(2, streams.Count);
+            Assert.Equal(
+                [new CaptureSourceIdentity("shared", "child-a"),
+                 new CaptureSourceIdentity("shared", "child-b")],
+                streams.Select(stream => stream.SourceIdentity));
+            Assert.Equal(2, streams.Select(stream => stream.SourceStream).Distinct().Count());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
     [InlineData("80", "40", 80, 40)]
     [InlineData("150", "60", 150, 60)]
     public void ProductionConfigurationBindsBothNamedCadenceInputs(

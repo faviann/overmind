@@ -69,5 +69,27 @@ gh pr edit "$pr_number" --add-label afk-review >/dev/null || {
   exit 1
 }
 
+closeout_validator="$HOME/.agents/skills/work-on/scripts/validate-closeout-body.sh"
+if [[ ! -x "$closeout_validator" ]]; then
+  printf 'AFK issue #%s closeout read-back refused: shared validator is unavailable or not executable: %s; pull request #%s preserved with afk-review\n' \
+    "$issue_number" "$closeout_validator" "$pr_number" >&2
+  exit 0
+fi
+if ! pr_body="$(gh pr view "$pr_number" --json body --jq .body)"; then
+  printf 'AFK issue #%s closeout read-back refused: could not read pull request #%s body; pull request preserved with afk-review\n' \
+    "$issue_number" "$pr_number" >&2
+  exit 0
+fi
+set +e
+closeout_diagnostic="$("$closeout_validator" --require-closes "$issue_number" - <<<"$pr_body" 2>&1)"
+closeout_status=$?
+set -e
+if [[ "$closeout_status" -ne 0 ]]; then
+  [[ -n "$closeout_diagnostic" ]] || closeout_diagnostic="validator failed without a diagnostic"
+  printf 'AFK issue #%s closeout read-back refused: %s; pull request #%s preserved with afk-review\n' \
+    "$issue_number" "$closeout_diagnostic" "$pr_number" >&2
+  exit 0
+fi
+
 exec "$workflow_root/tools/afk-merge.sh" \
   "$issue_number" "$branch" "$default_branch" "$pr_number"

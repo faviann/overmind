@@ -143,7 +143,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     envelope.GetProperty("observation").GetProperty("observationUuid").GetGuid());
                 Assert.Equal(
                     [
-                        "observationUuid", "sourceStreamUuid", "source", "locator",
+                        "observationUuid", "sourceStreamUuid", "sourceIdentity", "source", "locator",
                         "sourceTimestamp", "routeEvidence", "adapter",
                         "safeSourcePayload", "scan", "capturedAt"
                     ],
@@ -517,6 +517,181 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ExplicitChildIdentityIsCanonicalOnHttpAndMemCtlAndRejectsAContradictoryLegacyClaim()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        await EnrollAsync($"codex-explicit-identity-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var contradictory = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                "different-legacy-session",
+                externalSessionId,
+                childId,
+                0,
+                $"identity-{Guid.NewGuid():N}",
+                "4",
+                null,
+                "canonical"));
+        Assert.Equal(HttpStatusCode.BadRequest, contradictory.StatusCode);
+
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                null,
+                externalSessionId,
+                childId,
+                0,
+                $"identity-{Guid.NewGuid():N}",
+                "6",
+                "0.144.synthetic",
+                "canonical"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var receipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(
+            externalSessionId,
+            receipt.GetProperty("observation")
+                .GetProperty("sourceIdentity").GetProperty("externalSessionId").GetString());
+        Assert.Equal(
+            childId,
+            receipt.GetProperty("observation")
+                .GetProperty("sourceIdentity").GetProperty("childId").GetString());
+
+        var envelope = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "receipt",
+            receipt.GetProperty("observationUuid").GetGuid().ToString())).RootElement;
+        Assert.Equal(
+            externalSessionId,
+            envelope.GetProperty("observation")
+                .GetProperty("sourceIdentity").GetProperty("externalSessionId").GetString());
+        Assert.Equal(
+            childId,
+            envelope.GetProperty("observation")
+                .GetProperty("sourceIdentity").GetProperty("childId").GetString());
+    }
+
+    [Fact]
+    public async Task CodexAdapterUpgradeRetryConvergesButChangedSourceContentStillConflicts()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-upgrade-{Guid.NewGuid():N}";
+        await EnrollAsync($"codex-adapter-upgrade-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "4",
+                "0.144.synthetic",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var acceptedReceipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        var falseProvenanceRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "6",
+                "false-version",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.Conflict, falseProvenanceRetry.StatusCode);
+
+        var upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "6",
+                "0.144.synthetic",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        var retryReceipt = await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+
+        var changedSource = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "6",
+                "0.144.synthetic",
+                "changed source record"));
+        Assert.Equal(HttpStatusCode.Conflict, changedSource.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("3")]
+    [InlineData("4")]
+    [InlineData("5")]
+    public async Task CodexAdapterUpgradeRetryConvergesFromEveryPreUpgradeAdapterVersion(
+        string preUpgradeAdapterVersion)
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-upgrade-version-{Guid.NewGuid():N}";
+        await EnrollAsync(
+            $"codex-adapter-upgrade-version-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                preUpgradeAdapterVersion,
+                "0.144.synthetic",
+                "same source record"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var acceptedReceipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        var upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "6",
+                "0.144.synthetic",
+                "same source record"));
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        var retryReceipt = await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Fact]
     public async Task DisabledTracerImportsSyntheticCodexMessageAndToolExchange()
     {
         var captureKey = CaptureCredential();
@@ -695,6 +870,117 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task PackagedTracerChildHistoryConvergesOnBindingDerivedCanonicalIdentities()
+    {
+        string stableName = $"codex-child-history-{Guid.NewGuid():N}";
+        string captureKey = CaptureCredential();
+        await EnrollAsync(stableName, captureKey);
+        string root = Path.Combine(
+            Path.GetTempPath(), $"codex-child-history-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "07", "29");
+        string transcript = Path.Combine(sessions, "nested-child.jsonl");
+        string firstState = Path.Combine(root, "first-state");
+        string replayState = Path.Combine(root, "replay-state");
+        Directory.CreateDirectory(sessions);
+        File.Copy(
+            Path.Combine(
+                _root,
+                "fixtures",
+                "adapter-conformance",
+                "codex-cli-0.144.nested-child.synthetic.jsonl"),
+            transcript);
+
+        Dictionary<string, string> EnvironmentFor(string stateDirectory) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = root,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        try
+        {
+            JsonElement[] first;
+            using (var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(firstState)))
+            {
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+                first =
+                [
+                    await ReadTracerReceiptAsync(process),
+                    await ReadTracerReceiptAsync(process)
+                ];
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+                await stderr;
+            }
+
+            JsonElement[] replay;
+            using (var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(replayState)))
+            {
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+                replay =
+                [
+                    await ReadTracerReceiptAsync(process),
+                    await ReadTracerReceiptAsync(process)
+                ];
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+                await stderr;
+            }
+
+            Assert.Equal(["new", "new"], first.Select(ItemStatus));
+            Assert.Equal(
+                ["already_accepted", "already_accepted"],
+                replay.Select(ItemStatus));
+            Assert.Equal(
+                first.Select(CanonicalIdentity),
+                replay.Select(CanonicalIdentity));
+
+            JsonElement envelope = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                first[0].GetProperty("observationUuid").GetGuid().ToString()))
+                .RootElement;
+            Assert.Equal(
+                $"capture:{stableName}",
+                envelope.GetProperty("event").GetProperty("agentId").GetString());
+            Assert.Equal(
+                first[0].GetProperty("events")[0].GetProperty("sessionId").GetString(),
+                envelope.GetProperty("event").GetProperty("sessionId").GetString());
+            Assert.StartsWith(
+                "capture:v1:",
+                envelope.GetProperty("event").GetProperty("sessionId").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+
+        static string? ItemStatus(JsonElement receipt) =>
+            receipt.GetProperty("status").GetString();
+
+        static string CanonicalIdentity(JsonElement receipt)
+        {
+            JsonElement observation = receipt.GetProperty("observation");
+            JsonElement capturedEvent = receipt.GetProperty("events")[0];
+            return string.Join(
+                ":",
+                observation.GetProperty("sourceStreamUuid").GetGuid(),
+                receipt.GetProperty("observationUuid").GetGuid(),
+                capturedEvent.GetProperty("traceUuid").GetGuid(),
+                capturedEvent.GetProperty("sessionId").GetString());
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerAndOperatorExposeVersionedCodexMessagePartsAndRetryIdentities()
     {
         const string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
@@ -841,7 +1127,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "4",
+                    "6",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -869,7 +1155,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "4",
+                    "6",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -956,6 +1242,557 @@ public sealed class CaptureTests : HttpSeamTestBase
                     .Select(item => item.GetProperty("traceUuid").GetGuid()),
                 retried.SelectMany(receipt => receipt.GetProperty("events").EnumerateArray())
                     .Select(item => item.GetProperty("traceUuid").GetGuid()));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerAndOperatorPreserveCodexReasoningOpaqueAndAnnotationEvidence()
+    {
+        const string inertFixturePlaceholder = "INERT_EXPLICIT_PLACEHOLDER";
+        string seededSyntheticSecret = string.Concat(
+            "AK", "IA", "SYNTHETIC", "FIXTURE");
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"codex-additive-evidence-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-additive-evidence-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string fixturePath = Path.Combine(transcriptRoot, "evidence.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        string fixtureRoot = Path.Combine(_root, "fixtures/adapter-conformance");
+        string[] fixtureFamilies =
+        [
+            "codex-cli-0.145.reasoning.synthetic.jsonl",
+            "codex-cli-0.145.opaque.synthetic.jsonl",
+            "codex-cli-0.145.annotations.synthetic.jsonl"
+        ];
+        await File.WriteAllLinesAsync(
+            fixturePath,
+            fixtureFamilies.SelectMany(
+                name => File.ReadAllLines(Path.Combine(fixtureRoot, name)))
+                .Select(line => line.Replace(
+                    inertFixturePlaceholder,
+                    seededSyntheticSecret,
+                    StringComparison.Ordinal)));
+
+        try
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(
+                new Dictionary<string, string>
+                {
+                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                    ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                    ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                    ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+                    ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+                });
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            var receipts = new JsonElement[12];
+            try
+            {
+                for (int index = 0; index < receipts.Length; index++)
+                {
+                    receipts[index] = await ReadTracerReceiptAsync(process);
+                }
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                await stderr;
+            }
+            Assert.DoesNotContain(
+                seededSyntheticSecret,
+                JsonSerializer.Serialize(receipts),
+                StringComparison.Ordinal);
+            Assert.All(receipts, receipt =>
+            {
+                Assert.Equal("new", receipt.GetProperty("status").GetString());
+                Assert.Equal(
+                    "6",
+                    receipt.GetProperty("observation").GetProperty("adapter")
+                        .GetProperty("version").GetString());
+            });
+            Assert.Equal(
+                ["reasoning", "reasoning"],
+                receipts[0].GetProperty("events").EnumerateArray()
+                    .Select(item => item.GetProperty("kind").GetString()));
+            Assert.Equal(
+                "opaque",
+                Assert.Single(receipts[1].GetProperty("events").EnumerateArray())
+                    .GetProperty("kind").GetString());
+            Assert.Equal(
+                ["reasoning", "opaque"],
+                receipts[2].GetProperty("events").EnumerateArray()
+                    .Select(item => item.GetProperty("kind").GetString()));
+            Assert.Equal(
+                ["opaque", "reasoning"],
+                receipts[3].GetProperty("events").EnumerateArray()
+                    .Select(item => item.GetProperty("kind").GetString()));
+            Assert.Equal(
+                "reasoning",
+                Assert.Single(receipts[4].GetProperty("events").EnumerateArray())
+                    .GetProperty("kind").GetString());
+            Assert.Equal(
+                "reasoning",
+                Assert.Single(receipts[5].GetProperty("events").EnumerateArray())
+                    .GetProperty("kind").GetString());
+            Assert.All(
+                receipts[0].GetProperty("events").EnumerateArray(),
+                item => Assert.Equal("assistant", item.GetProperty("actor").GetString()));
+            Assert.Equal(
+                "developer",
+                Assert.Single(receipts[1].GetProperty("events").EnumerateArray())
+                    .GetProperty("actor").GetString());
+            Assert.All(
+                receipts[2].GetProperty("events").EnumerateArray(),
+                item => Assert.Equal("user", item.GetProperty("actor").GetString()));
+            Assert.All(
+                receipts[3].GetProperty("events").EnumerateArray(),
+                item => Assert.Equal("system", item.GetProperty("actor").GetString()));
+            Assert.Equal(
+                ["unknown", "unknown"],
+                receipts.Skip(4).Take(2).Select(receipt =>
+                    Assert.Single(receipt.GetProperty("events").EnumerateArray())
+                        .GetProperty("actor").GetString()));
+            Assert.Equal(
+                ["opaque", "opaque", "annotation", "annotation", "compaction", "annotation"],
+                receipts.Skip(6).Select(receipt =>
+                    Assert.Single(receipt.GetProperty("events").EnumerateArray())
+                        .GetProperty("kind").GetString()));
+            Assert.Equal(
+                1,
+                receipts.SelectMany(receipt => receipt.GetProperty("events").EnumerateArray())
+                    .Count(item => item.GetProperty("kind").GetString() == "compaction"));
+            Assert.Equal(
+                1,
+                receipts.SelectMany(receipt => receipt.GetProperty("events").EnumerateArray())
+                    .Count(item => item.GetProperty("kind").GetString() == "annotation"
+                        && item.GetProperty("partKey").GetString()
+                            == "view:context_compacted"));
+            Assert.DoesNotContain(
+                receipts.SelectMany(receipt => receipt.GetProperty("events").EnumerateArray()),
+                item => item.GetProperty("partKey").GetString() == "view:context_compacted"
+                    && item.GetProperty("kind").GetString() is "compaction" or "opaque");
+            JsonElement malformedSummaryApiSource = receipts[3].GetProperty("observation")
+                .GetProperty("safeSourcePayload").GetProperty("payload")
+                .GetProperty("summary");
+            Assert.Equal(
+                "future_summary_container",
+                malformedSummaryApiSource.GetProperty("type").GetString());
+            Assert.Equal(
+                "Not promoted from an unsupported summary container.",
+                malformedSummaryApiSource.GetProperty("blocks")[0]
+                    .GetProperty("text").GetString());
+            Assert.True(
+                malformedSummaryApiSource.GetProperty("blocks")[0]
+                    .GetProperty("nested").GetProperty("retained").GetBoolean());
+            Assert.True(
+                malformedSummaryApiSource.GetProperty("futureMalformedSummaryField")
+                    .GetProperty("retained").GetBoolean());
+            JsonElement canonicalCompactionApiSource = receipts[10].GetProperty("observation")
+                .GetProperty("safeSourcePayload").GetProperty("payload");
+            Assert.Equal(
+                "Synthetic paired compacted summary.",
+                canonicalCompactionApiSource.GetProperty("summary")[0]
+                    .GetProperty("text").GetString());
+            Assert.True(
+                canonicalCompactionApiSource.GetProperty("summary")[0]
+                    .GetProperty("futureSummaryEvidence").GetProperty("retained").GetBoolean());
+            Assert.Equal(
+                "Synthetic retained pre-compaction history.",
+                canonicalCompactionApiSource.GetProperty("history")[0]
+                    .GetProperty("content").GetString());
+            Assert.True(
+                canonicalCompactionApiSource.GetProperty("history")[0]
+                    .GetProperty("futureHistoryEvidence").GetProperty("retained").GetBoolean());
+            Assert.True(
+                canonicalCompactionApiSource.GetProperty("futureCompactionField")
+                    .GetProperty("retained").GetBoolean());
+            JsonElement compactedBoundaryApiSource = receipts[11].GetProperty("observation")
+                .GetProperty("safeSourcePayload").GetProperty("payload");
+            Assert.Equal(
+                "context_compacted",
+                compactedBoundaryApiSource.GetProperty("type").GetString());
+            Assert.True(
+                compactedBoundaryApiSource.GetProperty("futureCompactionBoundaryField")
+                    .GetProperty("retained").GetBoolean());
+            Assert.Equal(
+                "synthetic",
+                compactedBoundaryApiSource.GetProperty("futureCompactionBoundaryField")
+                    .GetProperty("nested").GetProperty("boundary").GetString());
+            Assert.Equal(
+                "[REDACTED:aws-access-key-id]",
+                receipts[6].GetProperty("observation").GetProperty("safeSourcePayload")
+                    .GetProperty("payload").GetProperty("sensitiveEvidence").GetString());
+            Assert.Equal(
+                "[REDACTED:aws-access-key-id]",
+                Assert.Single(receipts[6].GetProperty("events").EnumerateArray())
+                    .GetProperty("payload").GetProperty("source").GetProperty("payload")
+                    .GetProperty("sensitiveEvidence").GetString());
+
+            var envelopes = new List<JsonElement[]>();
+            foreach (JsonElement receipt in receipts)
+            {
+                string shown = await RunMemCtlAsync(
+                    "capture",
+                    "receipt",
+                    receipt.GetProperty("observationUuid").GetGuid().ToString());
+                Assert.DoesNotContain(seededSyntheticSecret, shown, StringComparison.Ordinal);
+                envelopes.Add(shown.Split(
+                        Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                    .ToArray());
+            }
+
+            Assert.Equal(
+                ["summary/0:reasoning", "content/0:reasoning"],
+                envelopes[0].Select(envelope =>
+                    envelope.GetProperty("event").GetProperty("partKey").GetString()));
+            Assert.Equal(
+                ["Synthetic exposed reasoning summary.", "Synthetic exposed reasoning detail."],
+                envelopes[0].Select(envelope =>
+                    envelope.GetProperty("event").GetProperty("payload")
+                        .GetProperty("text").GetString()));
+            Assert.All(envelopes[0], envelope =>
+            {
+                Assert.Equal(
+                    "assistant",
+                    envelope.GetProperty("event").GetProperty("actor").GetString());
+                JsonElement eventPayload = envelope.GetProperty("event").GetProperty("payload");
+                Assert.Equal(
+                    ["text"],
+                    eventPayload.EnumerateObject().Select(property => property.Name));
+                Assert.False(eventPayload.TryGetProperty("encrypted_content", out _));
+                Assert.False(eventPayload.TryGetProperty("signature", out _));
+                Assert.False(eventPayload.TryGetProperty("futureSummaryField", out _));
+                Assert.False(eventPayload.TryGetProperty("futureContentField", out _));
+                Assert.False(eventPayload.TryGetProperty("futureReasoningField", out _));
+                JsonElement safeSourcePayload = envelope.GetProperty("observation")
+                    .GetProperty("safeSourcePayload").GetProperty("payload");
+                Assert.Equal(
+                    "retained",
+                    safeSourcePayload.GetProperty("summary")[0]
+                        .GetProperty("futureSummaryField").GetString());
+                Assert.Equal(
+                    "retained",
+                    safeSourcePayload.GetProperty("content")[0]
+                        .GetProperty("futureContentField").GetString());
+                Assert.True(
+                    safeSourcePayload.GetProperty("futureReasoningField")
+                        .GetProperty("retained").GetBoolean());
+                Assert.Equal(
+                    "synthetic-encrypted-provider-metadata",
+                    safeSourcePayload.GetProperty("encrypted_content").GetString());
+                Assert.Equal(
+                    "not-reasoning",
+                    safeSourcePayload.GetProperty("signature").GetProperty("value").GetString());
+            });
+
+            JsonElement encryptedOnly = Assert.Single(envelopes[1]);
+            Assert.Equal(
+                "opaque",
+                encryptedOnly.GetProperty("event").GetProperty("kind").GetString());
+            Assert.Equal(
+                "reasoning",
+                encryptedOnly.GetProperty("event").GetProperty("payload")
+                    .GetProperty("payloadType").GetString());
+            Assert.Equal(
+                "developer",
+                encryptedOnly.GetProperty("event").GetProperty("actor").GetString());
+            JsonElement encryptedOnlyPayload = encryptedOnly.GetProperty("event")
+                .GetProperty("payload");
+            JsonElement encryptedOnlySource = encryptedOnlyPayload.GetProperty("source");
+            Assert.Equal(
+                "synthetic-encrypted-only-provider-metadata",
+                encryptedOnlySource.GetProperty("encrypted_content").GetString());
+            Assert.Equal(
+                "synthetic-signature-only",
+                encryptedOnlySource.GetProperty("signature").GetString());
+            Assert.True(
+                encryptedOnlySource.GetProperty("futureEncryptedField")
+                    .GetProperty("retained").GetBoolean());
+            Assert.False(encryptedOnlyPayload.TryGetProperty("text", out _));
+            JsonElement encryptedOnlySafeSource = encryptedOnly.GetProperty("observation")
+                .GetProperty("safeSourcePayload").GetProperty("payload");
+            Assert.Equal(
+                "synthetic-encrypted-only-provider-metadata",
+                encryptedOnlySafeSource.GetProperty("encrypted_content").GetString());
+            Assert.Equal(
+                "synthetic-signature-only",
+                encryptedOnlySafeSource.GetProperty("signature").GetString());
+            Assert.True(
+                encryptedOnlySafeSource.GetProperty("futureEncryptedField")
+                    .GetProperty("retained").GetBoolean());
+
+            Assert.Equal(
+                ["summary/0:reasoning", "content:opaque"],
+                envelopes[2].Select(envelope =>
+                    envelope.GetProperty("event").GetProperty("partKey").GetString()));
+            JsonElement malformedReasoning = envelopes[2][0].GetProperty("event")
+                .GetProperty("payload");
+            Assert.Equal(
+                ["text"],
+                malformedReasoning.EnumerateObject().Select(property => property.Name));
+            Assert.Equal(
+                "Synthetic supported summary beside malformed content.",
+                malformedReasoning.GetProperty("text").GetString());
+            JsonElement malformedContent = envelopes[2][1].GetProperty("event")
+                .GetProperty("payload");
+            Assert.Equal(
+                "future_reasoning_container",
+                malformedContent.GetProperty("contentType").GetString());
+            Assert.Equal(
+                "future_reasoning_container",
+                malformedContent.GetProperty("source").GetProperty("type").GetString());
+            Assert.Equal(
+                "Not promoted from an unsupported container.",
+                malformedContent.GetProperty("source").GetProperty("blocks")[0]
+                    .GetProperty("text").GetString());
+            Assert.True(
+                malformedContent.GetProperty("source")
+                    .GetProperty("futureMalformedSectionField")
+                    .GetProperty("retained").GetBoolean());
+            Assert.All(envelopes[2], envelope => Assert.Equal(
+                "user",
+                envelope.GetProperty("event").GetProperty("actor").GetString()));
+
+            Assert.Equal(
+                ["summary:opaque", "content/0:reasoning"],
+                envelopes[3].Select(envelope =>
+                    envelope.GetProperty("event").GetProperty("partKey").GetString()));
+            Assert.Equal(
+                ["opaque", "reasoning"],
+                envelopes[3].Select(envelope =>
+                    envelope.GetProperty("event").GetProperty("kind").GetString()));
+            JsonElement malformedSummary = envelopes[3][0].GetProperty("event")
+                .GetProperty("payload");
+            Assert.Equal(
+                "future_summary_container",
+                malformedSummary.GetProperty("contentType").GetString());
+            Assert.Equal(
+                "future_summary_container",
+                malformedSummary.GetProperty("source").GetProperty("type").GetString());
+            Assert.Equal(
+                "Not promoted from an unsupported summary container.",
+                malformedSummary.GetProperty("source").GetProperty("blocks")[0]
+                    .GetProperty("text").GetString());
+            Assert.True(
+                malformedSummary.GetProperty("source").GetProperty("blocks")[0]
+                    .GetProperty("nested").GetProperty("retained").GetBoolean());
+            Assert.True(
+                malformedSummary.GetProperty("source")
+                    .GetProperty("futureMalformedSummaryField")
+                    .GetProperty("retained").GetBoolean());
+            Assert.Equal(
+                "Synthetic supported content beside malformed summary.",
+                envelopes[3][1].GetProperty("event").GetProperty("payload")
+                    .GetProperty("text").GetString());
+            Assert.DoesNotContain(
+                envelopes[3],
+                envelope => envelope.GetProperty("event").GetProperty("kind").GetString()
+                        == "reasoning"
+                    && envelope.GetProperty("event").GetProperty("payload")
+                        .TryGetProperty("text", out JsonElement text)
+                    && text.GetString()
+                        == "Not promoted from an unsupported summary container.");
+            Assert.All(envelopes[3], envelope =>
+            {
+                Assert.Equal(
+                    "system",
+                    envelope.GetProperty("event").GetProperty("actor").GetString());
+                JsonElement safeSummary = envelope.GetProperty("observation")
+                    .GetProperty("safeSourcePayload").GetProperty("payload")
+                    .GetProperty("summary");
+                Assert.Equal(
+                    "future_summary_container",
+                    safeSummary.GetProperty("type").GetString());
+                Assert.True(
+                    safeSummary.GetProperty("futureMalformedSummaryField")
+                        .GetProperty("retained").GetBoolean());
+                Assert.True(
+                    safeSummary.GetProperty("blocks")[0].GetProperty("nested")
+                        .GetProperty("retained").GetBoolean());
+            });
+
+            JsonElement roleAbsent = Assert.Single(envelopes[4]);
+            Assert.Equal(
+                "reasoning",
+                roleAbsent.GetProperty("event").GetProperty("kind").GetString());
+            Assert.Equal(
+                "unknown",
+                roleAbsent.GetProperty("event").GetProperty("actor").GetString());
+            Assert.Equal(
+                "Synthetic role-absent reasoning remains unknown.",
+                roleAbsent.GetProperty("event").GetProperty("payload")
+                    .GetProperty("text").GetString());
+            JsonElement roleUnrecognized = Assert.Single(envelopes[5]);
+            Assert.Equal(
+                "reasoning",
+                roleUnrecognized.GetProperty("event").GetProperty("kind").GetString());
+            Assert.Equal(
+                "unknown",
+                roleUnrecognized.GetProperty("event").GetProperty("actor").GetString());
+            Assert.Equal(
+                "Synthetic unrecognized reasoning role remains unknown.",
+                roleUnrecognized.GetProperty("event").GetProperty("payload")
+                    .GetProperty("text").GetString());
+
+            JsonElement unknownRecord = Assert.Single(envelopes[6]);
+            JsonElement unknownRecordSource = unknownRecord.GetProperty("event")
+                .GetProperty("payload").GetProperty("source");
+            Assert.Equal(
+                "future_rollout_record",
+                unknownRecordSource.GetProperty("type").GetString());
+            Assert.Equal(
+                "future_payload",
+                unknownRecordSource.GetProperty("payload").GetProperty("type").GetString());
+            Assert.Equal(
+                "preserve me",
+                unknownRecordSource.GetProperty("payload")
+                    .GetProperty("syntheticValue").GetString());
+            Assert.True(
+                unknownRecordSource.GetProperty("futureTopLevelField")
+                    .GetProperty("retained").GetBoolean());
+            Assert.Equal(
+                "[REDACTED:aws-access-key-id]",
+                unknownRecordSource.GetProperty("payload")
+                    .GetProperty("sensitiveEvidence").GetString());
+            Assert.Equal(
+                "[REDACTED:aws-access-key-id]",
+                unknownRecord.GetProperty("observation").GetProperty("safeSourcePayload")
+                    .GetProperty("payload").GetProperty("sensitiveEvidence").GetString());
+            JsonElement unknownRecordSafeSource = unknownRecord.GetProperty("observation")
+                .GetProperty("safeSourcePayload");
+            Assert.Equal(
+                "future_rollout_record",
+                unknownRecordSafeSource.GetProperty("type").GetString());
+            Assert.Equal(
+                "future_payload",
+                unknownRecordSafeSource.GetProperty("payload").GetProperty("type").GetString());
+            Assert.Equal(
+                "preserve me",
+                unknownRecordSafeSource.GetProperty("payload")
+                    .GetProperty("syntheticValue").GetString());
+            Assert.True(
+                unknownRecordSafeSource.GetProperty("futureTopLevelField")
+                    .GetProperty("retained").GetBoolean());
+
+            JsonElement unknownContent = Assert.Single(envelopes[7]);
+            Assert.Equal(
+                "future_content_block",
+                unknownContent.GetProperty("event").GetProperty("payload")
+                    .GetProperty("contentType").GetString());
+            Assert.Equal(
+                "future_content_block",
+                unknownContent.GetProperty("event").GetProperty("payload")
+                    .GetProperty("source").GetProperty("type").GetString());
+            Assert.Equal(
+                "not canonical text",
+                unknownContent.GetProperty("event").GetProperty("payload")
+                    .GetProperty("source").GetProperty("syntheticText").GetString());
+            Assert.True(
+                unknownContent.GetProperty("event").GetProperty("payload")
+                    .GetProperty("source").GetProperty("nested")
+                    .GetProperty("retained").GetBoolean());
+
+            Assert.Equal(
+                ["annotation", "annotation", "compaction", "annotation"],
+                envelopes.Skip(8).Select(items => Assert.Single(items)
+                    .GetProperty("event").GetProperty("kind").GetString()));
+            Assert.Equal(
+                "view:turn_started",
+                Assert.Single(envelopes[8]).GetProperty("event")
+                    .GetProperty("partKey").GetString());
+            Assert.Equal(
+                "view:agent_reasoning",
+                Assert.Single(envelopes[9]).GetProperty("event")
+                    .GetProperty("partKey").GetString());
+            Assert.StartsWith(
+                "compaction/",
+                Assert.Single(envelopes[10]).GetProperty("event")
+                    .GetProperty("partKey").GetString());
+            Assert.Equal(
+                "view:context_compacted",
+                Assert.Single(envelopes[11]).GetProperty("event")
+                    .GetProperty("partKey").GetString());
+            JsonElement lifecycleSource = Assert.Single(envelopes[8])
+                .GetProperty("event").GetProperty("payload").GetProperty("source");
+            Assert.Equal("synthetic-turn-1", lifecycleSource.GetProperty("turn_id").GetString());
+            Assert.Equal(200000, lifecycleSource.GetProperty("context_window").GetInt32());
+            Assert.True(
+                lifecycleSource.GetProperty("futureLifecycleField")
+                    .GetProperty("retained").GetBoolean());
+            JsonElement reasoningViewSource = Assert.Single(envelopes[9])
+                .GetProperty("event").GetProperty("payload").GetProperty("source");
+            Assert.Equal(
+                "Synthetic duplicate reasoning view.",
+                reasoningViewSource.GetProperty("text").GetString());
+            Assert.True(
+                reasoningViewSource.GetProperty("futureReasoningViewField")
+                    .GetProperty("retained").GetBoolean());
+            JsonElement canonicalCompaction = Assert.Single(envelopes[10]);
+            Assert.Equal(
+                "compaction",
+                canonicalCompaction.GetProperty("event").GetProperty("kind").GetString());
+            Assert.Equal(
+                "Synthetic paired compacted summary.",
+                canonicalCompaction.GetProperty("event").GetProperty("payload")
+                    .GetProperty("summary")[0].GetProperty("text").GetString());
+            JsonElement canonicalCompactionSource = canonicalCompaction
+                .GetProperty("observation").GetProperty("safeSourcePayload")
+                .GetProperty("payload");
+            Assert.Equal(
+                "Synthetic retained pre-compaction history.",
+                canonicalCompactionSource.GetProperty("history")[0]
+                    .GetProperty("content").GetString());
+            Assert.True(
+                canonicalCompactionSource.GetProperty("history")[0]
+                    .GetProperty("futureHistoryEvidence").GetProperty("retained").GetBoolean());
+            Assert.True(
+                canonicalCompactionSource.GetProperty("summary")[0]
+                    .GetProperty("futureSummaryEvidence").GetProperty("retained").GetBoolean());
+            JsonElement compactedBoundary = Assert.Single(envelopes[11]);
+            Assert.Equal(
+                "annotation",
+                compactedBoundary.GetProperty("event").GetProperty("kind").GetString());
+            Assert.Equal(
+                "harness",
+                compactedBoundary.GetProperty("event").GetProperty("actor").GetString());
+            JsonElement compactedBoundarySource = compactedBoundary.GetProperty("event")
+                .GetProperty("payload").GetProperty("source");
+            Assert.True(
+                compactedBoundarySource.GetProperty("futureCompactionBoundaryField")
+                    .GetProperty("retained").GetBoolean());
+            Assert.Equal(
+                "synthetic",
+                compactedBoundarySource.GetProperty("futureCompactionBoundaryField")
+                    .GetProperty("nested").GetProperty("boundary").GetString());
+            Assert.Equal(
+                "context_compacted",
+                compactedBoundary.GetProperty("observation")
+                    .GetProperty("safeSourcePayload").GetProperty("payload")
+                    .GetProperty("type").GetString());
+            Assert.True(
+                compactedBoundary.GetProperty("observation")
+                    .GetProperty("safeSourcePayload").GetProperty("payload")
+                    .GetProperty("futureCompactionBoundaryField")
+                    .GetProperty("retained").GetBoolean());
+            Assert.Equal(
+                "synthetic",
+                compactedBoundary.GetProperty("observation")
+                    .GetProperty("safeSourcePayload").GetProperty("payload")
+                    .GetProperty("futureCompactionBoundaryField")
+                    .GetProperty("nested").GetProperty("boundary").GetString());
         }
         finally
         {
@@ -1134,7 +1971,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     annotation.GetProperty("view").GetString());
                 Assert.Equal(
                     "context_compacted",
-                    annotation.GetProperty("evidence").GetProperty("type").GetString());
+                    annotation.GetProperty("source").GetProperty("type").GetString());
 
                 JsonElement[] retries = await CaptureOnceAsync(
                     transcriptRoot,
@@ -1214,7 +2051,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 JsonElement observation = receipt.GetProperty("observation");
                 Assert.Equal(
-                    "4",
+                    "6",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
                 JsonElement capturedEvent =
                     Assert.Single(receipt.GetProperty("events").EnumerateArray());
@@ -3317,6 +4154,54 @@ public sealed class CaptureTests : HttpSeamTestBase
                     }
                 } }
         }
+        };
+
+    private static object ExplicitIdentityObservation(
+        string? sourceSessionId,
+        string externalSessionId,
+        string childId,
+        long position,
+        string nativeId,
+        string adapterVersion,
+        string? harnessVersion,
+        string message) => new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourceIdentity = new { externalSessionId, childId },
+            sourcePosition = position,
+            locator = new { kind = "native_id", nativeId },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion,
+                recordType = "session_meta",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload = new
+            {
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = childId,
+                    thread_source = "subagent",
+                    cli_version = "0.144.synthetic",
+                    message
+                }
+            },
+            events = new[]
+            {
+                new
+                {
+                    partKey = "metadata/0",
+                    partOrder = 0,
+                    kind = "lifecycle",
+                    actor = "harness",
+                    payload = new { message }
+                }
+            }
         };
 
     private static object RoutedObservation(

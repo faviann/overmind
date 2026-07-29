@@ -1,6 +1,12 @@
 using Dapper;
 using MemSrv.Core;
 using Npgsql;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace MemSrv.Tests;
 
@@ -396,6 +402,25 @@ public sealed class SchemaVerifierTests
                         """));
             }
 
+            File.Copy(
+                Path.Combine(_root, "migrations", "0008_capture_source_identity.sql"),
+                Path.Combine(migrations, "0008_capture_source_identity.sql"));
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                Assert.Equal(
+                    xminBefore,
+                    await connection.ExecuteScalarAsync<string>(
+                        """
+                        SELECT xmin::text
+                        FROM capture_observations
+                        WHERE observation_uuid = @observationUuid
+                        """,
+                        new { observationUuid }));
+            }
+
             var envelope = Assert.Single(
                 await new OperatorCaptureReads(admin)
                     .ReadCapturedEventEnvelopesAsync(observationUuid));
@@ -408,6 +433,383 @@ public sealed class SchemaVerifierTests
                 MaintenanceConnection,
                 $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
             Directory.Delete(migrations, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SourceIdentityUpgradeReusesThePopulatedStreamAndItsEstablishedTraceSession()
+    {
+        var migrations = Path.Combine(
+            Path.GetTempPath(), $"memsrv-source-identity-upgrade-{Guid.NewGuid():N}");
+        var database = $"memory_test_{Guid.NewGuid():N}_source_identity_upgrade";
+        var admin = TestDatabase.BuildAdminConnection(database);
+        Guid bindingUuid = Guid.NewGuid();
+        Guid streamUuid = Guid.NewGuid();
+        Guid observationUuid = Guid.NewGuid();
+        byte[] signatureKey = Enumerable.Range(1, 32).Select(value => (byte)value).ToArray();
+        string captureCredential = $"mcap_{Guid.NewGuid():N}";
+        string keysPath = Path.Combine(
+            Path.GetTempPath(), $"memsrv-source-identity-keys-{Guid.NewGuid():N}.yaml");
+        const string legacyPathIdentity = "codex-rollout-legacy-path";
+        const string externalSessionId = "01970000-0000-7000-8000-000000000149";
+        const string childId = "01970000-0000-7000-8000-000000000150";
+        string establishedSessionId = $"capture:{bindingUuid}:{legacyPathIdentity}";
+        string legacySourcePayloadJson = JsonSerializer.Serialize(new
+        {
+            type = "session_meta",
+            payload = new
+            {
+                session_id = externalSessionId,
+                id = childId,
+                source = new { future_classifier = true },
+                thread_source = "subagent",
+                cli_version = "0.144.synthetic"
+            }
+        });
+        using var legacySourcePayload = JsonDocument.Parse(legacySourcePayloadJson);
+        using var legacyEventPayload = JsonDocument.Parse("""{"message":"legacy"}""");
+        var legacySource = new CaptureSource(
+            "codex", "0.144.synthetic", "session_meta", MaterialKind: "persisted_record");
+        var legacyEvent = new CaptureEvent(
+            "metadata/0", 0, "lifecycle", "harness",
+            legacyEventPayload.RootElement.Clone(), null, null);
+        string legacySignatureContent = JsonSerializer.Serialize(
+            new
+            {
+                contractVersion = 1,
+                sourceSessionId = legacyPathIdentity,
+                locator = (CaptureSourceLocator)new CaptureSourceLocator.NativeId(
+                    "legacy-session-meta"),
+                sourceTimestamp = (CaptureSourceTimestamp?)null,
+                source = legacySource,
+                adapter = new CaptureAdapter("codex-synthetic-jsonl", "4"),
+                sourcePayload = legacySourcePayload.RootElement.Clone(),
+                events = new[] { legacyEvent },
+                routeEvidence = (CaptureRouteEvidence?)null
+            },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        using var hmac = new HMACSHA256(signatureKey);
+        string legacySignature = Convert.ToHexString(
+            hmac.ComputeHash(Encoding.UTF8.GetBytes(legacySignatureContent)))
+            .ToLowerInvariant();
+        Directory.CreateDirectory(migrations);
+        foreach (string path in Directory.EnumerateFiles(
+                     Path.Combine(_root, "migrations"), "*.sql")
+                     .Where(path => string.Compare(
+                         Path.GetFileName(path),
+                         "0008_capture_source_identity.sql",
+                         StringComparison.Ordinal) < 0))
+        {
+            File.Copy(path, Path.Combine(migrations, Path.GetFileName(path)));
+        }
+
+        try
+        {
+            await ExecuteAsync(MaintenanceConnection, $"CREATE DATABASE \"{database}\"");
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                await connection.ExecuteAsync(
+                    """
+                    INSERT INTO capture_source_bindings
+                      (binding_uuid, stable_name, harness, agent_id, credential_hash,
+                       allowed_namespaces, content_signature_key)
+                    VALUES
+                      (@bindingUuid, 'legacy-source-identity-upgrade', 'codex',
+                       'capture:legacy-upgrade', @credentialHash, '{}',
+                       @signatureKey);
+
+                    INSERT INTO capture_source_streams
+                      (stream_uuid, binding_uuid, source_session_id, effective_namespace,
+                       route_basis, checkpoint_position)
+                    VALUES
+                      (@streamUuid, @bindingUuid, @legacyPathIdentity, 'capture/unscoped',
+                       'fallback', 0);
+
+                    INSERT INTO capture_observations
+                      (observation_uuid, stream_uuid, source_position, locator_kind,
+                       locator_native_id, content_signature, effective_namespace, route_basis,
+                       source, adapter, safe_source_payload, scan_status)
+                    VALUES
+                      (@observationUuid, @streamUuid, 0, 'native_id', 'legacy-session-meta',
+                       @legacySignature, 'capture/unscoped', 'fallback',
+                       '{"harness":"codex","harnessVersion":"0.144.synthetic","recordType":"session_meta","materialKind":"persisted_record"}'::jsonb,
+                       '{"name":"codex-synthetic-jsonl","version":"4"}'::jsonb,
+                       CAST(@sourcePayload AS jsonb), 'clean');
+
+                    INSERT INTO captured_events
+                      (observation_uuid, session_id, agent_id, namespace,
+                       part_key, part_order, kind, actor, payload)
+                    VALUES
+                      (@observationUuid, @establishedSessionId, 'capture:legacy-upgrade',
+                       'capture/unscoped', 'metadata/0', 0, 'lifecycle', 'harness',
+                       '{"message":"legacy"}'::jsonb);
+                    """,
+                    new
+                    {
+                        bindingUuid,
+                        streamUuid,
+                        observationUuid,
+                        signatureKey,
+                        credentialHash = CaptureCredential.Hash(captureCredential),
+                        legacyPathIdentity,
+                        establishedSessionId,
+                        legacySignature,
+                        sourcePayload = legacySourcePayloadJson
+                    });
+            }
+
+            string observationXmin;
+            await using (var connection = new NpgsqlConnection(admin))
+            {
+                await connection.OpenAsync();
+                observationXmin = await connection.ExecuteScalarAsync<string>(
+                    """
+                    SELECT xmin::text
+                    FROM capture_observations
+                    WHERE observation_uuid = @observationUuid
+                    """,
+                    new { observationUuid })
+                    ?? throw new InvalidOperationException("Legacy observation was not found.");
+            }
+
+            File.Copy(
+                Path.Combine(_root, "migrations", "0008_capture_source_identity.sql"),
+                Path.Combine(migrations, "0008_capture_source_identity.sql"));
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+
+            await using (var verification = new NpgsqlConnection(admin))
+            {
+                await verification.OpenAsync();
+                var migrated = await verification.QuerySingleAsync<(
+                    string ExternalSessionId,
+                    string ChildId,
+                    string TraceSessionId)>(
+                    """
+                    SELECT external_session_id AS ExternalSessionId,
+                           child_id AS ChildId,
+                           trace_session_id AS TraceSessionId
+                    FROM capture_source_streams
+                    WHERE stream_uuid = @streamUuid
+                    """,
+                    new { streamUuid });
+                Assert.Equal(externalSessionId, migrated.ExternalSessionId);
+                Assert.Equal(childId, migrated.ChildId);
+                Assert.Equal(establishedSessionId, migrated.TraceSessionId);
+            }
+
+            using var sourcePayload = JsonDocument.Parse(
+                """{"type":"turn_context","payload":{"message":"continued"}}""");
+            using var eventPayload = JsonDocument.Parse("""{"message":"continued"}""");
+            var continuation = new CaptureObservationRequest(
+                1,
+                externalSessionId,
+                1,
+                new CaptureLocator("native_id", "continued-record", null, null, null),
+                null,
+                new CaptureSource(
+                    "codex", "0.144.synthetic", "turn_context",
+                    MaterialKind: "persisted_record"),
+                new CaptureAdapter("codex-synthetic-jsonl", "6"),
+                sourcePayload.RootElement.Clone(),
+                [
+                    new CaptureEvent(
+                        "message/0", 0, "message", "user",
+                        eventPayload.RootElement.Clone(), null, null)
+                ],
+                SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId));
+            var retry = new CaptureObservationRequest(
+                    1,
+                    externalSessionId,
+                    0,
+                    new CaptureLocator(
+                        "native_id", "legacy-session-meta", null, null, null),
+                    null,
+                    legacySource,
+                    new CaptureAdapter("codex-synthetic-jsonl", "6"),
+                    legacySourcePayload.RootElement.Clone(),
+                    [legacyEvent],
+                    SourceIdentity: new CaptureSourceIdentity(externalSessionId, childId));
+
+            await File.WriteAllTextAsync(keysPath, "keys: []\n");
+            using var server = TestProcessRunner.StartServer(new Dictionary<string, string>
+            {
+                ["MEMSRV_TRANSPORT"] = "http",
+                ["MEMSRV_HTTP_URL"] = "http://127.0.0.1:0",
+                ["MEMSRV_AGENT_KEYS_PATH"] = keysPath,
+                ["MEMSRV_CONNECTION_STRING"] = admin,
+                ["MEMSRV_NEVER_STORE_PATH"] =
+                    Path.Combine(_root, "config", "never_store.yaml")
+            });
+            var serverStdout = new StringBuilder();
+            var serverStderr = new StringBuilder();
+            var stdoutPump = PumpAsync(server.StandardOutput, serverStdout);
+            var stderrPump = PumpAsync(server.StandardError, serverStderr);
+            try
+            {
+                string url = await WaitForListeningUrlAsync(serverStderr);
+                using var client = new HttpClient { BaseAddress = new Uri(url) };
+                client.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue("Bearer", captureCredential);
+
+                using var retryResponse = await client.PostAsJsonAsync(
+                    "/capture/v1/observations", retry);
+                Assert.Equal(HttpStatusCode.OK, retryResponse.StatusCode);
+                using JsonDocument retryBody =
+                    JsonDocument.Parse(await retryResponse.Content.ReadAsStringAsync());
+                Assert.Equal(
+                    "already_accepted",
+                    retryBody.RootElement.GetProperty("status").GetString());
+                Assert.Equal(
+                    observationUuid,
+                    retryBody.RootElement.GetProperty("observationUuid").GetGuid());
+                Assert.Equal(
+                    streamUuid,
+                    retryBody.RootElement.GetProperty("observation")
+                        .GetProperty("sourceStreamUuid").GetGuid());
+
+                using var continuationResponse = await client.PostAsJsonAsync(
+                    "/capture/v1/observations", continuation);
+                Assert.Equal(HttpStatusCode.OK, continuationResponse.StatusCode);
+                using JsonDocument continuationBody =
+                    JsonDocument.Parse(await continuationResponse.Content.ReadAsStringAsync());
+                Guid continuationObservationUuid = continuationBody.RootElement
+                    .GetProperty("observationUuid").GetGuid();
+                Assert.Equal("new", continuationBody.RootElement.GetProperty("status").GetString());
+                Assert.Equal(
+                    streamUuid,
+                    continuationBody.RootElement.GetProperty("observation")
+                        .GetProperty("sourceStreamUuid").GetGuid());
+
+                JsonElement legacyEnvelope = ParseSingleMemCtlEnvelope(
+                    await TestProcessRunner.RunMemCtlAsync(
+                        admin, null, "capture", "receipt", observationUuid.ToString()));
+                AssertCanonicalMigratedEnvelope(
+                    legacyEnvelope,
+                    observationUuid,
+                    streamUuid,
+                    externalSessionId,
+                    childId,
+                    establishedSessionId);
+
+                JsonElement continuationEnvelope = ParseSingleMemCtlEnvelope(
+                    await TestProcessRunner.RunMemCtlAsync(
+                        admin,
+                        null,
+                        "capture",
+                        "receipt",
+                        continuationObservationUuid.ToString()));
+                AssertCanonicalMigratedEnvelope(
+                    continuationEnvelope,
+                    continuationObservationUuid,
+                    streamUuid,
+                    externalSessionId,
+                    childId,
+                    establishedSessionId);
+            }
+            finally
+            {
+                if (!server.HasExited)
+                {
+                    server.Kill(entireProcessTree: true);
+                }
+                await server.WaitForExitAsync();
+                await Task.WhenAll(stdoutPump, stderrPump);
+            }
+
+            Assert.Equal("", Snapshot(serverStdout));
+            await using var immutabilityVerification = new NpgsqlConnection(admin);
+            await immutabilityVerification.OpenAsync();
+            Assert.Equal(
+                observationXmin,
+                await immutabilityVerification.ExecuteScalarAsync<string>(
+                    """
+                    SELECT xmin::text
+                    FROM capture_observations
+                    WHERE observation_uuid = @observationUuid
+                    """,
+                    new { observationUuid }));
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            await ExecuteAsync(
+                MaintenanceConnection,
+                $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
+            Directory.Delete(migrations, recursive: true);
+            File.Delete(keysPath);
+        }
+    }
+
+    private static JsonElement ParseSingleMemCtlEnvelope(string stdout)
+    {
+        string line = Assert.Single(
+            stdout.Split(
+                Environment.NewLine,
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.Clone();
+    }
+
+    private static void AssertCanonicalMigratedEnvelope(
+        JsonElement envelope,
+        Guid observationUuid,
+        Guid streamUuid,
+        string externalSessionId,
+        string childId,
+        string establishedSessionId)
+    {
+        JsonElement observation = envelope.GetProperty("observation");
+        Assert.Equal(observationUuid, observation.GetProperty("observationUuid").GetGuid());
+        Assert.Equal(streamUuid, observation.GetProperty("sourceStreamUuid").GetGuid());
+        JsonElement identity = observation.GetProperty("sourceIdentity");
+        Assert.Equal(
+            externalSessionId,
+            identity.GetProperty("externalSessionId").GetString());
+        Assert.Equal(childId, identity.GetProperty("childId").GetString());
+
+        JsonElement canonicalEvent = envelope.GetProperty("event");
+        Assert.Equal(establishedSessionId, canonicalEvent.GetProperty("sessionId").GetString());
+        Assert.Equal("capture:legacy-upgrade", canonicalEvent.GetProperty("agentId").GetString());
+    }
+
+    private static async Task<string> WaitForListeningUrlAsync(StringBuilder stderr)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (string line in Snapshot(stderr).Split('\n'))
+            {
+                int index = line.IndexOf("Now listening on: ", StringComparison.Ordinal);
+                if (index >= 0)
+                {
+                    return line[(index + "Now listening on: ".Length)..].Trim();
+                }
+            }
+            await Task.Delay(200);
+        }
+        throw new Xunit.Sdk.XunitException(
+            $"Server never reported a listening address. stderr:{Environment.NewLine}{Snapshot(stderr)}");
+    }
+
+    private static Task PumpAsync(StreamReader reader, StringBuilder sink) => Task.Run(async () =>
+    {
+        string? line;
+        while ((line = await reader.ReadLineAsync()) is not null)
+        {
+            lock (sink)
+            {
+                sink.AppendLine(line);
+            }
+        }
+    });
+
+    private static string Snapshot(StringBuilder buffer)
+    {
+        lock (buffer)
+        {
+            return buffer.ToString();
         }
     }
 

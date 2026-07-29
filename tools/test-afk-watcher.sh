@@ -32,6 +32,26 @@ for skill in work-on tdd code-review select-issue; do
 done
 printf 'scripted watcher work-on instructions\n' >"$skills/work-on/SKILL.md"
 
+cat >"$skills/work-on/scripts/validate-closeout-body.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+body="$(mktemp)"
+trap 'rm -f "$body"' EXIT
+cat >"$body"
+if ! grep -Fqx '## Closure gate' "$body"; then
+  printf 'closeout body invalid: missing canonical heading: ## Closure gate\n' >&2
+  exit 1
+fi
+if ! grep -Fqx '| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |' "$body"; then
+  printf 'closeout body invalid: missing canonical closure gate table header\n' >&2
+  exit 1
+fi
+if grep -Fqx '| Scripted criterion | runner | public CLI | output | failing |' "$body"; then
+  printf 'closeout body invalid: Closes requires every closure gate row to be tested; row 1 is failing\n' >&2
+  exit 1
+fi
+EOF
+
 cat >"$adapters/git" <<'EOF'
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >>"$AFK_TEST_EVENTS"
@@ -68,7 +88,7 @@ case "$AFK_TEST_SCENARIO" in
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     fi
     ;;
-  live-add|static-blocked|dependency-unreadable|blocked-then-unblocked|dependency-drain|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override)
+  live-add|static-blocked|dependency-unreadable|blocked-then-unblocked|dependency-drain|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing)
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   drain|force)
     if grep -qx claim-42 "$AFK_TEST_STATE"; then
@@ -209,7 +229,7 @@ case "$AFK_TEST_SCENARIO" in
     else
       kill -TERM "$PPID"
     fi ;;
-  static-blocked|dependency-unreadable|dependency-race|claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override)
+  static-blocked|dependency-unreadable|dependency-race|claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing)
     kill -TERM "$PPID" ;;
   chain|paused-lane|paused-only|idle-artifact|idle-artifact-label-fail|idle-discovery-uncertain|ci-retry-pass|ci-repeat-lane|ci-timeout-only|nonblocking-discovery|blocking-discovery-lane|uncertain-discovery-only)
     kill -TERM "$PPID" ;;
@@ -317,7 +337,13 @@ case "$*" in
     fi ;;
   pr\ view\ *\ --json\ body\ --jq\ .body)
     pr="${3}"; issue="$((pr - 100))"
-    if [[ "$AFK_TEST_SCENARIO" == paused-lane || "$AFK_TEST_SCENARIO" == paused-only || "$AFK_TEST_SCENARIO" == default-race ]] && [[ "$issue" == 42 ]]; then
+    if [[ "$AFK_TEST_SCENARIO" == closeout-pr160 ]]; then
+      printf 'Closes #%s\n\n## Acceptance closure\n\n| Criterion | Production path | Exact artifact/mode/seam | Evidence | Status |\n|---|---|---|---|---|\n| Scripted criterion | runner | public CLI | output | tested |\n\n## Workflow telemetry\n\n- Final workflow outcome: Closes\n' "$issue"
+    elif [[ "$AFK_TEST_SCENARIO" == closeout-pr162 ]]; then
+      printf 'Closes #%s\n\n## Closure gate\n\n| Mechanism | Acceptance criterion |\n|---|---|\n| Renderer | Scripted criterion |\n\n| Final workflow outcome | Closes |\n' "$issue"
+    elif [[ "$AFK_TEST_SCENARIO" == closeout-failing ]]; then
+      printf '## Issues\n\nCloses #%s\n\n## Closure gate\n\n| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |\n|---|---|---|---|---|\n| Scripted criterion | runner | public CLI | output | failing |\n\n## Workflow telemetry\n\n| Field | Observed value |\n|---|---|\n| Model configuration | scripted |\n| Wall-clock elapsed | scripted |\n| Implementation rounds | 1 |\n| Independent-review rounds | 1 |\n| Remediation rounds | 0 |\n| Validation executions | 1 |\n| Blocking findings resolved | 0 |\n| Findings rejected at adjudication | 0 |\n| Final workflow outcome | Closes |\n' "$issue"
+    elif [[ "$AFK_TEST_SCENARIO" == paused-lane || "$AFK_TEST_SCENARIO" == paused-only || "$AFK_TEST_SCENARIO" == default-race ]] && [[ "$issue" == 42 ]]; then
       printf 'Progresses #%s\n\n| Final workflow outcome | Progresses |\n' "$issue"
     elif [[ "$AFK_TEST_SCENARIO" == nonblocking-discovery || "$AFK_TEST_SCENARIO" == blocking-discovery-lane || "$AFK_TEST_SCENARIO" == uncertain-discovery-only || "$AFK_TEST_SCENARIO" == idle-discovery-uncertain ]] && [[ "$issue" == 42 ]]; then
       printf 'Closes #%s\n\n## Follow-ups\n\n- #77 - discovered work\n\n## Closure gate\n\n| Acceptance criterion | Production path | Exact artifact/mode/seam | Evidence | Status |\n|---|---|---|---|---|\n| Scripted watcher criterion | `run-afk-once.sh` | Public watcher fixture | Scenario output | tested |\n\n| Final workflow outcome | Closes |\n' "$issue"
@@ -369,7 +395,8 @@ esac
 EOF
 
 chmod +x "$root/tools/"*.sh "$root/node_modules/.bin/tsx" "$adapters/"* \
-  "$skills/work-on/scripts/select-issue-codex.sh"
+  "$skills/work-on/scripts/select-issue-codex.sh" \
+  "$skills/work-on/scripts/validate-closeout-body.sh"
 
 setup_scenario() {
   rm -rf "$repo" "$remote"
@@ -477,6 +504,30 @@ run_foreground required-checks-override 'test test-compose'
 [[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
 [[ "$(grep -c '^gh api repos/acme/widget/branches/main/protection$' "$events")" == 2 ]]
 grep -q '^gh pr merge 142 --merge$' "$events"
+
+run_foreground closeout-pr160
+grep -q '^gh pr edit 142 --add-label afk-review$' "$events"
+grep -q 'closeout body invalid: missing canonical heading: ## Closure gate' \
+  "$fixture/closeout-pr160.out"
+[[ "$(grep -c '^gh pr view 142 --json body --jq .body$' "$events")" == 1 ]]
+! grep -q '^gh pr merge 142 --merge$' "$events"
+! grep -q '^gh pr checks 142 ' "$events"
+
+run_foreground closeout-pr162
+grep -q '^gh pr edit 142 --add-label afk-review$' "$events"
+grep -q 'closeout body invalid: missing canonical closure gate table header' \
+  "$fixture/closeout-pr162.out"
+[[ "$(grep -c '^gh pr view 142 --json body --jq .body$' "$events")" == 1 ]]
+! grep -q '^gh pr merge 142 --merge$' "$events"
+! grep -q '^gh pr checks 142 ' "$events"
+
+run_foreground closeout-failing
+grep -q '^gh pr edit 142 --add-label afk-review$' "$events"
+grep -q 'closeout body invalid: Closes requires every closure gate row to be tested; row 1 is failing' \
+  "$fixture/closeout-failing.out"
+[[ "$(grep -c '^gh pr view 142 --json body --jq .body$' "$events")" == 1 ]]
+! grep -q '^gh pr merge 142 --merge$' "$events"
+! grep -q '^gh pr checks 142 ' "$events"
 
 run_foreground chain
 [[ "$(grep -c '^agent ' "$events")" == 2 ]] || {

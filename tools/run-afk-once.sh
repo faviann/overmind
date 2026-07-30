@@ -352,7 +352,7 @@ while :; do
   # an unreadable dependency response.
   if ! blocker_numbers="$(
     gh api "repos/$repo_name/issues/$issue_number/dependencies/blocked_by" \
-      --paginate --jq '.[].number'
+      --paginate --jq '.[] | select(.state == "open") | .number'
   )"; then
     exit_if_draining_before_claim
     printf 'AFK issue #%s remains authorized because its open blockers could not be read\n' \

@@ -124,7 +124,7 @@ case "$AFK_TEST_SCENARIO" in
       printf 'Selected issue: https://github.com/acme/widget/issues/42\n'
     fi
     ;;
-  live-add|static-blocked|dependency-unreadable|blocked-then-unblocked|dependency-drain|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing|closeout-progresses|closeout-validator-unavailable|closeout-body-unreadable)
+  live-add|static-blocked|closed-dependency|mixed-dependencies|dependency-unreadable|blocked-then-unblocked|dependency-drain|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing|closeout-progresses|closeout-validator-unavailable|closeout-body-unreadable)
     printf 'Selected issue: https://github.com/acme/widget/issues/42\n' ;;
   drain|force)
     if grep -qx claim-42 "$AFK_TEST_STATE"; then
@@ -265,7 +265,7 @@ case "$AFK_TEST_SCENARIO" in
     else
       kill -TERM "$PPID"
     fi ;;
-  static-blocked|dependency-unreadable|dependency-race|claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing|closeout-progresses|closeout-validator-unavailable|closeout-body-unreadable)
+  static-blocked|closed-dependency|mixed-dependencies|dependency-unreadable|dependency-race|claim-race|eligibility-race|default-race|drain-before-claim|launch-unprotected|launch-no-prs|launch-not-strict|launch-missing-check|required-checks-override|closeout-pr160|closeout-pr162|closeout-failing|closeout-progresses|closeout-validator-unavailable|closeout-body-unreadable)
     kill -TERM "$PPID" ;;
   chain|paused-lane|paused-only|idle-artifact|idle-artifact-label-fail|idle-discovery-uncertain|ci-retry-pass|ci-repeat-lane|ci-timeout-only|nonblocking-discovery|blocking-discovery-lane|uncertain-discovery-only)
     kill -TERM "$PPID" ;;
@@ -411,23 +411,43 @@ case "$*" in
       printf '%s\n' '[{"name":"test","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/2"},{"name":"test-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/3"},{"name":"reference-compose","state":"SUCCESS","bucket":"pass","link":"https://github.com/acme/widget/actions/runs/101/job/4"}]'
     fi ;;
   "run rerun 100 --failed") ;;
-  api\ repos/acme/widget/issues/*/dependencies/blocked_by\ --paginate\ --jq\ .[].number)
+  api\ repos/acme/widget/issues/*/dependencies/blocked_by\ --paginate\ --jq\ *)
     issue_path="${2}"; issue="${issue_path#repos/acme/widget/issues/}"; issue="${issue%%/*}"
     dependency_calls="$(grep -c "^gh api repos/acme/widget/issues/$issue/dependencies/blocked_by " "$AFK_TEST_EVENTS")"
+    state_filter="${5}"
+    dependency_response='[]'
     case "$AFK_TEST_SCENARIO" in
-      static-blocked) printf '77\n' ;;
+      static-blocked)
+        dependency_response='[{"number":77,"state":"open"}]' ;;
+      closed-dependency)
+        dependency_response='[{"number":77,"state":"closed"}]' ;;
+      mixed-dependencies)
+        dependency_response='[{"number":77,"state":"closed"},{"number":78,"state":"open"}]' ;;
       dependency-unreadable) exit 1 ;;
       blocked-then-unblocked)
-        grep -qx blocker-closed "$AFK_TEST_STATE" || printf '77\n' ;;
+        if grep -qx blocker-closed "$AFK_TEST_STATE"; then
+          dependency_response='[{"number":77,"state":"closed"}]'
+        else
+          dependency_response='[{"number":77,"state":"open"}]'
+        fi ;;
       dependency-race)
-        grep -qx native-blocker-added "$AFK_TEST_STATE" && printf '77\n' ;;
+        if grep -qx native-blocker-added "$AFK_TEST_STATE"; then
+          dependency_response='[{"number":77,"state":"open"}]'
+        fi ;;
       dependency-drain)
         kill -TERM "$PPID" ;;
+      nonblocking-discovery)
+        if [[ "$dependency_calls" -gt 1 ]]; then
+          dependency_response='[{"number":77,"state":"closed"}]'
+        fi ;;
       blocking-discovery-lane)
-        [[ "$dependency_calls" -eq 1 ]] || printf '77\n' ;;
+        if [[ "$dependency_calls" -gt 1 ]]; then
+          dependency_response='[{"number":77,"state":"open"}]'
+        fi ;;
       uncertain-discovery-only|idle-discovery-uncertain)
         [[ "$dependency_calls" -eq 1 ]] || exit 1 ;;
-    esac ;;
+    esac
+    jq -r "$state_filter" <<<"$dependency_response" ;;
   pr\ view\ *\ --json\ state,mergeable,mergeStateStatus)
     printf '%s\n' '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
   pr\ merge\ *\ --merge)
@@ -839,6 +859,20 @@ run_foreground static-blocked
 grep -q 'issue #42 remains authorized but blocked by open issue #77' \
   "$fixture/static-blocked.out"
 [[ "$(grep -c '^sleep 0$' "$events")" -ge 1 ]]
+
+run_foreground closed-dependency
+[[ "$(grep -c '^selector$' "$events")" == 1 ]]
+[[ "$(grep -c '^claim 42$' "$events")" == 1 ]]
+[[ "$(grep -c '^agent 42$' "$events")" == 1 ]]
+! grep -q -- '--add-label Sandcastle' "$events"
+
+run_foreground mixed-dependencies
+[[ "$(grep -c '^selector$' "$events")" == 1 ]]
+! grep -q '^claim ' "$events"
+! grep -q '^agent ' "$events"
+grep -q 'issue #42 remains authorized but blocked by open issue #78' \
+  "$fixture/mixed-dependencies.out"
+! grep -q 'open issues\\? .*#77' "$fixture/mixed-dependencies.out"
 
 run_foreground dependency-unreadable
 [[ "$(grep -c '^selector$' "$events")" == 1 ]]

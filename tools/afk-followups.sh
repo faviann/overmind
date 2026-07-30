@@ -31,7 +31,7 @@ repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" || {
   exit 1
 }
 blocker_numbers="$(gh api "repos/$repo/issues/$issue_number/dependencies/blocked_by" \
-  --paginate --jq '.[].number')" || {
+  --paginate --jq '.[] | select(.state == "open") | .number')" || {
   printf 'could not classify discovered work against issue #%s dependencies\n' \
     "$issue_number" >&2
   exit 1

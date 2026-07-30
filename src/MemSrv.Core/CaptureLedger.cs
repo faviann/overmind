@@ -152,6 +152,36 @@ internal static class CaptureLedger
         return receipts;
     }
 
+    internal static async Task<IReadOnlyList<SourceOrderedObservation>>
+        LoadSourceOrderedObservationsAsync(
+            NpgsqlConnection connection,
+            Guid sourceStreamUuid)
+    {
+        var rows = (await connection.QueryAsync<SourceOrderedObservationRow>(
+            """
+            SELECT observation_uuid AS ObservationUuid,
+                   source_position AS SourcePosition
+            FROM capture_observations
+            WHERE stream_uuid = @sourceStreamUuid
+            ORDER BY source_position
+            """,
+            new { sourceStreamUuid })).AsList();
+        var observations = new List<SourceOrderedObservation>(rows.Count);
+        foreach (var row in rows)
+        {
+            var observation = await LoadObservationAsync(connection, row.ObservationUuid)
+                ?? throw new InvalidOperationException(
+                    $"Capture observation '{row.ObservationUuid}' was not found.");
+            observations.Add(new SourceOrderedObservation(row.SourcePosition, observation));
+        }
+
+        return observations;
+    }
+
+    internal sealed record SourceOrderedObservation(
+        long SourcePosition,
+        CaptureObservationReceipt Observation);
+
     private sealed class ObservationRow
     {
         public Guid ObservationUuid { get; set; }
@@ -197,5 +227,11 @@ internal static class CaptureLedger
         public Guid? TargetSourceStreamUuid { get; set; }
         public string TargetNativeId { get; set; } = "";
         public string? TargetKind { get; set; }
+    }
+
+    private sealed class SourceOrderedObservationRow
+    {
+        public Guid ObservationUuid { get; set; }
+        public long SourcePosition { get; set; }
     }
 }

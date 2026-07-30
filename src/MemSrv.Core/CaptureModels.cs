@@ -370,6 +370,32 @@ public sealed record CapturedEventEnvelope(
     CanonicalCapturedEvent Event,
     IReadOnlyList<CaptureRelationship> Relationships);
 
+/// <summary>
+/// Durable evidence used to derive presentation order for one source-stream
+/// replay. These values name ledger facts rather than inventing an ordinal.
+/// </summary>
+public sealed record CaptureReplayOrderBasis(
+    string Observation,
+    string Event);
+
+/// <summary>
+/// One canonical envelope in a source-stream replay, annotated only with its
+/// primary observation's durable position.
+/// </summary>
+public sealed record CapturedEventReplay(
+    long SourcePosition,
+    CapturedEventEnvelope Envelope);
+
+/// <summary>
+/// The operator read model for exactly one accepted capture source stream.
+/// Canonical envelopes are wrapped unchanged.
+/// </summary>
+public sealed record CapturedSourceStreamReplay(
+    int ContractVersion,
+    Guid SourceStreamUuid,
+    CaptureReplayOrderBasis OrderBasis,
+    IReadOnlyList<CapturedEventReplay> Events);
+
 /// <summary>The per-record import outcome returned by the capture endpoint.</summary>
 public sealed record CaptureImportReceipt(
     Guid ObservationUuid,

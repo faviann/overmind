@@ -180,6 +180,119 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
     }
 
+    [Fact]
+    public async Task OperatorReplaysOneSourceStreamInVerifiedSourceAndPartOrder()
+    {
+        var captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"codex-replay-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        var firstResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ReplayObservation(
+                sourceSessionId,
+                0,
+                $"replay-first-{Guid.NewGuid():N}",
+                "2099-01-02T03:04:05Z",
+                model: "gpt-explicit",
+                provider: "openai-explicit",
+                ("first/1", 1, "first-second-part"),
+                ("first/0", 0, "first-first-part")));
+        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        JsonElement firstReceipt = await firstResponse.Content.ReadFromJsonAsync<JsonElement>();
+
+        var secondResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ReplayObservation(
+                sourceSessionId,
+                1,
+                $"replay-second-{Guid.NewGuid():N}",
+                "2001-02-03T04:05:06Z",
+                model: null,
+                provider: null,
+                ("second/1", 1, "second-second-part"),
+                ("second/0", 0, "second-first-part")));
+        Assert.Equal(HttpStatusCode.OK, secondResponse.StatusCode);
+
+        var otherStreamResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ReplayObservation(
+                UniqueSession(),
+                0,
+                $"replay-other-{Guid.NewGuid():N}",
+                "1999-01-01T00:00:00Z",
+                model: "other-model",
+                provider: "other-provider",
+                ("other/0", 0, "must-not-appear")));
+        Assert.Equal(HttpStatusCode.OK, otherStreamResponse.StatusCode);
+
+        Guid sourceStreamUuid = firstReceipt
+            .GetProperty("observation")
+            .GetProperty("sourceStreamUuid")
+            .GetGuid();
+        JsonElement replay = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "replay", sourceStreamUuid.ToString())).RootElement.Clone();
+
+        Assert.Equal(
+            ["contractVersion", "sourceStreamUuid", "orderBasis", "events"],
+            replay.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(1, replay.GetProperty("contractVersion").GetInt32());
+        Assert.Equal(sourceStreamUuid, replay.GetProperty("sourceStreamUuid").GetGuid());
+        Assert.Equal(
+            "capture_observations.source_position",
+            replay.GetProperty("orderBasis").GetProperty("observation").GetString());
+        Assert.Equal(
+            "captured_events.part_order",
+            replay.GetProperty("orderBasis").GetProperty("event").GetString());
+
+        JsonElement[] replayed = replay.GetProperty("events").EnumerateArray().ToArray();
+        Assert.Equal(4, replayed.Length);
+        Assert.Equal(
+            [0L, 0L, 1L, 1L],
+            replayed.Select(item => item.GetProperty("sourcePosition").GetInt64()));
+        Assert.Equal(
+            ["first-first-part", "first-second-part", "second-first-part", "second-second-part"],
+            replayed.Select(item => item
+                .GetProperty("envelope")
+                .GetProperty("event")
+                .GetProperty("payload")
+                .GetProperty("text")
+                .GetString()));
+        Assert.DoesNotContain(
+            replayed,
+            item => item
+                .GetProperty("envelope")
+                .GetProperty("event")
+                .GetProperty("payload")
+                .GetProperty("text")
+                .GetString() == "must-not-appear");
+
+        JsonElement firstObservation = replayed[0]
+            .GetProperty("envelope")
+            .GetProperty("observation");
+        Assert.Equal("codex", firstObservation.GetProperty("source").GetProperty("harness").GetString());
+        Assert.Equal(
+            "synthetic-replay",
+            firstObservation.GetProperty("source").GetProperty("harnessVersion").GetString());
+        Assert.Equal(
+            "gpt-explicit",
+            firstObservation.GetProperty("source").GetProperty("model").GetString());
+        Assert.Equal(
+            "openai-explicit",
+            firstObservation.GetProperty("source").GetProperty("provider").GetString());
+        Assert.Equal("2", firstObservation.GetProperty("adapter").GetProperty("version").GetString());
+        Assert.Equal(
+            "native_id",
+            firstObservation.GetProperty("locator").GetProperty("kind").GetString());
+
+        JsonElement secondObservation = replayed[2]
+            .GetProperty("envelope")
+            .GetProperty("observation");
+        Assert.Equal(JsonValueKind.Null, secondObservation.GetProperty("source").GetProperty("model").ValueKind);
+        Assert.Equal(JsonValueKind.Null, secondObservation.GetProperty("source").GetProperty("provider").ValueKind);
+    }
+
     [Theory]
     [InlineData(AgentAKey)]
     [InlineData("mcap_short")]
@@ -4658,6 +4771,40 @@ public sealed class CaptureTests : HttpSeamTestBase
                     }
                 } }
         }
+        };
+
+    private static object ReplayObservation(
+        string sourceSessionId,
+        long position,
+        string nativeId,
+        string sourceTimestamp,
+        string? model,
+        string? provider,
+        params (string PartKey, int PartOrder, string Text)[] parts) => new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourcePosition = position,
+            locator = new { kind = "native_id", nativeId },
+            sourceTimestamp = new { raw = sourceTimestamp, parsed = sourceTimestamp },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "synthetic-replay",
+                recordType = "turn",
+                model,
+                provider
+            },
+            adapter = new { name = "codex-synthetic", version = "2" },
+            sourcePayload = new { position },
+            events = parts.Select(part => new
+            {
+                partKey = part.PartKey,
+                partOrder = part.PartOrder,
+                kind = "message",
+                actor = "assistant",
+                payload = new { text = part.Text }
+            }).ToArray()
         };
 
     private static object ExplicitIdentityObservation(

@@ -17,7 +17,7 @@ Source interpretation before this spine is described by the
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `CaptureFidelityPolicy` | `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
-| `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>` | `memctl capture receipt` |
+| `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>`; `ReplaySourceStreamAsync(sourceStreamUuid)` → `CapturedSourceStreamReplay` | `memctl capture receipt`; `memctl capture replay` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
@@ -108,11 +108,14 @@ serialization that passed the effective ceiling. In-limit signatures use that
 same stable original snapshot; over-limit signatures continue to stream the
 original content while scan and persistence use only the bounded omission.
 
-**`OperatorCaptureReads`** — envelope assembly. It returns complete versioned
-`CapturedEventEnvelope` values (contract version, immutable observation, one
-canonical event, that event's relationships). `memctl` serializes them and does
-nothing else. Reads use already-sanitized durable rows and do not require
-scanner configuration.
+**`OperatorCaptureReads`** — envelope and operator replay assembly. Receipt
+reads return complete versioned `CapturedEventEnvelope` values (contract
+version, immutable observation, one canonical event, that event's
+relationships). A one-stream replay wraps those envelopes unchanged, labels
+its order basis as durable `capture_observations.source_position` followed by
+source-stated `captured_events.part_order`, and adds no global or session-wide
+ordinal. `memctl` serializes these read models and does nothing else. Reads use
+already-sanitized durable rows and do not require scanner configuration.
 
 **`ICaptureRuntimeState`** — one durable local progress boundary. A claim
 atomically records the verified transcript prefix, advances `enqueuedThrough`,

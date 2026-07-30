@@ -310,6 +310,14 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
             }
             return 0;
 
+        case "replay":
+            RequireArgs(args, 3);
+            var replay = await new OperatorCaptureReads(options.ConnectionString)
+                .ReplaySourceStreamAsync(Guid.Parse(args[2]));
+            Console.WriteLine(JsonSerializer.Serialize(
+                replay, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            return 0;
+
         case "route-policy":
             RequireArgs(args, 3);
             var remoteOverrides = FindOptions(args, "--remote-override")
@@ -422,6 +430,7 @@ static void Usage()
         "memctl capture enroll <stable_name> --harness harness --agent-id id " +
         "--credential-file path");
     Console.Error.WriteLine("memctl capture receipt <observation_uuid>");
+    Console.Error.WriteLine("memctl capture replay <source_stream_uuid>");
     Console.Error.WriteLine(
         "memctl capture route-policy <stable_name> " +
         "[--allow-repository owner/name-pattern] " +

@@ -20,22 +20,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 source.SourcePosition, "source record may still be extended");
         }
 
-        BinaryFidelitySelection<JsonElement> fidelity =
-            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
-                source.SourcePayload,
-                Harness,
-                source.SourceIdentity,
-                source.SourcePosition,
-                source.Locator.Kind,
-                CaptureFidelityPolicy.ProductionTransportBytes);
-        if ((fidelity.WasOmitted || fidelity.RewriteExceededBound)
-            && source.Locator is CaptureSourceLocator.NativeId)
-        {
-            throw new InvalidDataException(
-                "A native_id Codex record with unsupported binary content fails closed: " +
-                CaptureFidelityPolicy.UnsupportedBinaryReason + ".");
-        }
-        JsonElement record = fidelity.Observation;
+        JsonElement record = source.SourcePayload;
         bool isObjectRecord = record.ValueKind == JsonValueKind.Object;
         string? recordType = isObjectRecord
             ? JsonAdapterHelpers.NullableString(record, "type")
@@ -90,15 +75,20 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             record.Clone(),
             events,
             SourceIdentity: source.SourceIdentity);
-        if (fidelity.RewriteExceededBound)
+        BinaryFidelitySelection<CaptureObservationRequest> fidelity =
+            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+                request,
+                CaptureFidelityPolicy.ProductionTransportBytes);
+        if (fidelity.WasOmitted
+            && source.Locator is CaptureSourceLocator.NativeId)
         {
-            request = CaptureFidelityPolicy
-                .SerializeUnsupportedBinaryOverflowForTransport(
-                    request,
-                    CaptureFidelityPolicy.ProductionTransportBytes)
-                .Observation;
+            throw new InvalidDataException(
+                "A native_id Codex record with unsupported binary content fails closed: " +
+                CaptureFidelityPolicy.UnsupportedBinaryReason + ".");
         }
-        return new CaptureSourcePositionOutcome.Terminal(source.SourcePosition, request);
+        return new CaptureSourcePositionOutcome.Terminal(
+            source.SourcePosition,
+            fidelity.Observation);
     }
 
     private static IReadOnlyList<CaptureEvent> Interpret(

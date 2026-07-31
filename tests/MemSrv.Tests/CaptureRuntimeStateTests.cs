@@ -957,6 +957,48 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public void BinaryRewriteExpansionNeverReturnsTheRecognizedRawPayload()
+    {
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            type = "synthetic",
+            content = Enumerable.Range(0, 100).Select(_ => new
+            {
+                type = "binary_content",
+                category = "attachment",
+                byte_payload = new[] { 91, 92, 93 }
+            })
+        });
+
+        BinaryFidelitySelection<JsonElement> selected =
+            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+                payload,
+                "codex",
+                new CaptureSourceIdentity("expansion-session", "child-1"),
+                17,
+                "byte_range",
+                1_024);
+
+        Assert.True(selected.WasOmitted);
+        Assert.False(
+            selected.Observation.GetRawText().Contains(
+                "\"byte_payload\"",
+                StringComparison.Ordinal));
+        JsonElement omission = selected.Observation.GetProperty("omission");
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            omission.GetProperty("reason").GetString());
+        Assert.Equal(
+            "expansion-session",
+            omission.GetProperty("sourceIdentity")
+                .GetProperty("externalSessionId").GetString());
+        Assert.Equal(
+            "child-1",
+            omission.GetProperty("sourceIdentity")
+                .GetProperty("childId").GetString());
+    }
+
+    [Fact]
     public void GovernedDeadlineDoesNotResetBetweenBinaryFidelityPhases()
     {
         var time = new ManualTimeProvider();

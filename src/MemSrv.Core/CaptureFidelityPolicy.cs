@@ -9,7 +9,7 @@ namespace MemSrv.Core;
 /// </summary>
 public static class CaptureFidelityPolicy
 {
-    public const string CurrentVersion = "capture-fidelity/2026-07-31.10";
+    public const string CurrentVersion = "capture-fidelity/2026-07-31.11";
     public const int ProductionTransportBytes = 1_000_000;
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
@@ -62,9 +62,120 @@ public static class CaptureFidelityPolicy
             deadline);
         if (rewritten.ExceededBound)
         {
-            return new(sourcePayload, 0, RewriteExceededBound: true);
+            long originalByteCount = CountSerializedBytes(sourcePayload, deadline);
+            JsonElement omitted = MaterializeUnsupportedBinaryProvenance(
+                originalByteCount,
+                sourceIdentity,
+                sourcePosition,
+                locatorKind,
+                effectiveBound,
+                deadline);
+            return new(omitted, OmissionCount: 1);
         }
         return new(rewritten.Value, rewritten.OmissionCount);
+    }
+
+    /// <summary>
+    /// Selects one binary-safe adapter request under one absolute deadline.
+    /// The source and every derived event are rewritten together; if their safe
+    /// field-level representation grows beyond the transport ceiling, only a
+    /// compact whole-observation omission may be returned.
+    /// </summary>
+    public static BinaryFidelitySelection<CaptureObservationRequest>
+        OmitUnsupportedBinaryContent(
+            CaptureObservationRequest observation,
+            int maxTransportBytes = ProductionTransportBytes)
+    {
+        if (maxTransportBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxTransportBytes),
+                maxTransportBytes,
+                "The binary fidelity bound must be positive.");
+        }
+
+        int effectiveBound = Math.Min(
+            maxTransportBytes,
+            ProductionTransportBytes);
+        CaptureObservationCommand validated =
+            CaptureObservationCommand.FromRequest(observation);
+        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
+        RewrittenJson rewrittenSource = RewriteUnsupportedBinaryContent(
+            observation.SourcePayload,
+            observation.Source.Harness,
+            validated.SourceIdentity,
+            observation.SourcePosition,
+            observation.Locator.Kind,
+            effectiveBound,
+            TrustedTraversalRootContext.RawSource,
+            deadline);
+        if (rewrittenSource.ExceededBound)
+        {
+            return OmitWholeRequestForUnsupportedBinary(
+                observation,
+                validated,
+                effectiveBound,
+                deadline);
+        }
+
+        long remaining = effectiveBound - rewrittenSource.SerializedBytes;
+        int omissionCount = rewrittenSource.OmissionCount;
+        var events = new CaptureEvent[observation.Events.Count];
+        for (int index = 0; index < observation.Events.Count; index++)
+        {
+            CaptureEvent item = observation.Events[index];
+            if (remaining <= 0)
+            {
+                return OmitWholeRequestForUnsupportedBinary(
+                    observation,
+                    validated,
+                    effectiveBound,
+                    deadline);
+            }
+            RewrittenJson rewrittenPayload = RewriteUnsupportedBinaryContent(
+                item.Payload,
+                observation.Source.Harness,
+                validated.SourceIdentity,
+                observation.SourcePosition,
+                observation.Locator.Kind,
+                remaining,
+                IsAdapterOwnedCodexReasoningEnvelope(validated, item)
+                    ? TrustedTraversalRootContext.AdapterEvent
+                    : TrustedTraversalRootContext.None,
+                deadline);
+            if (rewrittenPayload.ExceededBound)
+            {
+                return OmitWholeRequestForUnsupportedBinary(
+                    observation,
+                    validated,
+                    effectiveBound,
+                    deadline);
+            }
+            remaining -= rewrittenPayload.SerializedBytes;
+            omissionCount += rewrittenPayload.OmissionCount;
+            events[index] = item with { Payload = rewrittenPayload.Value };
+        }
+
+        if (omissionCount == 0)
+        {
+            return new(observation, 0);
+        }
+
+        CaptureObservationRequest selected = observation with
+        {
+            SourcePayload = rewrittenSource.Value,
+            Events = events
+        };
+        if (CountSerializedBytes(selected, deadline) > effectiveBound)
+        {
+            return OmitWholeRequestForUnsupportedBinary(
+                observation,
+                validated,
+                effectiveBound,
+                deadline);
+        }
+        deadline.AssertWithinDeadline();
+        return new(selected, omissionCount);
     }
 
     public static BinaryFidelitySelection<CaptureObservationCommand>
@@ -80,9 +191,10 @@ public static class CaptureFidelityPolicy
                 "The binary fidelity bound must be positive.");
         }
 
-        long remaining = Math.Min(
+        long effectiveBound = Math.Min(
             maxContentBytes,
             SafetyBudgets.Default.MaxObservationBytes);
+        long remaining = effectiveBound;
         var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
         RewrittenJson rewrittenSource = RewriteUnsupportedBinaryContent(
             observation.SourcePayload,
@@ -97,7 +209,7 @@ public static class CaptureFidelityPolicy
         {
             return OmitWholeObservationForUnsupportedBinary(
                 observation,
-                remaining,
+                effectiveBound,
                 deadline);
         }
         remaining -= rewrittenSource.SerializedBytes;
@@ -108,8 +220,10 @@ public static class CaptureFidelityPolicy
             CaptureEvent item = observation.Events[index];
             if (remaining <= 0)
             {
-                throw new SafetyScanException(
-                    "the governed binary fidelity representation exceeded its content bound");
+                return OmitWholeObservationForUnsupportedBinary(
+                    observation,
+                    effectiveBound,
+                    deadline);
             }
             RewrittenJson rewrittenPayload = RewriteUnsupportedBinaryContent(
                 item.Payload,
@@ -126,9 +240,7 @@ public static class CaptureFidelityPolicy
             {
                 return OmitWholeObservationForUnsupportedBinary(
                     observation,
-                    Math.Min(
-                        maxContentBytes,
-                        SafetyBudgets.Default.MaxObservationBytes),
+                    effectiveBound,
                     deadline);
             }
             remaining -= rewrittenPayload.SerializedBytes;
@@ -141,13 +253,20 @@ public static class CaptureFidelityPolicy
             return new(observation, 0);
         }
 
-        return new(
-            observation with
-            {
-                SourcePayload = rewrittenSource.Value,
-                Events = events
-            },
-            omissionCount);
+        CaptureObservationCommand selected = observation with
+        {
+            SourcePayload = rewrittenSource.Value,
+            Events = events
+        };
+        if (CountSerializedBytes(selected, deadline) > effectiveBound)
+        {
+            return OmitWholeObservationForUnsupportedBinary(
+                observation,
+                effectiveBound,
+                deadline);
+        }
+        deadline.AssertWithinDeadline();
+        return new(selected, omissionCount);
     }
 
     /// <summary>
@@ -203,75 +322,6 @@ public static class CaptureFidelityPolicy
             ?? throw new InvalidOperationException(
                 "The bounded transport representation could not be reconstructed.");
         return bounded with { Observation = snapshot };
-    }
-
-    /// <summary>
-    /// Selects the content-free whole-observation representation required when
-    /// a recognized binary rewrite itself cannot fit the transport bound.
-    /// This is separate from ordinary over-limit serialization so an in-limit
-    /// raw request can never regain eligibility after its safe rewrite grew.
-    /// </summary>
-    public static BoundedCaptureRepresentation<CaptureObservationRequest>
-        SerializeUnsupportedBinaryOverflowForTransport(
-        CaptureObservationRequest observation,
-        int maxTransportBytes = ProductionTransportBytes)
-    {
-        if (maxTransportBytes <= 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(maxTransportBytes),
-                maxTransportBytes,
-                "The transport bound must be positive.");
-        }
-
-        int effectiveBound = Math.Min(
-            maxTransportBytes,
-            ProductionTransportBytes);
-        CaptureObservationCommand validated =
-            CaptureObservationCommand.FromRequest(observation);
-        if (validated.Locator is CaptureSourceLocator.NativeId)
-        {
-            throw new InvalidOperationException(
-                "A native_id observation whose unsupported binary rewrite exceeds " +
-                "the transport bound fails closed because transport omission " +
-                "requires binding-stable content identity.");
-        }
-
-        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
-        long originalByteCount = CountSerializedBytes(observation, deadline);
-        CaptureObservationRequest omitted = OmitForTransport(
-            observation,
-            originalByteCount,
-            validated.SourceIdentity,
-            UnsupportedBinaryReason);
-        string omittedJson;
-        try
-        {
-            using var stream = new BoundedBufferSerializationStream(
-                effectiveBound,
-                deadline);
-            JsonSerializer.Serialize(stream, omitted, CaptureLedger.JsonOptions);
-            stream.AssertWithinDeadline();
-            omittedJson = Encoding.UTF8.GetString(stream.WrittenMemory.Span);
-        }
-        catch (CaptureRepresentationLimitException)
-        {
-            throw new InvalidOperationException(
-                "The required capture source identity and locator cannot fit " +
-                $"within the {effectiveBound}-byte transport limit.");
-        }
-        CaptureObservationRequest snapshot =
-            JsonSerializer.Deserialize<CaptureObservationRequest>(
-                omittedJson,
-                CaptureLedger.JsonOptions)
-            ?? throw new InvalidOperationException(
-                "The bounded transport representation could not be reconstructed.");
-        deadline.AssertWithinDeadline();
-        return new(
-            snapshot,
-            omittedJson,
-            originalByteCount,
-            WasOmitted: true);
     }
 
     public static BoundedCaptureRepresentation<CaptureObservationCommand>
@@ -437,6 +487,90 @@ public static class CaptureFidelityPolicy
                 $"the observation budget of {effectiveBound} bytes");
         }
         return new(omitted, OmissionCount: 1);
+    }
+
+    private static BinaryFidelitySelection<CaptureObservationRequest>
+        OmitWholeRequestForUnsupportedBinary(
+            CaptureObservationRequest observation,
+            CaptureObservationCommand validated,
+            int effectiveBound,
+            GovernedDeadline deadline)
+    {
+        if (validated.Locator is CaptureSourceLocator.NativeId)
+        {
+            throw new InvalidDataException(
+                "A native_id Codex record with unsupported binary content fails closed: " +
+                UnsupportedBinaryReason + ".");
+        }
+
+        long originalByteCount = CountSerializedBytes(observation, deadline);
+        CaptureObservationRequest omitted = OmitForTransport(
+            observation,
+            originalByteCount,
+            validated.SourceIdentity,
+            UnsupportedBinaryReason);
+        long omittedByteCount = CountSerializedBytes(omitted, deadline);
+        if (omittedByteCount > effectiveBound)
+        {
+            throw new InvalidOperationException(
+                "The required capture source identity and locator cannot fit " +
+                $"within the {effectiveBound}-byte transport limit.");
+        }
+        deadline.AssertWithinDeadline();
+        return new(omitted, OmissionCount: 1);
+    }
+
+    private static JsonElement MaterializeUnsupportedBinaryProvenance(
+        long originalByteCount,
+        CaptureSourceIdentity sourceIdentity,
+        long sourcePosition,
+        string? locatorKind,
+        long effectiveBound,
+        GovernedDeadline deadline)
+    {
+        try
+        {
+            using var stream = new BoundedBufferSerializationStream(
+                effectiveBound,
+                deadline);
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                writer.WritePropertyName("omission");
+                writer.WriteStartObject();
+                writer.WriteString("reason", UnsupportedBinaryReason);
+                writer.WriteNumber("originalByteCount", originalByteCount);
+                writer.WriteString("policyVersion", CurrentVersion);
+                writer.WritePropertyName("sourceIdentity");
+                writer.WriteStartObject();
+                writer.WriteString(
+                    "externalSessionId",
+                    sourceIdentity.ExternalSessionId);
+                if (sourceIdentity.ChildId is not null)
+                {
+                    writer.WriteString("childId", sourceIdentity.ChildId);
+                }
+                writer.WriteNumber("sourcePosition", sourcePosition);
+                if (locatorKind is not null)
+                {
+                    writer.WriteString("locatorKind", locatorKind);
+                }
+                writer.WriteEndObject();
+                writer.WriteEndObject();
+                writer.WriteEndObject();
+                writer.Flush();
+            }
+            using JsonDocument document = JsonDocument.Parse(stream.WrittenMemory);
+            JsonElement materialized = document.RootElement.Clone();
+            deadline.AssertWithinDeadline();
+            return materialized;
+        }
+        catch (CaptureRepresentationLimitException)
+        {
+            throw new SafetyScanException(
+                "the required unsupported-binary omission cannot fit within " +
+                $"the fidelity budget of {effectiveBound} bytes");
+        }
     }
 
     private static bool IsAdapterOwnedCodexReasoningEnvelope(
@@ -1085,7 +1219,7 @@ public static class CaptureFidelityPolicy
         long originalByteCount,
         CaptureSourceIdentity source,
         long sourcePosition,
-        string locatorKind) =>
+        string? locatorKind) =>
         JsonSerializer.SerializeToElement(
             new
             {
@@ -1133,8 +1267,7 @@ public sealed record BoundedCaptureRepresentation<T>(
 
 public sealed record BinaryFidelitySelection<T>(
     T Observation,
-    int OmissionCount,
-    bool RewriteExceededBound = false)
+    int OmissionCount)
 {
     public bool WasOmitted => OmissionCount > 0;
 }

@@ -16,7 +16,7 @@ Source interpretation before this spine is described by the
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
-| `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement + trusted source provenance\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `ContainsUnsupportedBinaryOmission(command)`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
+| `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement + trusted source provenance\|CaptureObservationRequest\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `ContainsUnsupportedBinaryOmission(command)`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>`; `ReplaySourceStreamAsync(sourceStreamUuid)` → `CapturedSourceStreamReplay`; `NavigateCapturedSessionAsync(sourceStreamUuid, allowedNamespaces)` → `CapturedSessionNavigation` | `memctl capture receipt`; `memctl capture replay`; `memctl capture navigate` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
@@ -78,12 +78,17 @@ policy selects the same content-free whole-observation shape with
 observation. The local `native_id` rule still refuses this outcome before
 claim; a verified `byte_range` may queue the bounded whole-observation
 omission, and authenticated ingestion may append it while signing the original
-command. Candidate classification, bounded rewriting,
+command. The adapter first builds its request only in memory, then gives source
+payload and derived events to one request-level fidelity selection. Candidate
+classification, bounded rewriting, whole-request sizing, fallback selection,
 `JsonDocument` parsing, and root cloning/materialization share one absolute
-`MaxScanTime` deadline for the entire public fidelity operation; no phase or
-event receives a fresh clock, and the deadline is asserted after
-materialization. They never create a complete raw JSON string or a second
-mutable JSON tree. The policy writes its
+`MaxScanTime` deadline for that public operation; no phase or event receives a
+fresh clock. A recognized JSON-element rewrite that expands beyond its bound
+likewise returns only compact content-free provenance, or fails closed when
+mandatory identity cannot fit; it never returns the raw element with a
+separate overflow flag. The deadline is asserted after materialization. These
+paths never create a complete raw JSON string or a second mutable JSON tree.
+The policy writes its
 replay evidence under `capture_fidelity_omission`, adding the lowest numeric
 suffix when that name is already source-owned, so a source-stated `omission`
 and every other safe sibling remain unchanged. Operator replay therefore

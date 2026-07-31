@@ -3336,6 +3336,182 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task ScheduledPackagedTracerChildConflictDoesNotStallParentOrSiblingCheckpoints()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-related-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-related-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        string externalSessionId = $"related-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string siblingId = $"sibling-{Guid.NewGuid():N}";
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "a-child.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                timestamp = "2026-07-31T12:00:00Z",
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = childId,
+                    source = new
+                    {
+                        subagent = new
+                        {
+                            thread_spawn = new
+                            {
+                                parent_thread_id = externalSessionId,
+                                depth = 1,
+                                agent_path = "/root/child"
+                            }
+                        }
+                    },
+                    thread_source = "subagent"
+                }
+            }) + "\n",
+            new UTF8Encoding(false));
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "b-parent.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                timestamp = "2026-07-31T12:00:01Z",
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = externalSessionId,
+                    source = "cli",
+                    thread_source = "user"
+                }
+            }) + "\n",
+            new UTF8Encoding(false));
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "c-sibling.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                timestamp = "2026-07-31T12:00:02Z",
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = siblingId,
+                    source = new
+                    {
+                        subagent = new
+                        {
+                            thread_spawn = new
+                            {
+                                parent_thread_id = externalSessionId,
+                                depth = 1,
+                                agent_path = "/root/sibling"
+                            }
+                        }
+                    },
+                    thread_source = "subagent"
+                }
+            }) + "\n",
+            new UTF8Encoding(false));
+
+        int proxyPort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            proxyPort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+        using var proxy = new HttpListener();
+        proxy.Prefixes.Add($"http://127.0.0.1:{proxyPort}/");
+        proxy.Start();
+        using var proxyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<JsonElement[]> forwarded = ConflictChildAndForwardParentAndSiblingAsync(
+            proxy, captureKey, childId, proxyTimeout.Token);
+
+        using var process = TestProcessRunner.StartCaptureTracer(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{proxyPort}",
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+                ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+            });
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            JsonElement parent = await ReadTracerReceiptAsync(process);
+            JsonElement sibling = await ReadTracerReceiptAsync(process);
+            JsonElement[] serverReceipts = await forwarded;
+            Assert.Equal(
+                serverReceipts.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()),
+                new[] { parent, sibling }.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()));
+
+            CaptureRuntimeSnapshot state =
+                await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+            Assert.Equal(3, state.Streams.Count);
+            CaptureRuntimeStreamState stoppedChild = Assert.Single(
+                state.Streams, stream => stream.Stop is not null);
+            Assert.Equal(
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.AcceptedSourceConflict,
+                    0),
+                stoppedChild.Stop);
+            Assert.Equal([0L], stoppedChild.Queue.Select(item => item.SourcePosition));
+            Assert.Null(stoppedChild.LastServerReceipt);
+
+            CaptureRuntimeStreamState[] progressed =
+                state.Streams.Where(stream => stream.Stop is null).ToArray();
+            Assert.Equal(2, progressed.Length);
+            Assert.All(progressed, stream =>
+            {
+                Assert.Empty(stream.Queue);
+                Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
+            });
+            Assert.Equal(
+                2,
+                progressed.Select(stream => stream.CanonicalSourceStreamUuid)
+                    .Distinct().Count());
+
+            foreach (JsonElement receipt in new[] { parent, sibling })
+            {
+                Guid observationUuid =
+                    receipt.GetProperty("observationUuid").GetGuid();
+                string canonical = await RunMemCtlAsync(
+                    "capture", "receipt", observationUuid.ToString());
+                Assert.Contains("\"contractVersion\":1", canonical);
+                Guid sourceStreamUuid = receipt.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid();
+                JsonElement replay = JsonDocument.Parse(await RunMemCtlAsync(
+                    "capture", "replay", sourceStreamUuid.ToString())).RootElement;
+                Assert.Equal(
+                    [0L],
+                    replay.GetProperty("events").EnumerateArray().Select(item =>
+                        item.GetProperty("sourcePosition").GetInt64()));
+            }
+        }
+        finally
+        {
+            proxyTimeout.Cancel();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            string diagnostics = await stderr;
+            Assert.Contains("accepted_source_conflict", diagnostics);
+            proxy.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ScheduledPackagedTracerReleasesFinalRecordOnlyAfterStableArchiveEvidence()
     {
         var captureKey = CaptureCredential();
@@ -4853,6 +5029,56 @@ public sealed class CaptureTests : HttpSeamTestBase
         second.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
         second.Response.ContentLength64 = 0;
         second.Response.Close();
+    }
+
+    private async Task<JsonElement[]> ConflictChildAndForwardParentAndSiblingAsync(
+        HttpListener listener,
+        string captureKey,
+        string childId,
+        CancellationToken cancellationToken)
+    {
+        var forwarded = new List<JsonElement>();
+        for (int requestIndex = 0; requestIndex < 3; requestIndex++)
+        {
+            HttpListenerContext context = await listener.GetContextAsync()
+                .WaitAsync(cancellationToken);
+            using var buffer = new MemoryStream();
+            await context.Request.InputStream.CopyToAsync(buffer, cancellationToken);
+            byte[] requestBytes = buffer.ToArray();
+            JsonElement request = JsonDocument.Parse(requestBytes).RootElement;
+            string? requestChildId = request.GetProperty("sourceIdentity")
+                .GetProperty("childId").GetString();
+            if (string.Equals(requestChildId, childId, StringComparison.Ordinal))
+            {
+                byte[] conflict = Encoding.UTF8.GetBytes(
+                    """{"reason":"accepted_source_conflict"}""");
+                context.Response.StatusCode = (int)HttpStatusCode.Conflict;
+                context.Response.ContentType = "application/json";
+                context.Response.ContentLength64 = conflict.Length;
+                await context.Response.OutputStream.WriteAsync(
+                    conflict, cancellationToken);
+                context.Response.Close();
+                continue;
+            }
+
+            using var content = new ByteArrayContent(requestBytes);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            using var client = CaptureClient(captureKey);
+            using HttpResponseMessage response = await client.PostAsync(
+                "/capture/v1/observations", content, cancellationToken);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            string responseBody =
+                await response.Content.ReadAsStringAsync(cancellationToken);
+            forwarded.Add(JsonDocument.Parse(responseBody).RootElement.Clone());
+            byte[] responseBytes = Encoding.UTF8.GetBytes(responseBody);
+            context.Response.StatusCode = (int)HttpStatusCode.OK;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = responseBytes.Length;
+            await context.Response.OutputStream.WriteAsync(
+                responseBytes, cancellationToken);
+            context.Response.Close();
+        }
+        return [.. forwarded];
     }
 
     private async Task<JsonElement> WithholdFirstAndForwardSecondAsync(

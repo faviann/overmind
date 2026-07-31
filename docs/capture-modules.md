@@ -97,8 +97,11 @@ Codex `response_item` reasoning payload or the root adapter-owned opaque event
 envelope remain ordinary opaque evidence. The traversal context is closed and
 entrypoint-selected: raw source traversal can recognize only the former, and only
 the exact Codex adapter opaque reasoning event facts select the latter during
-command traversal. Raw JSON fields and nested source objects cannot mint either
-root context for themselves.
+command traversal. The event envelope's `source` must also be structurally
+identical to the recognized root source payload's reasoning `payload`, making
+the event a redundant projection that cannot expand the admitted opaque bytes.
+Raw JSON fields and nested source objects cannot mint either root context for
+themselves.
 
 **`NeverStoreGate`** — the single governed policy point every write path
 crosses, and the only type that knows rules exist. It hides the rule-set schema

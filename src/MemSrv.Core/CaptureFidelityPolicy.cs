@@ -344,7 +344,17 @@ public static class CaptureFidelityPolicy
             "codex-synthetic-jsonl",
             StringComparison.Ordinal)
         && string.Equals(item.Kind, "opaque", StringComparison.Ordinal)
-        && string.Equals(item.PartKey, "reasoning:opaque", StringComparison.Ordinal);
+        && string.Equals(item.PartKey, "reasoning:opaque", StringComparison.Ordinal)
+        && observation.SourcePayload.ValueKind == JsonValueKind.Object
+        && HasString(observation.SourcePayload, "type", "response_item")
+        && observation.SourcePayload.TryGetProperty(
+            "payload",
+            out JsonElement sourceReasoningPayload)
+        && sourceReasoningPayload.ValueKind == JsonValueKind.Object
+        && HasString(sourceReasoningPayload, "type", "reasoning")
+        && item.Payload.ValueKind == JsonValueKind.Object
+        && item.Payload.TryGetProperty("source", out JsonElement eventSource)
+        && JsonElement.DeepEquals(sourceReasoningPayload, eventSource);
 
     private static RewrittenJson RewriteUnsupportedBinaryContent(
         JsonElement source,

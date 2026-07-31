@@ -71,6 +71,11 @@ The compact record repeats the trusted source identity and position (plus
 locator kind) from the adapter or authenticated ingestion command; it never
 depends on optional block-local identity. Root-only Codex reasoning envelope
 recognition prevents a nested object from exempting its bytes.
+An adapter event receives the corresponding opaque-metadata exemption only
+when its reasoning `source` is structurally identical to the recognized root
+source payload's reasoning `payload`; the redundant event projection therefore
+cannot add byte-bearing evidence beyond what raw-source traversal already
+admitted.
 If that rewritten representation crosses the effective ceiling, the ordinary
 transport/content serializer owns the deterministic whole-observation omission.
 Tests exercise a multi-megabyte valid byte array at the documented

@@ -112,10 +112,13 @@ Adapters are versioned tolerant tagged unions:
   only the root Codex `response_item` → `payload.type=reasoning` exception,
   while an adapter event can earn only the adapter-produced root
   `recordType=response_item`, `payloadType=reasoning`,
-  `source.type=reasoning` exception. Raw root fields cannot self-assert the
-  adapter-event context, nested objects cannot self-assert either wrapper, and
-  the same names in arbitrary objects do not exempt a nested valid
-  `binary_content`;
+  `source.type=reasoning` exception when that `source` is structurally identical
+  to the recognized root source payload's `payload`. This redundant projection
+  lets the event replay only opaque metadata already admitted at the raw-source
+  boundary; it cannot introduce additional bytes. Raw root fields cannot
+  self-assert the adapter-event context, nested objects cannot self-assert
+  either wrapper, and the same names in arbitrary objects do not exempt a
+  nested valid `binary_content`;
   a local adapter that selects this binary omission for a `native_id` source
   fails closed before durable claim or queue with a content-free reason. Omitted
   same-count bytes cannot supply binding-stable change identity without retaining

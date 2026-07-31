@@ -266,6 +266,89 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task AuthenticatedApiCannotForgeCodexReasoningEventOpaqueMetadata()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"forged-reasoning-event-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        var request = new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourcePosition = 0,
+            locator = new
+            {
+                kind = "native_id",
+                nativeId = $"forged-reasoning-event-{Guid.NewGuid():N}"
+            },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.146.synthetic",
+                recordType = "response_item",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = "9" },
+            sourcePayload = new
+            {
+                type = "response_item",
+                payload = new
+                {
+                    type = "message",
+                    content = new[] { new { type = "input_text", text = "Safe text." } }
+                }
+            },
+            events = new object[]
+            {
+                new
+                {
+                    partKey = "reasoning:opaque",
+                    partOrder = 0,
+                    kind = "opaque",
+                    actor = "unknown",
+                    payload = new
+                    {
+                        recordType = "response_item",
+                        payloadType = "reasoning",
+                        source = new
+                        {
+                            type = "reasoning",
+                            signature = new
+                            {
+                                type = "binary_content",
+                                category = "attachment",
+                                value = "safe signature label",
+                                byte_payload = new[] { 91, 92, 93 }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement signature = Assert.Single(
+                receipt.GetProperty("events").EnumerateArray())
+            .GetProperty("payload").GetProperty("source").GetProperty("signature");
+        Assert.False(signature.TryGetProperty("byte_payload", out _));
+        Assert.Equal("safe signature label", signature.GetProperty("value").GetString());
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            signature.GetProperty("capture_fidelity_omission")
+                .GetProperty("reason").GetString());
+        Assert.Equal(
+            3,
+            signature.GetProperty("capture_fidelity_omission")
+                .GetProperty("originalByteCount").GetInt64());
+    }
+
+    [Fact]
     public async Task VersionedBinaryMediaFixtureFlowsThroughRuntimeApiAndOperatorRead()
     {
         string captureKey = CaptureCredential();

@@ -447,11 +447,14 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Empty(rootNavigation.GetProperty("relationships").EnumerateArray());
 
         string ambiguousNativeId = $"navigation-ambiguous-{Guid.NewGuid():N}";
+        var candidatePrivateMarkers = new List<string>();
         foreach (var candidate in new[]
         {
-            (ExternalSessionId: ambiguousNativeId, ChildId: (string?)null),
+            (ExternalSessionId: ambiguousNativeId, ChildId: (string?)null,
+                Content: $"navigation-candidate-content-{Guid.NewGuid():N}"),
             (ExternalSessionId: $"other-family-{Guid.NewGuid():N}",
-                ChildId: (string?)ambiguousNativeId)
+                ChildId: (string?)ambiguousNativeId,
+                Content: $"navigation-candidate-content-{Guid.NewGuid():N}")
         })
         {
             using HttpResponseMessage candidateResponse = await client.PostAsJsonAsync(
@@ -459,10 +462,27 @@ public sealed class CaptureTests : HttpSeamTestBase
                 SessionRelationshipObservation(
                     candidate.ExternalSessionId,
                     candidate.ChildId,
-                    $"navigation-candidate-{Guid.NewGuid():N}",
+                    candidate.Content,
                     parentNativeId: null,
                     workingDirectory: "/workspace/candidate"));
             candidateResponse.EnsureSuccessStatusCode();
+            JsonElement candidateReceipt =
+                await candidateResponse.Content.ReadFromJsonAsync<JsonElement>();
+            candidatePrivateMarkers.AddRange(
+            [
+                candidateReceipt.GetProperty("observationUuid").GetGuid().ToString(),
+                candidateReceipt.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid().ToString(),
+                candidateReceipt.GetProperty("events")[0]
+                    .GetProperty("sessionId").GetString()!,
+                candidateReceipt.GetProperty("effectiveNamespace").GetString()!,
+                candidate.Content
+            ]);
+            if (!string.Equals(
+                candidate.ExternalSessionId, ambiguousNativeId, StringComparison.Ordinal))
+            {
+                candidatePrivateMarkers.Add(candidate.ExternalSessionId);
+            }
         }
 
         using HttpResponseMessage ambiguousSourceResponse = await client.PostAsJsonAsync(
@@ -472,7 +492,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 $"navigation-source-child-{Guid.NewGuid():N}",
                 $"navigation-ambiguous-source-{Guid.NewGuid():N}",
                 parentNativeId: ambiguousNativeId,
-                workingDirectory: "/workspace/source"));
+                workingDirectory: null));
         ambiguousSourceResponse.EnsureSuccessStatusCode();
         JsonElement ambiguousSourceReceipt =
             await ambiguousSourceResponse.Content.ReadFromJsonAsync<JsonElement>();
@@ -480,11 +500,20 @@ public sealed class CaptureTests : HttpSeamTestBase
             "capture", "navigate",
             ambiguousSourceReceipt.GetProperty("observation").GetProperty("sourceStreamUuid")
                 .GetGuid().ToString(),
+            "--namespace", "capture/unscoped",
             "--namespace", "homelab")).RootElement;
         JsonElement ambiguousEdge = Assert.Single(
             ambiguousNavigation.GetProperty("relationships").EnumerateArray());
         Assert.Equal("unavailable", ambiguousEdge.GetProperty("availability").GetString());
         Assert.Equal(JsonValueKind.Null, ambiguousEdge.GetProperty("session").ValueKind);
+        Assert.Equal(
+            ambiguousNativeId,
+            ambiguousEdge.GetProperty("evidence").GetProperty("targetNativeId").GetString());
+        string ambiguousOutput = ambiguousNavigation.GetRawText();
+        Assert.All(
+            candidatePrivateMarkers.Distinct(StringComparer.Ordinal),
+            marker => Assert.DoesNotContain(
+                marker, ambiguousOutput, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -572,6 +601,41 @@ public sealed class CaptureTests : HttpSeamTestBase
                 parentStreamUuid,
                 outgoing.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
         }
+
+        using HttpResponseMessage filteredResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                $"navigation-filtered-source-{Guid.NewGuid():N}",
+                $"navigation-filtered-child-{Guid.NewGuid():N}",
+                $"navigation-filtered-record-{Guid.NewGuid():N}",
+                parentNativeId,
+                workingDirectory: null,
+                additionalRelationships:
+                [
+                    ("source_classification",
+                        $"navigation-classification-{Guid.NewGuid():N}", "session"),
+                    ("spawned_by", $"navigation-tool-call-{Guid.NewGuid():N}", "tool_call")
+                ]));
+        filteredResponse.EnsureSuccessStatusCode();
+        JsonElement filteredReceipt =
+            await filteredResponse.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement filteredNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate",
+            filteredReceipt.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid().ToString(),
+            "--namespace", "capture/unscoped")).RootElement;
+        JsonElement permittedEdge = Assert.Single(
+            filteredNavigation.GetProperty("relationships").EnumerateArray());
+        Assert.Equal(
+            "parent_session",
+            permittedEdge.GetProperty("evidence").GetProperty("relationshipType").GetString());
+        Assert.Equal(
+            "session",
+            permittedEdge.GetProperty("evidence").GetProperty("targetKind").GetString());
+        Assert.Equal("available", permittedEdge.GetProperty("availability").GetString());
+        Assert.Equal(
+            parentStreamUuid,
+            permittedEdge.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
     }
 
     [Fact]
@@ -5740,7 +5804,37 @@ public sealed class CaptureTests : HttpSeamTestBase
         string? parentNativeId,
         string? workingDirectory,
         Guid? targetSourceStreamUuid = null,
-        string relationshipType = "parent_session") => new
+        string relationshipType = "parent_session",
+        IReadOnlyCollection<(string Type, string NativeId, string Kind)>?
+            additionalRelationships = null)
+    {
+        var relationships = new List<object>();
+        if (parentNativeId is not null)
+        {
+            relationships.Add(new
+            {
+                type = relationshipType,
+                target = new
+                {
+                    sourceStreamUuid = targetSourceStreamUuid,
+                    nativeId = parentNativeId,
+                    kind = "session"
+                }
+            });
+        }
+        relationships.AddRange(
+            additionalRelationships?.Select(relationship => (object)new
+            {
+                type = relationship.Type,
+                target = new
+                {
+                    sourceStreamUuid = (Guid?)null,
+                    nativeId = relationship.NativeId,
+                    kind = relationship.Kind
+                }
+            }) ?? []);
+
+        return new
         {
             contractVersion = 1,
             sourceIdentity = new { externalSessionId, childId },
@@ -5766,24 +5860,11 @@ public sealed class CaptureTests : HttpSeamTestBase
                     kind = "lifecycle",
                     actor = "harness",
                     payload = new { label = childId ?? externalSessionId },
-                    relationships = parentNativeId is null
-                        ? Array.Empty<object>()
-                        : new object[]
-                        {
-                            new
-                            {
-                                type = relationshipType,
-                                target = new
-                                {
-                                    sourceStreamUuid = targetSourceStreamUuid,
-                                    nativeId = parentNativeId,
-                                    kind = "session"
-                                }
-                            }
-                        }
+                    relationships = relationships.ToArray()
                 }
             }
         };
+    }
 
     private static object AdapterUpgradeToolObservation(
         string externalSessionId,

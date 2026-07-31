@@ -597,12 +597,43 @@ public static class CaptureFidelityPolicy
     {
         category = null;
         byteCount = 0;
-        if (!HasString(value, "type", "binary_content")
-            || !value.TryGetProperty("category", out JsonElement categoryElement)
+        int typeCount = 0;
+        int categoryCount = 0;
+        int bytePayloadCount = 0;
+        JsonElement typeElement = default;
+        JsonElement categoryElement = default;
+        JsonElement bytes = default;
+        foreach (JsonProperty property in value.EnumerateObject())
+        {
+            stream.AssertWithinDeadline();
+            if (property.NameEquals("type"))
+            {
+                typeCount++;
+                typeElement = property.Value;
+            }
+            else if (property.NameEquals("category"))
+            {
+                categoryCount++;
+                categoryElement = property.Value;
+            }
+            else if (property.NameEquals("byte_payload"))
+            {
+                bytePayloadCount++;
+                bytes = property.Value;
+            }
+        }
+
+        if (typeCount != 1
+            || categoryCount != 1
+            || bytePayloadCount != 1
+            || typeElement.ValueKind != JsonValueKind.String
+            || !string.Equals(
+                typeElement.GetString(),
+                "binary_content",
+                StringComparison.Ordinal)
             || categoryElement.ValueKind != JsonValueKind.String
             || (category = categoryElement.GetString()) is null
             || !UnsupportedBinaryCategories.Contains(category)
-            || !value.TryGetProperty("byte_payload", out JsonElement bytes)
             || bytes.ValueKind != JsonValueKind.Array)
         {
             return false;

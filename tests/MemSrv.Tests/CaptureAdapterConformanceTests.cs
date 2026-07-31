@@ -950,6 +950,48 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             spoofedRootSource.GetProperty("safeSibling").GetString());
     }
 
+    [Theory]
+    [InlineData("""{"type":"binary_content","type":"binary_content","category":"attachment","byte_payload":[1,2]}""", "type")]
+    [InlineData("""{"type":"binary_content","category":"attachment","category":"attachment","byte_payload":[1,2]}""", "category")]
+    [InlineData("""{"type":"binary_content","category":"attachment","byte_payload":[1,2],"byte_payload":[3,4,5]}""", "byte_payload")]
+    public void CodexBinaryMediaWithDuplicateRequiredPropertiesRemainsOrdinaryEvidence(
+        string contentBlock,
+        string duplicatedProperty)
+    {
+        string record =
+            $$"""
+              {
+                "type": "response_item",
+                "payload": {
+                  "type": "message",
+                  "role": "user",
+                  "content": [{{contentBlock}}]
+                }
+              }
+              """;
+
+        var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+            new CodexJsonlAdapter().Adapt(Source(record, isTerminal: true)));
+
+        JsonElement block = terminal.Observation.SourcePayload
+            .GetProperty("payload").GetProperty("content")[0];
+        Assert.Equal(
+            2,
+            block.EnumerateObject().Count(
+                property => property.NameEquals(duplicatedProperty)));
+        Assert.Equal(
+            contentBlock,
+            block.GetRawText());
+        Assert.Contains(
+            block.EnumerateObject(),
+            property => property.NameEquals("byte_payload"));
+        Assert.DoesNotContain(
+            block.EnumerateObject(),
+            property => property.Name.StartsWith(
+                CaptureFidelityPolicy.BinaryOmissionField,
+                StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task CodexContextRecordsPreserveScopedValuesInstructionsAndIndependentClocks()
     {

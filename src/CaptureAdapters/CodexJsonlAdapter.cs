@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "7");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "8");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -144,7 +144,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 
         if (string.Equals(recordType, "session_meta", StringComparison.Ordinal))
         {
-            return [Context(payload, "session")];
+            return [Context(payload, "session", SessionRelationships(payload))];
         }
 
         if (string.Equals(recordType, "turn_context", StringComparison.Ordinal))
@@ -232,7 +232,10 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
         }
     }
 
-    private static CaptureEvent Context(JsonElement payload, string scope)
+    private static CaptureEvent Context(
+        JsonElement payload,
+        string scope,
+        IReadOnlyList<CaptureRelationship>? relationships = null)
     {
         string? scopeId = scope == "session"
             ? JsonAdapterHelpers.NullableString(payload, "id")
@@ -262,7 +265,69 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                     loaded = "unavailable"
                 }
             },
+            relationships,
             occurredAt: occurredAt);
+    }
+
+    private static IReadOnlyList<CaptureRelationship> SessionRelationships(JsonElement payload)
+    {
+        var relationships = new List<CaptureRelationship>();
+        AddRelationship(payload, "parent_thread_id", "parent_session", relationships);
+        AddRelationship(payload, "forked_from_id", "forked_from", relationships);
+
+        if (payload.TryGetProperty("source", out JsonElement source)
+            && source.ValueKind == JsonValueKind.Object
+            && source.TryGetProperty("subagent", out JsonElement subagent)
+            && subagent.ValueKind == JsonValueKind.Object
+            && subagent.TryGetProperty("thread_spawn", out JsonElement spawn)
+            && spawn.ValueKind == JsonValueKind.Object)
+        {
+            AddRelationship(spawn, "parent_thread_id", "spawned_by", relationships);
+        }
+
+        string? childId = UsableString(payload, "id");
+        if (childId is not null && ExplicitSubagentSource(payload))
+        {
+            relationships.Add(Relationship("source_classification", childId, "session"));
+        }
+        if (childId is not null
+            && string.Equals(
+                UsableString(payload, "thread_source"),
+                "subagent",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            relationships.Add(
+                Relationship("thread_source_classification", childId, "session"));
+        }
+        return relationships;
+    }
+
+    private static void AddRelationship(
+        JsonElement source,
+        string propertyName,
+        string type,
+        ICollection<CaptureRelationship> relationships)
+    {
+        if (UsableString(source, propertyName) is { } target)
+        {
+            relationships.Add(Relationship(type, target, "session"));
+        }
+    }
+
+    private static bool ExplicitSubagentSource(JsonElement payload)
+    {
+        if (!payload.TryGetProperty("source", out JsonElement source))
+        {
+            return false;
+        }
+        if (source.ValueKind == JsonValueKind.String)
+        {
+            return string.Equals(
+                source.GetString(), "subagent", StringComparison.OrdinalIgnoreCase);
+        }
+        return source.ValueKind == JsonValueKind.Object
+            && (source.TryGetProperty("subagent", out _)
+                || source.TryGetProperty("sub_agent", out _));
     }
 
     private static IReadOnlyList<CaptureEvent> MessageContent(JsonElement payload)

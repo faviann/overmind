@@ -212,6 +212,15 @@ Parent/fork facts are excluded. Resume, retry, archive movement, and historical
 rediscovery therefore converge, while distinct child identities under one
 external session cannot collide.
 
+Parent, fork, nested spawn, and explicit child-classification facts are adapter
+output attached to the session-metadata context event; none participates in
+the source identity tuple above. Parent, child, and sibling rollouts therefore
+retain separate durable runtime queues and separate server checkpoints. A
+filesystem failure, delivery conflict, or earlier gap stops only the affected
+stream. The scan cycle continues other streams, and capture stores no merged
+cross-stream ordinal; operator replay remains one-stream source position plus
+event part order.
+
 **`DisabledCaptureRuntime`** — orders durable responsibility by source
 position, revalidates each queued candidate against the source fixture, and
 sends it through the ordinary authenticated capture endpoint. It advances to a

@@ -705,7 +705,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "4",
+                "7",
                 "0.144.synthetic",
                 "same source record"));
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
@@ -719,7 +719,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "7",
+                "8",
                 "false-version",
                 "same source record"));
         Assert.Equal(HttpStatusCode.Conflict, falseProvenanceRetry.StatusCode);
@@ -732,7 +732,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "7",
+                "8",
                 "0.144.synthetic",
                 "same source record"));
         Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
@@ -750,7 +750,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "7",
+                "8",
                 "0.144.synthetic",
                 "changed source record"));
         Assert.Equal(HttpStatusCode.Conflict, changedSource.StatusCode);
@@ -1134,6 +1134,234 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task CodexRelationshipFixturesRoundTripWithoutResolvingTargetsOrMergingStreams()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-relationship-fixtures-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        var adapter = new CodexJsonlAdapter();
+        var cases = new[]
+        {
+            (
+                Fixture: "codex-cli-0.77.parent-only.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("parent_session", "01970000-0000-7000-8000-000000000000"),
+                    ("source_classification", "01970000-0000-7000-8000-000000000001")
+                }),
+            (
+                Fixture: "codex-cli-0.90.fork-only.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("forked_from", "01970000-0000-7000-8000-000000000009"),
+                    ("source_classification", "01970000-0000-7000-8000-000000000011")
+                }),
+            (
+                Fixture: "codex-cli-0.120.parent-fork.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("forked_from", "01970000-0000-7000-8000-000000000018"),
+                    ("parent_session", "01970000-0000-7000-8000-000000000019"),
+                    ("source_classification", "01970000-0000-7000-8000-000000000021"),
+                    ("thread_source_classification", "01970000-0000-7000-8000-000000000021")
+                }),
+            (
+                Fixture: "codex-cli-0.144.nested-child.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("parent_session", "01970000-0000-7000-8000-000000000029"),
+                    ("source_classification", "01970000-0000-7000-8000-000000000031"),
+                    ("spawned_by", "01970000-0000-7000-8000-000000000029"),
+                    ("thread_source_classification", "01970000-0000-7000-8000-000000000031")
+                }),
+            (
+                Fixture: "codex-cli-0.144.absent-relationship.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("source_classification", "01970000-0000-7000-8000-000000000041"),
+                    ("thread_source_classification", "01970000-0000-7000-8000-000000000041")
+                })
+        };
+        var streamUuids = new List<Guid>();
+        JsonElement danglingParent = default;
+
+        foreach (var item in cases)
+        {
+            string path = Path.Combine(
+                _root, "fixtures", "adapter-conformance", item.Fixture);
+            CodexTranscriptStream stream =
+                Assert.Single(CodexTranscriptDiscovery.Enumerate(path));
+            JsonElement sourceRecord =
+                JsonDocument.Parse(File.ReadLines(path).First()).RootElement.Clone();
+            CaptureObservationRequest observation =
+                Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(new TrustedSourceObservation(
+                        stream.SourceIdentity!,
+                        0,
+                        new CaptureSourceLocator.NativeId($"fixture:{item.Fixture}"),
+                        CaptureSourceMaterialKind.PersistedRecord,
+                        sourceRecord,
+                        true))).Observation;
+
+            using HttpResponseMessage response = await client.PostAsJsonAsync(
+                "/capture/v1/observations", observation);
+            response.EnsureSuccessStatusCode();
+            JsonElement receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Guid observationUuid = receipt.GetProperty("observationUuid").GetGuid();
+            Guid sourceStreamUuid = receipt.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid();
+            streamUuids.Add(sourceStreamUuid);
+
+            JsonElement envelope = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "receipt", observationUuid.ToString())).RootElement;
+            Assert.Equal(
+                sourceRecord.GetProperty("timestamp").GetString(),
+                envelope.GetProperty("observation").GetProperty("sourceTimestamp")
+                    .GetProperty("raw").GetString());
+            Assert.Equal(
+                JsonValueKind.Null,
+                envelope.GetProperty("event").GetProperty("occurredAt").ValueKind);
+            Assert.Equal(
+                item.Facts,
+                envelope.GetProperty("relationships").EnumerateArray().Select(relationship =>
+                    (
+                        relationship.GetProperty("type").GetString()!,
+                        relationship.GetProperty("target").GetProperty("nativeId").GetString()!
+                    )));
+            Assert.All(
+                envelope.GetProperty("relationships").EnumerateArray(),
+                relationship =>
+                {
+                    Assert.Equal(
+                        "session",
+                        relationship.GetProperty("target").GetProperty("kind").GetString());
+                    Assert.Equal(
+                        JsonValueKind.Null,
+                        relationship.GetProperty("target")
+                            .GetProperty("sourceStreamUuid").ValueKind);
+                });
+            if (item.Fixture == "codex-cli-0.77.parent-only.synthetic.jsonl")
+            {
+                danglingParent = envelope.GetProperty("relationships").EnumerateArray()
+                    .Single(relationship =>
+                        relationship.GetProperty("type").GetString() == "parent_session")
+                    .Clone();
+            }
+
+            JsonElement replay = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "replay", sourceStreamUuid.ToString())).RootElement;
+            Assert.Equal(sourceStreamUuid, replay.GetProperty("sourceStreamUuid").GetGuid());
+            Assert.Equal(
+                "capture_observations.source_position",
+                replay.GetProperty("orderBasis").GetProperty("observation").GetString());
+            Assert.Equal(
+                "captured_events.part_order",
+                replay.GetProperty("orderBasis").GetProperty("event").GetString());
+            Assert.Equal(
+                [0L],
+                replay.GetProperty("events").EnumerateArray().Select(entry =>
+                    entry.GetProperty("sourcePosition").GetInt64()));
+        }
+
+        Assert.Equal(cases.Length, streamUuids.Distinct().Count());
+
+        string rootSession = $"root-{Guid.NewGuid():N}";
+        CaptureObservationRequest rootObservation =
+            Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(new TrustedSourceObservation(
+                    new CaptureSourceIdentity(rootSession),
+                    0,
+                    new CaptureSourceLocator.NativeId("legitimate-root"),
+                    CaptureSourceMaterialKind.PersistedRecord,
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        type = "session_meta",
+                        payload = new
+                        {
+                            session_id = rootSession,
+                            id = "root-thread",
+                            source = "cli",
+                            thread_source = "user"
+                        }
+                    }),
+                    true))).Observation;
+        using HttpResponseMessage rootResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations", rootObservation);
+        rootResponse.EnsureSuccessStatusCode();
+        JsonElement rootReceipt = await rootResponse.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement rootEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            rootReceipt.GetProperty("observationUuid").GetGuid().ToString())).RootElement;
+        Assert.Empty(rootEnvelope.GetProperty("relationships").EnumerateArray());
+        Assert.Equal(
+            "01970000-0000-7000-8000-000000000000",
+            danglingParent.GetProperty("target").GetProperty("nativeId").GetString());
+        Assert.Equal(
+            JsonValueKind.Null,
+            danglingParent.GetProperty("target").GetProperty("sourceStreamUuid").ValueKind);
+    }
+
+    [Fact]
+    public async Task ChildGapDoesNotBlockParentOrSiblingCaptureCheckpoints()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-related-checkpoints-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        string externalSessionId = $"related-{Guid.NewGuid():N}";
+
+        async Task<JsonElement> PostAsync(string childId, long position)
+        {
+            using HttpResponseMessage response = await client.PostAsJsonAsync(
+                "/capture/v1/observations",
+                ExplicitIdentityObservation(
+                    externalSessionId,
+                    externalSessionId,
+                    childId,
+                    position,
+                    $"{childId}:{position}",
+                    "8",
+                    "0.144.synthetic",
+                    $"{childId} at {position}"));
+            string body = await response.Content.ReadAsStringAsync();
+            return JsonDocument.Parse(body).RootElement.Clone();
+        }
+
+        JsonElement parent = await PostAsync("parent", 0);
+        JsonElement failedChild = await PostAsync("child", 1);
+        JsonElement sibling = await PostAsync("sibling", 0);
+
+        Assert.Equal("new", parent.GetProperty("status").GetString());
+        Assert.Equal(
+            "blocked_by_earlier_gap",
+            failedChild.GetProperty("reason").GetString());
+        Assert.Equal("new", sibling.GetProperty("status").GetString());
+
+        JsonElement child = await PostAsync("child", 0);
+        Assert.Equal("new", child.GetProperty("status").GetString());
+        Guid[] sourceStreams =
+        [
+            parent.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid(),
+            child.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid(),
+            sibling.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid()
+        ];
+        Assert.Equal(3, sourceStreams.Distinct().Count());
+
+        foreach (Guid sourceStream in sourceStreams)
+        {
+            JsonElement replay = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "replay", sourceStream.ToString())).RootElement;
+            Assert.Equal(
+                [0L],
+                replay.GetProperty("events").EnumerateArray().Select(item =>
+                    item.GetProperty("sourcePosition").GetInt64()));
+            Assert.Equal(
+                "capture_observations.source_position",
+                replay.GetProperty("orderBasis").GetProperty("observation").GetString());
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerKeepsExactTransportBoundaryWholeAndAdvancesTheNextByteAsOmission()
     {
         const string retainedTail = "WHOLE-TRANSPORT-BOUNDARY-TAIL";
@@ -1408,7 +1636,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "7",
+                    "8",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -1436,7 +1664,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "7",
+                    "8",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -1599,7 +1827,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 Assert.Equal("new", receipt.GetProperty("status").GetString());
                 Assert.Equal(
-                    "7",
+                    "8",
                     receipt.GetProperty("observation").GetProperty("adapter")
                         .GetProperty("version").GetString());
             });
@@ -2126,7 +2354,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 {
                     Assert.Equal(expectedStatus, receipt.GetProperty("status").GetString());
                     Assert.Equal(
-                        "7",
+                        "8",
                         receipt.GetProperty("observation").GetProperty("adapter")
                             .GetProperty("version").GetString());
                 });
@@ -2668,7 +2896,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 JsonElement observation = receipt.GetProperty("observation");
                 Assert.Equal(
-                    "7",
+                    "8",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
                 JsonElement capturedEvent =
                     Assert.Single(receipt.GetProperty("events").EnumerateArray());
@@ -3103,6 +3331,182 @@ public sealed class CaptureTests : HttpSeamTestBase
                 await process.WaitForExitAsync();
             }
             await stderr;
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScheduledPackagedTracerChildConflictDoesNotStallParentOrSiblingCheckpoints()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-scheduled-related-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-scheduled-related-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(transcriptRoot);
+        string externalSessionId = $"related-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string siblingId = $"sibling-{Guid.NewGuid():N}";
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "a-child.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                timestamp = "2026-07-31T12:00:00Z",
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = childId,
+                    source = new
+                    {
+                        subagent = new
+                        {
+                            thread_spawn = new
+                            {
+                                parent_thread_id = externalSessionId,
+                                depth = 1,
+                                agent_path = "/root/child"
+                            }
+                        }
+                    },
+                    thread_source = "subagent"
+                }
+            }) + "\n",
+            new UTF8Encoding(false));
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "b-parent.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                timestamp = "2026-07-31T12:00:01Z",
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = externalSessionId,
+                    source = "cli",
+                    thread_source = "user"
+                }
+            }) + "\n",
+            new UTF8Encoding(false));
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptRoot, "c-sibling.jsonl"),
+            JsonSerializer.Serialize(new
+            {
+                timestamp = "2026-07-31T12:00:02Z",
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = siblingId,
+                    source = new
+                    {
+                        subagent = new
+                        {
+                            thread_spawn = new
+                            {
+                                parent_thread_id = externalSessionId,
+                                depth = 1,
+                                agent_path = "/root/sibling"
+                            }
+                        }
+                    },
+                    thread_source = "subagent"
+                }
+            }) + "\n",
+            new UTF8Encoding(false));
+
+        int proxyPort;
+        using (var reservation = new TcpListener(IPAddress.Loopback, 0))
+        {
+            reservation.Start();
+            proxyPort = ((IPEndPoint)reservation.LocalEndpoint).Port;
+        }
+        using var proxy = new HttpListener();
+        proxy.Prefixes.Add($"http://127.0.0.1:{proxyPort}/");
+        proxy.Start();
+        using var proxyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<JsonElement[]> forwarded = ConflictChildAndForwardParentAndSiblingAsync(
+            proxy, captureKey, childId, proxyTimeout.Token);
+
+        using var process = TestProcessRunner.StartCaptureTracer(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{proxyPort}",
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+                ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+                ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+                ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+            });
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        try
+        {
+            JsonElement parent = await ReadTracerReceiptAsync(process);
+            JsonElement sibling = await ReadTracerReceiptAsync(process);
+            JsonElement[] serverReceipts = await forwarded;
+            Assert.Equal(
+                serverReceipts.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()),
+                new[] { parent, sibling }.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()));
+
+            CaptureRuntimeSnapshot state =
+                await new FileCaptureRuntimeState(stateDirectory).ReadAsync();
+            Assert.Equal(3, state.Streams.Count);
+            CaptureRuntimeStreamState stoppedChild = Assert.Single(
+                state.Streams, stream => stream.Stop is not null);
+            Assert.Equal(
+                new CaptureRuntimeStopState(
+                    CaptureRuntimeStopCode.AcceptedSourceConflict,
+                    0),
+                stoppedChild.Stop);
+            Assert.Equal([0L], stoppedChild.Queue.Select(item => item.SourcePosition));
+            Assert.Null(stoppedChild.LastServerReceipt);
+
+            CaptureRuntimeStreamState[] progressed =
+                state.Streams.Where(stream => stream.Stop is null).ToArray();
+            Assert.Equal(2, progressed.Length);
+            Assert.All(progressed, stream =>
+            {
+                Assert.Empty(stream.Queue);
+                Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
+            });
+            Assert.Equal(
+                2,
+                progressed.Select(stream => stream.CanonicalSourceStreamUuid)
+                    .Distinct().Count());
+
+            foreach (JsonElement receipt in new[] { parent, sibling })
+            {
+                Guid observationUuid =
+                    receipt.GetProperty("observationUuid").GetGuid();
+                string canonical = await RunMemCtlAsync(
+                    "capture", "receipt", observationUuid.ToString());
+                Assert.Contains("\"contractVersion\":1", canonical);
+                Guid sourceStreamUuid = receipt.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid();
+                JsonElement replay = JsonDocument.Parse(await RunMemCtlAsync(
+                    "capture", "replay", sourceStreamUuid.ToString())).RootElement;
+                Assert.Equal(
+                    [0L],
+                    replay.GetProperty("events").EnumerateArray().Select(item =>
+                        item.GetProperty("sourcePosition").GetInt64()));
+            }
+        }
+        finally
+        {
+            proxyTimeout.Cancel();
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            string diagnostics = await stderr;
+            Assert.Contains("accepted_source_conflict", diagnostics);
+            proxy.Stop();
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -4625,6 +5029,56 @@ public sealed class CaptureTests : HttpSeamTestBase
         second.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
         second.Response.ContentLength64 = 0;
         second.Response.Close();
+    }
+
+    private async Task<JsonElement[]> ConflictChildAndForwardParentAndSiblingAsync(
+        HttpListener listener,
+        string captureKey,
+        string childId,
+        CancellationToken cancellationToken)
+    {
+        var forwarded = new List<JsonElement>();
+        for (int requestIndex = 0; requestIndex < 3; requestIndex++)
+        {
+            HttpListenerContext context = await listener.GetContextAsync()
+                .WaitAsync(cancellationToken);
+            using var buffer = new MemoryStream();
+            await context.Request.InputStream.CopyToAsync(buffer, cancellationToken);
+            byte[] requestBytes = buffer.ToArray();
+            JsonElement request = JsonDocument.Parse(requestBytes).RootElement;
+            string? requestChildId = request.GetProperty("sourceIdentity")
+                .GetProperty("childId").GetString();
+            if (string.Equals(requestChildId, childId, StringComparison.Ordinal))
+            {
+                byte[] conflict = Encoding.UTF8.GetBytes(
+                    """{"reason":"accepted_source_conflict"}""");
+                context.Response.StatusCode = (int)HttpStatusCode.Conflict;
+                context.Response.ContentType = "application/json";
+                context.Response.ContentLength64 = conflict.Length;
+                await context.Response.OutputStream.WriteAsync(
+                    conflict, cancellationToken);
+                context.Response.Close();
+                continue;
+            }
+
+            using var content = new ByteArrayContent(requestBytes);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            using var client = CaptureClient(captureKey);
+            using HttpResponseMessage response = await client.PostAsync(
+                "/capture/v1/observations", content, cancellationToken);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            string responseBody =
+                await response.Content.ReadAsStringAsync(cancellationToken);
+            forwarded.Add(JsonDocument.Parse(responseBody).RootElement.Clone());
+            byte[] responseBytes = Encoding.UTF8.GetBytes(responseBody);
+            context.Response.StatusCode = (int)HttpStatusCode.OK;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = responseBytes.Length;
+            await context.Response.OutputStream.WriteAsync(
+                responseBytes, cancellationToken);
+            context.Response.Close();
+        }
+        return [.. forwarded];
     }
 
     private async Task<JsonElement> WithholdFirstAndForwardSecondAsync(

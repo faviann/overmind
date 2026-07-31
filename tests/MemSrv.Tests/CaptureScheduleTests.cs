@@ -303,6 +303,69 @@ public sealed class CaptureScheduleTests
     }
 
     [Fact]
+    public async Task FailedChildScanLeavesParentAndSiblingRuntimeQueuesIndependent()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-related-scan-isolation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string childPath = Path.Combine(root, "a-child.jsonl");
+        string parentPath = Path.Combine(root, "b-parent.jsonl");
+        string siblingPath = Path.Combine(root, "c-sibling.jsonl");
+        const string parentId = "parent-thread";
+        await File.WriteAllTextAsync(
+            childPath,
+            $$$"""{"type":"session_meta","payload":{"session_id":"child-session","id":"child-thread","parent_thread_id":"{{{parentId}}}","thread_source":"subagent"}}""" + "\n");
+        await File.WriteAllTextAsync(
+            parentPath,
+            $$$"""{"type":"session_meta","payload":{"session_id":"parent-session","id":"{{{parentId}}}","source":"cli","thread_source":"user"}}""" + "\n");
+        await File.WriteAllTextAsync(
+            siblingPath,
+            $$$"""{"type":"session_meta","payload":{"session_id":"sibling-session","id":"sibling-thread","parent_thread_id":"{{{parentId}}}","thread_source":"subagent"}}""" + "\n");
+
+        IReadOnlyList<CodexTranscriptStream> streams =
+            CodexTranscriptDiscovery.Enumerate(root);
+        CodexTranscriptStream parent = streams.Single(stream => stream.Path == parentPath);
+        CodexTranscriptStream sibling = streams.Single(stream => stream.Path == siblingPath);
+        File.Delete(childPath);
+        var failures = new List<Exception>();
+        var state = new FileCaptureRuntimeState(Path.Combine(root, "state"));
+        var adapter = new CodexJsonlAdapter();
+        var safetyGate = new NeverStoreGate(Path.Combine(
+            TestProcessRunner.RepoRoot, "config/never_store.yaml"));
+
+        try
+        {
+            await CodexTranscriptScanCycle.RunAsync(
+                streams,
+                (stream, token) => CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    stream.Path,
+                    stream.SourceStream,
+                    state,
+                    safetyGate,
+                    token),
+                failures.Add);
+
+            Assert.IsType<FileNotFoundException>(Assert.Single(failures));
+            CaptureRuntimeSnapshot snapshot = await state.ReadAsync();
+            Assert.Equal(
+                [parent.SourceStream, sibling.SourceStream],
+                snapshot.Streams.Select(stream => stream.SourceStream));
+            Assert.All(snapshot.Streams, stream =>
+            {
+                Assert.Equal(0, stream.EnqueuedThrough);
+                Assert.Equal([0L], stream.Queue.Select(item => item.SourcePosition));
+                Assert.Null(stream.LastServerReceipt);
+                Assert.Null(stream.Stop);
+            });
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void EachEnumerationSeesEveryCurrentConfiguredJsonlStream()
     {
         string root = Path.Combine(

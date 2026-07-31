@@ -143,6 +143,152 @@ public sealed class CaptureOutcomeTests
     }
 
     [Fact]
+    public void FidelityPolicyOwnsExactCanonicalWholeOmissionRecognition()
+    {
+        const string externalSessionId = "policy-recognition-session";
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            omission = new
+            {
+                reason = CaptureFidelityPolicy.ContentLimitReason,
+                originalByteCount = 2L * 1024 * 1024,
+                policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                sourceIdentity = new
+                {
+                    externalSessionId,
+                    sourcePosition = 9,
+                    locatorKind = "byte_range"
+                }
+            }
+        });
+        CaptureObservationReceipt exact = CanonicalObservation(
+            CaptureFidelityPolicy.ContentLimitReason,
+            new CaptureSourceLocator.ByteRange(0, 1, null),
+            payload,
+            adapter: new CaptureAdapter(
+                "capture-fidelity-policy",
+                CaptureFidelityPolicy.CurrentVersion),
+            externalSessionId: externalSessionId);
+
+        CaptureDeterministicFidelity recognized = Assert.IsType<CaptureDeterministicFidelity>(
+            CaptureFidelityPolicy.ClassifyCanonicalWholeObservationOmission(exact));
+        Assert.Equal(CaptureFidelityPolicy.ContentLimitReason, recognized.Reason);
+        Assert.Equal(2L * 1024 * 1024, recognized.OriginalByteCount);
+
+        CaptureObservationReceipt spoofed = exact with
+        {
+            Adapter = new CaptureAdapter("source-owned-lookalike", "1")
+        };
+        Assert.Null(
+            CaptureFidelityPolicy.ClassifyCanonicalWholeObservationOmission(spoofed));
+        Assert.Equal(
+            CaptureSizeBand.Unknown,
+            Assert.Single(CaptureOutcomeAggregation.FromCanonical(spoofed).Counters)
+                .SizeBand);
+    }
+
+    [Fact]
+    public void SafetyOutcomeClassificationDoesNotDependOnHumanWording()
+    {
+        var failure = new SafetyScanException(
+            CaptureOutcomeReason.MatcherTimeout,
+            "wording with no classification keywords");
+
+        Assert.Equal(
+            CaptureOutcomeReason.MatcherTimeout,
+            CaptureOutcomeAggregation.Classify(failure));
+        Assert.Contains("wording with no classification keywords", failure.Message);
+    }
+
+    [Theory]
+    [InlineData(CaptureOutcomeReason.MatcherTimeout)]
+    [InlineData(CaptureOutcomeReason.ScanBudgetExhausted)]
+    [InlineData(CaptureOutcomeReason.RequiredInspectionIncomplete)]
+    [InlineData(CaptureOutcomeReason.ScannerInternalFailure)]
+    public void SafetyScanExceptionAcceptsEveryClosedMachineReason(string reason)
+    {
+        var failure = new SafetyScanException(reason, "safe prose");
+
+        Assert.Equal(reason, failure.OutcomeReason);
+    }
+
+    [Fact]
+    public void SafetyScanExceptionRejectsAnOpenMachineReasonWithoutEchoingIt()
+    {
+        const string contentLike = "secret-content-machine-reason";
+
+        ArgumentException failure = Assert.Throws<ArgumentException>(
+            () => new SafetyScanException(contentLike, "safe prose"));
+
+        Assert.DoesNotContain(contentLike, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("record", "fidelity_omission", "observation_exceeds_content_limit", "unknown")]
+    [InlineData("codex", "raw-content", "observation_exceeds_content_limit", "unknown")]
+    [InlineData("codex", "fidelity_omission", "raw-content", "unknown")]
+    [InlineData("codex", "fidelity_omission", "observation_exceeds_content_limit", "raw-content")]
+    public void OutcomeRecordAndCounterConstructorsRejectOpenDimensions(
+        string harness,
+        string @class,
+        string reason,
+        string sizeBand)
+    {
+        Assert.Throws<ArgumentException>(
+            () => new CaptureOutcomeRecord(harness, @class, reason, sizeBand));
+        Assert.Throws<ArgumentException>(
+            () => new CaptureOutcomeCounter(harness, @class, reason, sizeBand, 1));
+    }
+
+    [Fact]
+    public void OutcomeSummaryConstructorRejectsOpenAndContradictoryState()
+    {
+        Assert.Throws<ArgumentException>(
+            () => new CaptureOutcomeSummary(1, "raw-content", "complete", []));
+        Assert.Throws<ArgumentException>(
+            () => new CaptureOutcomeSummary(1, "healthy", "raw-content", []));
+        Assert.Throws<ArgumentException>(() => new CaptureOutcomeSummary(
+            1,
+            "healthy",
+            "complete",
+            [
+                new CaptureOutcomeCounter(
+                    "codex",
+                    CaptureOutcomeAggregation.SafetyFailureClass,
+                    CaptureOutcomeReason.MatcherTimeout,
+                    CaptureSizeBand.Unknown,
+                    1)
+            ]));
+    }
+
+    [Fact]
+    public void OutcomeJsonDeserializationRejectsContentLikeDimensionsWithoutEcho()
+    {
+        const string contentLike = "private-content-must-not-echo";
+        string json = $$"""
+            {
+              "contractVersion": 1,
+              "captureHealth": "healthy",
+              "captureFidelity": "degraded",
+              "counters": [{
+                "harness": "codex",
+                "class": "fidelity_omission",
+                "reason": "{{contentLike}}",
+                "sizeBand": "unknown",
+                "count": 1
+              }]
+            }
+            """;
+
+        Exception failure = Assert.ThrowsAny<Exception>(() =>
+            JsonSerializer.Deserialize<CaptureOutcomeSummary>(
+                json,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        Assert.DoesNotContain(contentLike, failure.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void NativeBinaryOutcomeStaysUnknownWhenCountCannotBeReconstructed()
     {
         CaptureObservationReceipt observation = CanonicalObservation(

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MemSrv.Core;
 
@@ -45,34 +46,146 @@ public static class CaptureSizeBand
 }
 
 /// <summary>One content-free input to the aggregation seam.</summary>
-public sealed record CaptureOutcomeRecord(
-    string Harness,
-    string Class,
-    string Reason,
-    string SizeBand);
+public sealed record CaptureOutcomeRecord
+{
+    [JsonConstructor]
+    public CaptureOutcomeRecord(
+        string harness,
+        string @class,
+        string reason,
+        string sizeBand)
+    {
+        CaptureOutcomeContract.ValidateDimensions(harness, @class, reason, sizeBand);
+        Harness = harness;
+        Class = @class;
+        Reason = reason;
+        SizeBand = sizeBand;
+    }
+
+    public string Harness { get; }
+    public string Class { get; }
+    public string Reason { get; }
+    public string SizeBand { get; }
+}
 
 /// <summary>One grouped counter; no per-record identity is retained.</summary>
-public sealed record CaptureOutcomeCounter(
-    string Harness,
-    string Class,
-    string Reason,
-    string SizeBand,
-    long Count);
+public sealed record CaptureOutcomeCounter
+{
+    [JsonConstructor]
+    public CaptureOutcomeCounter(
+        string harness,
+        string @class,
+        string reason,
+        string sizeBand,
+        long count)
+    {
+        CaptureOutcomeContract.ValidateDimensions(harness, @class, reason, sizeBand);
+        if (count <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(count), "Capture outcome count must be positive.");
+        }
+        Harness = harness;
+        Class = @class;
+        Reason = reason;
+        SizeBand = sizeBand;
+        Count = count;
+    }
+
+    public string Harness { get; }
+    public string Class { get; }
+    public string Reason { get; }
+    public string SizeBand { get; }
+    public long Count { get; }
+}
 
 /// <summary>
 /// Health and fidelity are independent: deterministic omissions degrade
 /// fidelity, while operational safety failures block health.
 /// </summary>
-public sealed class CaptureOutcomeSummary(
-    int contractVersion,
-    string captureHealth,
-    string captureFidelity,
-    IReadOnlyList<CaptureOutcomeCounter> counters)
+public sealed class CaptureOutcomeSummary
 {
-    public int ContractVersion { get; } = contractVersion;
-    public string CaptureHealth { get; } = captureHealth;
-    public string CaptureFidelity { get; } = captureFidelity;
-    public IReadOnlyList<CaptureOutcomeCounter> Counters { get; } = counters;
+    [JsonConstructor]
+    public CaptureOutcomeSummary(
+        int contractVersion,
+        string captureHealth,
+        string captureFidelity,
+        IReadOnlyList<CaptureOutcomeCounter> counters)
+    {
+        if (contractVersion != 1)
+        {
+            throw new ArgumentException(
+                "Capture outcome contract version is not recognized.",
+                nameof(contractVersion));
+        }
+        ArgumentNullException.ThrowIfNull(counters);
+        CaptureOutcomeCounter[] materialized = counters.ToArray();
+        if (materialized.Any(counter => counter is null))
+        {
+            throw new ArgumentException(
+                "Capture outcome counters must be valid.", nameof(counters));
+        }
+        string expectedHealth = materialized.Any(
+            counter => counter.Class == CaptureOutcomeAggregation.SafetyFailureClass)
+                ? "blocked"
+                : "healthy";
+        string expectedFidelity = materialized.Any(
+            counter => counter.Class == CaptureOutcomeAggregation.FidelityOmissionClass)
+                ? "degraded"
+                : "complete";
+        if (!string.Equals(captureHealth, expectedHealth, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Capture outcome health is not recognized.", nameof(captureHealth));
+        }
+        if (!string.Equals(captureFidelity, expectedFidelity, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Capture outcome fidelity is not recognized.", nameof(captureFidelity));
+        }
+        ContractVersion = contractVersion;
+        CaptureHealth = captureHealth;
+        CaptureFidelity = captureFidelity;
+        Counters = Array.AsReadOnly(materialized);
+    }
+
+    public int ContractVersion { get; }
+    public string CaptureHealth { get; }
+    public string CaptureFidelity { get; }
+    public IReadOnlyList<CaptureOutcomeCounter> Counters { get; }
+}
+
+internal static class CaptureOutcomeContract
+{
+    internal static void ValidateDimensions(
+        string harness,
+        string @class,
+        string reason,
+        string sizeBand)
+    {
+        bool recognized =
+            @class == CaptureOutcomeAggregation.FidelityOmissionClass
+                ? CaptureOutcomeReason.IsFidelity(reason)
+                : @class == CaptureOutcomeAggregation.SafetyFailureClass
+                    && CaptureOutcomeReason.IsSafetyFailure(reason);
+        if (!recognized)
+        {
+            throw new ArgumentException("Capture outcome is not recognized.");
+        }
+        if (harness is not ("codex" or "claude_code" or "other"))
+        {
+            throw new ArgumentException("Capture outcome harness is not recognized.");
+        }
+        if (sizeBand is not (
+                CaptureSizeBand.Unknown
+                or CaptureSizeBand.UpTo1MiB
+                or CaptureSizeBand.Over1MiBThrough64MiB
+                or CaptureSizeBand.Over64MiBThrough128MiB
+                or CaptureSizeBand.Over128MiB))
+        {
+            throw new ArgumentException("Capture outcome size band is not recognized.");
+        }
+    }
 }
 
 /// <summary>
@@ -129,11 +242,6 @@ public static class CaptureOutcomeAggregation
     {
         ArgumentNullException.ThrowIfNull(outcomes);
         CaptureOutcomeRecord[] materialized = outcomes.ToArray();
-        foreach (CaptureOutcomeRecord outcome in materialized)
-        {
-            Validate(outcome);
-        }
-
         CaptureOutcomeCounter[] counters = materialized
             .GroupBy(
                 outcome => (
@@ -177,18 +285,29 @@ public static class CaptureOutcomeAggregation
             .Where(CaptureOutcomeReason.IsFidelity)
             .ToHashSet(StringComparer.Ordinal);
 
+        CaptureDeterministicFidelity? wholeObservation =
+            CaptureFidelityPolicy.ClassifyCanonicalWholeObservationOmission(
+                observation);
         var outcomes = reasons
             .Where(reason => reason != CaptureFidelityPolicy.UnsupportedBinaryReason)
             .Select(reason => FidelityOmission(
                 observation.Source.Harness,
                 reason,
-                CanonicalByteCount(observation, reason)))
+                wholeObservation?.Reason == reason
+                    ? wholeObservation.OriginalByteCount
+                    : reason is CaptureFidelityPolicy.TransportLimitReason
+                        or CaptureFidelityPolicy.ContentLimitReason
+                            ? null
+                            : observation.Locator is CaptureSourceLocator.ByteRange range
+                                ? range.Length
+                                : null))
             .ToList();
         if (reasons.Contains(CaptureFidelityPolicy.UnsupportedBinaryReason))
         {
-            long? wholeCount = PolicyOmissionByteCount(
-                observation,
-                CaptureFidelityPolicy.UnsupportedBinaryReason);
+            long? wholeCount = wholeObservation?.Reason
+                == CaptureFidelityPolicy.UnsupportedBinaryReason
+                    ? wholeObservation.OriginalByteCount
+                    : null;
             if (wholeCount is not null)
             {
                 outcomes.Add(FidelityOmission(
@@ -226,153 +345,8 @@ public static class CaptureOutcomeAggregation
     public static string Classify(SafetyScanException failure)
     {
         ArgumentNullException.ThrowIfNull(failure);
-        string reason = failure.Reason;
-        if (reason.Contains("matcher timeout", StringComparison.OrdinalIgnoreCase))
-        {
-            return CaptureOutcomeReason.MatcherTimeout;
-        }
-        if (reason.Contains("budget", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("deadline", StringComparison.OrdinalIgnoreCase))
-        {
-            return CaptureOutcomeReason.ScanBudgetExhausted;
-        }
-        if (reason.Contains(
-                "could not be inspected completely",
-                StringComparison.OrdinalIgnoreCase)
-            || reason.Contains(
-                "could not be reconstructed",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return CaptureOutcomeReason.RequiredInspectionIncomplete;
-        }
-        return CaptureOutcomeReason.ScannerInternalFailure;
+        return failure.OutcomeReason;
     }
-
-    private static long? CanonicalByteCount(
-        CaptureObservationReceipt observation,
-        string reason)
-    {
-        if (reason is CaptureFidelityPolicy.TransportLimitReason
-            or CaptureFidelityPolicy.ContentLimitReason)
-        {
-            return PolicyOmissionByteCount(observation, reason);
-        }
-        if (reason == CaptureFidelityPolicy.UnsupportedBinaryReason
-            && PolicyOmissionByteCount(observation, reason) is { } wholeCount)
-        {
-            return wholeCount;
-        }
-        return observation.Locator is CaptureSourceLocator.ByteRange range
-            ? range.Length
-            : null;
-    }
-
-    private static long? PolicyOmissionByteCount(
-        CaptureObservationReceipt observation,
-        string expectedReason)
-    {
-        if (!string.Equals(
-                observation.Adapter.Name,
-                "capture-fidelity-policy",
-                StringComparison.Ordinal)
-            || !string.Equals(
-                observation.Adapter.Version,
-                CaptureFidelityPolicy.CurrentVersion,
-                StringComparison.Ordinal)
-            || observation.SafeSourcePayload.ValueKind != JsonValueKind.Object
-            || !observation.SafeSourcePayload.TryGetProperty(
-                "omission",
-                out JsonElement omission)
-            || !HasOnlyProperties(
-                omission,
-                "reason",
-                "originalByteCount",
-                "policyVersion",
-                "sourceIdentity")
-            || !HasString(omission, "reason", expectedReason)
-            || !HasString(
-                omission,
-                "policyVersion",
-                CaptureFidelityPolicy.CurrentVersion)
-            || !omission.TryGetProperty(
-                "originalByteCount",
-                out JsonElement countElement)
-            || !countElement.TryGetInt64(out long count)
-            || count < 0
-            || !omission.TryGetProperty(
-                "sourceIdentity",
-                out JsonElement sourceIdentity)
-            || !HasCanonicalSourceIdentity(sourceIdentity, observation))
-        {
-            return null;
-        }
-        return count;
-    }
-
-    private static bool HasCanonicalSourceIdentity(
-        JsonElement value,
-        CaptureObservationReceipt observation)
-    {
-        if (value.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (JsonProperty property in value.EnumerateObject())
-        {
-            if (!seen.Add(property.Name)
-                || property.Name is not (
-                    "externalSessionId"
-                    or "childId"
-                    or "sourcePosition"
-                    or "locatorKind"))
-            {
-                return false;
-            }
-        }
-        bool hasChild = value.TryGetProperty("childId", out JsonElement child);
-        bool childMatches = observation.SourceIdentity.ChildId is null
-            ? !hasChild || child.ValueKind == JsonValueKind.Null
-            : hasChild
-                && child.ValueKind == JsonValueKind.String
-                && string.Equals(
-                    child.GetString(),
-                    observation.SourceIdentity.ChildId,
-                    StringComparison.Ordinal);
-        return seen.Count == (hasChild ? 4 : 3)
-            && HasString(
-                value,
-                "externalSessionId",
-                observation.SourceIdentity.ExternalSessionId)
-            && childMatches
-            && value.TryGetProperty("sourcePosition", out JsonElement position)
-            && position.TryGetInt64(out long sourcePosition)
-            && sourcePosition >= 0
-            && HasString(value, "locatorKind", observation.Locator.Kind);
-    }
-
-    private static bool HasOnlyProperties(JsonElement value, params string[] names)
-    {
-        if (value.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-        var expected = names.ToHashSet(StringComparer.Ordinal);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (JsonProperty property in value.EnumerateObject())
-        {
-            if (!expected.Contains(property.Name) || !seen.Add(property.Name))
-            {
-                return false;
-            }
-        }
-        return seen.SetEquals(expected);
-    }
-
-    private static bool HasString(JsonElement value, string name, string expected) =>
-        value.TryGetProperty(name, out JsonElement property)
-        && property.ValueKind == JsonValueKind.String
-        && string.Equals(property.GetString(), expected, StringComparison.Ordinal);
 
     private static string NormalizeHarness(string harness) =>
         harness switch
@@ -398,29 +372,4 @@ public static class CaptureOutcomeAggregation
         };
     }
 
-    private static void Validate(CaptureOutcomeRecord outcome)
-    {
-        bool recognized =
-            outcome.Class == FidelityOmissionClass
-                ? CaptureOutcomeReason.IsFidelity(outcome.Reason)
-                : outcome.Class == SafetyFailureClass
-                    && CaptureOutcomeReason.IsSafetyFailure(outcome.Reason);
-        if (!recognized)
-        {
-            throw new ArgumentException("Capture outcome is not recognized.");
-        }
-        if (outcome.Harness is not ("codex" or "claude_code" or "other"))
-        {
-            throw new ArgumentException("Capture outcome harness is not recognized.");
-        }
-        if (outcome.SizeBand is not (
-                CaptureSizeBand.Unknown
-                or CaptureSizeBand.UpTo1MiB
-                or CaptureSizeBand.Over1MiBThrough64MiB
-                or CaptureSizeBand.Over64MiBThrough128MiB
-                or CaptureSizeBand.Over128MiB))
-        {
-            throw new ArgumentException("Capture outcome size band is not recognized.");
-        }
-    }
 }

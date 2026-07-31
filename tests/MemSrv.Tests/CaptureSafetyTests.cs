@@ -228,6 +228,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 () => failingIngestion.ImportAsync(binding, command));
 
         Assert.DoesNotContain("scanner implementation detail", failure.Message);
+        Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
         Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
         Assert.Equal("complete", failure.Outcome?.CaptureFidelity);
         Assert.Equal(

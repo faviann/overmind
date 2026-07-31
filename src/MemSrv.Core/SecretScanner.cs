@@ -439,7 +439,9 @@ internal sealed class SecretScanner : ISafetyScanner
     }
 
     private static SafetyScanException MatcherTimedOut(string subject) =>
-        new($"{subject} exceeded its matcher timeout");
+        new(
+            CaptureOutcomeReason.MatcherTimeout,
+            $"{subject} exceeded its matcher timeout");
 
     /// <summary>
     /// The decodings of one candidate: one for percent and Base64, and for an
@@ -648,6 +650,7 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         if (_clock.Elapsed > budgets.MaxScanTime)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the total scan-time budget of {budgets.MaxScanTime.TotalMilliseconds:0}ms was exceeded");
         }
     }
@@ -657,6 +660,7 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         if (++_matches > budgets.MaxMatches)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the match-count budget of {budgets.MaxMatches} was exceeded");
         }
     }
@@ -666,6 +670,7 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         if (++_decoderCandidates > budgets.MaxDecoderCandidates)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the decoder-candidate budget of {budgets.MaxDecoderCandidates} was exceeded");
         }
     }
@@ -676,6 +681,7 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         if (_decodedBytes > budgets.MaxDecodedBytes)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the total-decoded-byte budget of {budgets.MaxDecodedBytes} was exceeded");
         }
     }

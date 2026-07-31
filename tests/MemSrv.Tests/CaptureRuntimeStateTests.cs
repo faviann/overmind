@@ -251,6 +251,92 @@ public sealed class CaptureRuntimeStateTests
             exception.Message);
     }
 
+    [Fact]
+    public void LegacyQueueItemWithoutOutcomeDefaultsToHealthyComplete()
+    {
+        const string legacy = """
+            {
+              "sourceStream": "stream",
+              "sourcePosition": 7,
+              "deterministicLocatorEvidence": {
+                "transcriptIdentity": "transcript",
+                "sourcePosition": 7,
+                "byteOffset": 11,
+                "byteLength": 13,
+                "recordSha256": "record",
+                "prefixEvidence": { "byteLength": 24, "sha256": "prefix" }
+              },
+              "redactedSafeCandidate": "{\"safe\":true}"
+            }
+            """;
+
+        CaptureRuntimeQueueItem item = Assert.IsType<CaptureRuntimeQueueItem>(
+            JsonSerializer.Deserialize<CaptureRuntimeQueueItem>(
+                legacy,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        Assert.Equal("healthy", item.Outcome.CaptureHealth);
+        Assert.Equal("complete", item.Outcome.CaptureFidelity);
+        Assert.Empty(item.Outcome.Counters);
+    }
+
+    [Fact]
+    public async Task RuntimeStateRejectsOpenOutcomeDimensionsWithoutEchoingContent()
+    {
+        const string contentLike = "private-runtime-content-must-not-echo";
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-invalid-outcome-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var outcome = CaptureOutcomeAggregation.Summarize(
+            [
+                CaptureOutcomeAggregation.FidelityOmission(
+                    "codex",
+                    CaptureFidelityPolicy.ContentLimitReason,
+                    1)
+            ]);
+            var locator = new CaptureRuntimeLocatorEvidence(
+                "transcript",
+                0,
+                0,
+                1,
+                "record",
+                new CapturePrefixEvidence(1, "prefix"));
+            var snapshot = new CaptureRuntimeSnapshot(
+                1,
+                [
+                    new CaptureRuntimeStreamState(
+                        "stream",
+                        "transcript",
+                        locator.PrefixEvidence,
+                        0,
+                        [new CaptureRuntimeQueueItem("stream", locator, "{}", outcome)],
+                        null,
+                        null)
+                ]);
+            string durableJson = JsonSerializer.Serialize(
+                snapshot,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            durableJson = durableJson.Replace(
+                $"\"reason\":\"{CaptureFidelityPolicy.ContentLimitReason}\"",
+                $"\"reason\":\"{contentLike}\"",
+                StringComparison.Ordinal);
+            await File.WriteAllTextAsync(
+                Path.Combine(directory, "capture-state.json"),
+                durableJson);
+
+            Exception failure = await Assert.ThrowsAnyAsync<Exception>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+
+            Assert.DoesNotContain(contentLike, failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Theory]
     [MemberData(nameof(InvalidStopStateShapes))]
     public void CaptureRuntimeStopStateContractRejectsInvalidConstructorAndJsonShapes(
@@ -1170,6 +1256,7 @@ public sealed class CaptureRuntimeStateTests
 
         SafetyScanException failure = Assert.Throws<SafetyScanException>(
             deadline.AssertWithinDeadline);
+        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
         Assert.Contains("30-second deadline", failure.Message, StringComparison.Ordinal);
     }
 
@@ -2583,6 +2670,7 @@ public sealed class CaptureRuntimeStateTests
                         new NeverStoreGate(new ThrowingSafetyScanner())));
 
             Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
             Assert.Equal(
                 CaptureOutcomeReason.ScannerInternalFailure,
                 Assert.Single(failure.Outcome!.Counters).Reason);
@@ -2637,6 +2725,7 @@ public sealed class CaptureRuntimeStateTests
 
             Assert.False(persistedReceipt);
             Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
             Assert.Equal(
                 CaptureOutcomeReason.ScannerInternalFailure,
                 Assert.Single(failure.Outcome!.Counters).Reason);

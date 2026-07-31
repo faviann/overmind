@@ -87,10 +87,27 @@ public sealed class SafetyConfigurationException(string reason)
 /// A scan could not complete within its bounds, or a required value could not
 /// be inspected completely. Callers must persist nothing and advance nothing.
 /// </summary>
-public class SafetyScanException(string reason)
-    : InvalidOperationException($"Capture safety scan failed closed: {reason}.")
+public class SafetyScanException : InvalidOperationException
 {
-    public string Reason { get; } = reason;
+    public SafetyScanException(string outcomeReason, string reason)
+        : base($"Capture safety scan failed closed: {reason}.")
+    {
+        if (outcomeReason is not (
+                CaptureOutcomeReason.MatcherTimeout
+                or CaptureOutcomeReason.ScanBudgetExhausted
+                or CaptureOutcomeReason.RequiredInspectionIncomplete
+                or CaptureOutcomeReason.ScannerInternalFailure))
+        {
+            throw new ArgumentException(
+                "Capture safety scan outcome reason is not recognized.",
+                nameof(outcomeReason));
+        }
+        OutcomeReason = outcomeReason;
+        Reason = reason;
+    }
+
+    public string OutcomeReason { get; }
+    public string Reason { get; }
     public CaptureOutcomeSummary? Outcome { get; private set; }
 
     public void ReportCaptureOutcome(string harness, long? inspectedByteCount = null) =>
@@ -109,4 +126,6 @@ public class SafetyScanException(string reason)
 /// safety boundary.
 /// </summary>
 public sealed class SafetyScannerInternalException()
-    : SafetyScanException("the scanner failed internally");
+    : SafetyScanException(
+        CaptureOutcomeReason.ScannerInternalFailure,
+        "the scanner failed internally");

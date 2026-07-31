@@ -101,6 +101,7 @@ public sealed class NeverStoreGate
         if (bytes > _budgets.MaxObservationBytes)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the observation budget of {_budgets.MaxObservationBytes} bytes was exceeded");
         }
     }
@@ -197,6 +198,7 @@ public sealed class NeverStoreGate
         if (result.OmissionReasons.Count > 0)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.RequiredInspectionIncomplete,
                 $"a required value could not be inspected completely ({result.OmissionReasons[0]})");
         }
     }

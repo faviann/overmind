@@ -448,10 +448,65 @@ public static class CaptureFidelityPolicy
             || !omission.TryGetProperty(
                 "sourceIdentity",
                 out JsonElement sourceIdentity)
+            || sourceIdentity.ValueKind != JsonValueKind.Object
             || !HasTrustedSourceIdentity(
                 sourceIdentity,
                 observation.SourceIdentity,
                 observation.SourcePosition,
+                observation.Locator.Kind))
+        {
+            return null;
+        }
+        return new(reason, count);
+    }
+
+    /// <summary>
+    /// Recognizes only an exact whole-observation policy receipt and returns
+    /// its trusted original byte count. Canonical readers use this same seam
+    /// as import so policy JSON compatibility has one owner.
+    /// </summary>
+    public static CaptureDeterministicFidelity?
+        ClassifyCanonicalWholeObservationOmission(
+            CaptureObservationReceipt observation)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        if (!string.Equals(
+                observation.Adapter.Name,
+                "capture-fidelity-policy",
+                StringComparison.Ordinal)
+            || !string.Equals(
+                observation.Adapter.Version,
+                CurrentVersion,
+                StringComparison.Ordinal)
+            || observation.SafeSourcePayload.ValueKind != JsonValueKind.Object
+            || !observation.SafeSourcePayload.TryGetProperty(
+                "omission",
+                out JsonElement omission)
+            || !HasOnlyProperties(
+                omission,
+                "reason",
+                "originalByteCount",
+                "policyVersion",
+                "sourceIdentity")
+            || omission.GetProperty("reason").GetString() is not { } reason
+            || reason is not (
+                TransportLimitReason
+                or ContentLimitReason
+                or UnsupportedBinaryReason)
+            || !omission.TryGetProperty(
+                "originalByteCount",
+                out JsonElement countElement)
+            || !countElement.TryGetInt64(out long count)
+            || count < 0
+            || !HasString(omission, "policyVersion", CurrentVersion)
+            || !omission.TryGetProperty(
+                "sourceIdentity",
+                out JsonElement sourceIdentity)
+            || sourceIdentity.ValueKind != JsonValueKind.Object
+            || !HasTrustedSourceIdentity(
+                sourceIdentity,
+                observation.SourceIdentity,
+                expectedSourcePosition: null,
                 observation.Locator.Kind))
         {
             return null;
@@ -527,12 +582,14 @@ public static class CaptureFidelityPolicy
             (command, originalByteCount) =>
                 OmitForContentLimit(command, originalByteCount),
             _ => new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the observation budget of {effectiveBound} bytes was exceeded"));
         CaptureObservationRequest snapshot =
             JsonSerializer.Deserialize<CaptureObservationRequest>(
                 bounded.Serialized,
                 CaptureLedger.JsonOptions)
             ?? throw new SafetyScanException(
+                CaptureOutcomeReason.RequiredInspectionIncomplete,
                 "the bounded capture representation could not be reconstructed");
         return bounded with
         {
@@ -663,6 +720,7 @@ public static class CaptureFidelityPolicy
         if (omittedByteCount > effectiveBound)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.RequiredInspectionIncomplete,
                 "the required unsupported-binary omission cannot fit within " +
                 $"the observation budget of {effectiveBound} bytes");
         }
@@ -748,6 +806,7 @@ public static class CaptureFidelityPolicy
         catch (CaptureRepresentationLimitException)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.RequiredInspectionIncomplete,
                 "the required unsupported-binary omission cannot fit within " +
                 $"the fidelity budget of {effectiveBound} bytes");
         }

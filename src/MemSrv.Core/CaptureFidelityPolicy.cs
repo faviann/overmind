@@ -14,6 +14,9 @@ public static class CaptureFidelityPolicy
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
     public const string UnsupportedBinaryReason = "unsupported_binary_content";
+    public const string MalformedJsonReason = "json_parse_error";
+    public const string UninspectableSourceRecordReason = "source_record_uninspectable";
+    public const string InvalidUtf8ContentPolicy = "invalid_utf8";
     public const string BinaryOmissionField = "capture_fidelity_omission";
 
     private static readonly HashSet<string> UnsupportedBinaryCategories =

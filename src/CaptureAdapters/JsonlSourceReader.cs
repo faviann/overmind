@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using MemSrv.Core;
 
@@ -48,33 +49,70 @@ public static class JsonlSourceReader
             int recordLength = contentLength + separatorLength;
             if (contentLength > 0)
             {
+                long sourcePosition = observations.Count;
+                string digest = Convert.ToHexString(
+                        SHA256.HashData(bytes.Slice(lineStart, recordLength)))
+                    .ToLowerInvariant();
+                var locator = new CaptureSourceLocator.ByteRange(
+                    lineStart, recordLength, digest);
                 JsonElement payload;
+                CaptureSourceRecordInterpretation interpretation;
                 try
                 {
                     payload = JsonDocument.Parse(
                             sourceBytes.Slice(lineStart, contentLength))
                         .RootElement.Clone();
+                    interpretation = CaptureSourceRecordInterpretation.Structured;
                 }
                 catch (JsonException)
                 {
-                    payload = JsonAdapterHelpers.Json(new
+                    try
                     {
-                        type = "malformed",
-                        opaqueText = System.Text.Encoding.UTF8.GetString(
-                            sourceBytes.Span.Slice(lineStart, contentLength))
-                    });
+                        string opaqueText = new UTF8Encoding(
+                                encoderShouldEmitUTF8Identifier: false,
+                                throwOnInvalidBytes: true)
+                            .GetString(bytes.Slice(lineStart, contentLength));
+                        payload = JsonAdapterHelpers.Json(new
+                        {
+                            opaqueText,
+                            parseError = new
+                            {
+                                reason = CaptureFidelityPolicy.MalformedJsonReason,
+                                policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                                sourceIdentity = SourceProvenance(
+                                    sourceIdentity, sourcePosition, "byte_range")
+                            }
+                        });
+                        interpretation =
+                            CaptureSourceRecordInterpretation.MalformedReadableText;
+                    }
+                    catch (DecoderFallbackException)
+                    {
+                        payload = JsonAdapterHelpers.Json(new
+                        {
+                            omission = new
+                            {
+                                reason =
+                                    CaptureFidelityPolicy.UninspectableSourceRecordReason,
+                                originalByteCount = contentLength,
+                                policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                                contentPolicy = CaptureFidelityPolicy.InvalidUtf8ContentPolicy,
+                                sourceIdentity = SourceProvenance(
+                                    sourceIdentity, sourcePosition, "byte_range")
+                            }
+                        });
+                        interpretation = CaptureSourceRecordInterpretation.Uninspectable;
+                    }
                 }
 
-                string digest = Convert.ToHexString(
-                        SHA256.HashData(bytes.Slice(lineStart, recordLength)))
-                    .ToLowerInvariant();
                 observations.Add(new TrustedSourceObservation(
                     sourceIdentity,
-                    observations.Count,
-                    new CaptureSourceLocator.ByteRange(lineStart, recordLength, digest),
+                    sourcePosition,
+                    locator,
                     CaptureSourceMaterialKind.PersistedRecord,
                     payload,
-                    IsTerminal: !atEnd || terminalAtEndOfFile));
+                    IsTerminal: !atEnd || terminalAtEndOfFile,
+                    interpretation));
             }
 
             lineStart = index + 1;
@@ -82,4 +120,16 @@ public static class JsonlSourceReader
 
         return observations;
     }
+
+    private static object SourceProvenance(
+        CaptureSourceIdentity sourceIdentity,
+        long sourcePosition,
+        string locatorKind) =>
+        new
+        {
+            externalSessionId = sourceIdentity.ExternalSessionId,
+            childId = sourceIdentity.ChildId,
+            sourcePosition,
+            locatorKind
+        };
 }

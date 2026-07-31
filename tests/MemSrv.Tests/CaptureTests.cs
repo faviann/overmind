@@ -1771,6 +1771,113 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task CodexAdapterVersionTenConvergesForAnUnchangedVersionNineRecord()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-v10-upgrade-{Guid.NewGuid():N}";
+        await EnrollAsync($"codex-adapter-v10-upgrade-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "9",
+                "0.144.synthetic",
+                "unchanged source record"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        JsonElement acceptedReceipt =
+            await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "10",
+                "0.144.synthetic",
+                "unchanged source record"));
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        JsonElement retryReceipt =
+            await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Theory]
+    [InlineData("malformed_json")]
+    [InlineData("source_record_omission")]
+    public async Task VersionTenTerminalMalformedRepresentationsCannotMasqueradeAsVersionNine(
+        string recordType)
+    {
+        string captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string locator = $"adapter-v10-terminal-malformed-{Guid.NewGuid():N}";
+        await EnrollAsync(
+            $"codex-adapter-v10-terminal-malformed-{Guid.NewGuid():N}",
+            captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            TerminalMalformedRepresentationObservation(
+                externalSessionId,
+                locator,
+                adapterVersion: "9",
+                recordType));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+
+        using HttpResponseMessage masqueradingRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            TerminalMalformedRepresentationObservation(
+                externalSessionId,
+                locator,
+                adapterVersion: "10",
+                recordType));
+
+        Assert.Equal(HttpStatusCode.Conflict, masqueradingRetry.StatusCode);
+    }
+
+    [Fact]
+    public async Task VersionTenUnsupportedBinaryFidelityCannotMasqueradeAsVersionNine()
+    {
+        string captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string locator = $"adapter-v10-binary-{Guid.NewGuid():N}";
+        await EnrollAsync($"codex-adapter-v10-binary-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RawBinaryContentObservation(
+                externalSessionId,
+                locator,
+                adapterVersion: "9"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+
+        using HttpResponseMessage masqueradingRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RawBinaryContentObservation(
+                externalSessionId,
+                locator,
+                adapterVersion: "10"));
+
+        Assert.Equal(HttpStatusCode.Conflict, masqueradingRetry.StatusCode);
+    }
+
+    [Fact]
     public async Task VersionNineSourceOwnedBinaryOmissionLookalikeStillConvergesFromVersionEight()
     {
         var captureKey = CaptureCredential();
@@ -2717,7 +2824,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "9",
+                    "10",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -2745,7 +2852,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "9",
+                    "10",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -2908,7 +3015,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 Assert.Equal("new", receipt.GetProperty("status").GetString());
                 Assert.Equal(
-                    "9",
+                    "10",
                     receipt.GetProperty("observation").GetProperty("adapter")
                         .GetProperty("version").GetString());
             });
@@ -3435,7 +3542,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 {
                     Assert.Equal(expectedStatus, receipt.GetProperty("status").GetString());
                     Assert.Equal(
-                        "9",
+                        "10",
                         receipt.GetProperty("observation").GetProperty("adapter")
                             .GetProperty("version").GetString());
                 });
@@ -3977,7 +4084,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 JsonElement observation = receipt.GetProperty("observation");
                 Assert.Equal(
-                    "9",
+                    "10",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
                 JsonElement capturedEvent =
                     Assert.Single(receipt.GetProperty("events").EnumerateArray());
@@ -4289,6 +4396,265 @@ public sealed class CaptureTests : HttpSeamTestBase
             resumed.Kill(entireProcessTree: true);
             await resumed.WaitForExitAsync();
             await resumedStderr;
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerAdvancesTerminalMalformedRecordsWithSafeOperatorProvenance()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"codex-terminal-malformed-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"codex-terminal-malformed-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string sessions = Path.Combine(transcriptRoot, "sessions");
+        string archives = Path.Combine(transcriptRoot, "archived_sessions");
+        string stateDirectory = Path.Combine(directory, "state");
+        string retryStateDirectory = Path.Combine(directory, "state-retry");
+        string activePath = Path.Combine(sessions, "rollout-malformed.jsonl");
+        string archivedPath = Path.Combine(archives, "rollout-malformed.jsonl");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archives);
+        const string externalSessionId = "01970000-0000-7000-8000-000000000154";
+        string sessionMeta = JsonSerializer.Serialize(new
+        {
+            type = "session_meta",
+            payload = new
+            {
+                id = externalSessionId,
+                session_id = externalSessionId,
+                cli_version = "0.154.synthetic"
+            }
+        });
+        string readableMalformed = (await File.ReadAllTextAsync(Path.Combine(
+            _root,
+            "fixtures/adapter-conformance/codex-terminal-malformed-readable.synthetic.txt")))
+            .TrimEnd('\r', '\n');
+        const string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
+        string safeReadableMalformed = readableMalformed.Replace(
+            seededSyntheticSecret,
+            "[REDACTED:aws-access-key-id]",
+            StringComparison.Ordinal);
+        byte[] invalid = Convert.FromHexString(
+            (await File.ReadAllTextAsync(Path.Combine(
+                _root,
+                "fixtures/adapter-conformance/codex-terminal-invalid-utf8.synthetic.hex")))
+            .Trim());
+        await File.WriteAllTextAsync(
+            activePath,
+            sessionMeta + "\n" + readableMalformed,
+            new UTF8Encoding(false));
+
+        Dictionary<string, string> EnvironmentFor(string state) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = state,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "50",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        try
+        {
+            JsonElement[] accepted = new JsonElement[3];
+            using (var process =
+                TestProcessRunner.StartCaptureTracer(EnvironmentFor(stateDirectory)))
+            {
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+                try
+                {
+                    accepted[0] = await ReadTracerReceiptAsync(process);
+                    Assert.Equal(0, accepted[0].GetProperty("sourcePosition").GetInt64());
+                    await Task.Delay(250);
+                    CaptureRuntimeStreamState deferred = Assert.Single(
+                        (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+                    Assert.Equal(0, deferred.EnqueuedThrough);
+                    Assert.Empty(deferred.Queue);
+
+                    await File.AppendAllTextAsync(activePath, "\n", new UTF8Encoding(false));
+                    await using (var append = new FileStream(
+                        activePath, FileMode.Append, FileAccess.Write, FileShare.Read))
+                    {
+                        await append.WriteAsync(invalid);
+                    }
+                    File.Move(activePath, archivedPath);
+
+                    accepted[1] = await ReadTracerReceiptAsync(process);
+                    accepted[2] = await ReadTracerReceiptAsync(process);
+                }
+                finally
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                        await process.WaitForExitAsync();
+                    }
+                    await stderr;
+                }
+            }
+
+            Assert.Equal(
+                [0L, 1L, 2L],
+                accepted.Select(receipt =>
+                    receipt.GetProperty("sourcePosition").GetInt64()));
+            Assert.All(
+                accepted,
+                receipt =>
+                {
+                    Assert.Equal("new", receipt.GetProperty("status").GetString());
+                    Assert.Equal(
+                        "10",
+                        receipt.GetProperty("observation").GetProperty("adapter")
+                            .GetProperty("version").GetString());
+                });
+
+            JsonElement readableObservation = accepted[1].GetProperty("observation");
+            Assert.Equal(
+                "malformed_json",
+                readableObservation.GetProperty("source")
+                    .GetProperty("recordType").GetString());
+            Assert.Equal(
+                safeReadableMalformed,
+                readableObservation.GetProperty("safeSourcePayload")
+                    .GetProperty("opaqueText").GetString());
+            Assert.DoesNotContain(
+                seededSyntheticSecret,
+                readableObservation.GetRawText());
+            Assert.Equal(
+                "json_parse_error",
+                readableObservation.GetProperty("safeSourcePayload")
+                    .GetProperty("parseError").GetProperty("reason").GetString());
+
+            JsonElement invalidObservation = accepted[2].GetProperty("observation");
+            Assert.Equal(
+                "source_record_omission",
+                invalidObservation.GetProperty("source")
+                    .GetProperty("recordType").GetString());
+            JsonElement apiOmission = invalidObservation.GetProperty("safeSourcePayload")
+                .GetProperty("omission");
+            Assert.Equal(
+                "source_record_uninspectable",
+                apiOmission.GetProperty("reason").GetString());
+            Assert.Equal(invalid.Length, apiOmission.GetProperty("originalByteCount").GetInt64());
+            Assert.Equal(
+                CaptureFidelityPolicy.CurrentVersion,
+                apiOmission.GetProperty("policyVersion").GetString());
+            Assert.Equal("invalid_utf8", apiOmission.GetProperty("contentPolicy").GetString());
+            string invalidApi = invalidObservation.GetRawText();
+            Assert.DoesNotContain('\uFFFD', invalidApi);
+            Assert.DoesNotContain("\"typ", invalidApi, StringComparison.Ordinal);
+
+            long readableOffset = Encoding.UTF8.GetByteCount(sessionMeta + "\n");
+            Assert.Equal(
+                readableOffset,
+                readableObservation.GetProperty("locator")
+                    .GetProperty("byteOffset").GetInt64());
+            Assert.Equal(
+                Encoding.UTF8.GetByteCount(readableMalformed + "\n"),
+                readableObservation.GetProperty("locator")
+                    .GetProperty("byteLength").GetInt64());
+            Assert.Equal(
+                readableOffset + Encoding.UTF8.GetByteCount(readableMalformed + "\n"),
+                invalidObservation.GetProperty("locator")
+                    .GetProperty("byteOffset").GetInt64());
+            Assert.Equal(
+                invalid.Length,
+                invalidObservation.GetProperty("locator")
+                    .GetProperty("byteLength").GetInt64());
+
+            JsonElement readableEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                accepted[1].GetProperty("observationUuid").GetGuid().ToString()))
+                .RootElement.Clone();
+            JsonElement readableEvent = readableEnvelope.GetProperty("event");
+            Assert.Equal("opaque", readableEvent.GetProperty("kind").GetString());
+            Assert.Equal("unknown", readableEvent.GetProperty("actor").GetString());
+            Assert.Equal(
+                "json_parse_error",
+                readableEvent.GetProperty("payload").GetProperty("source")
+                    .GetProperty("parseError").GetProperty("reason").GetString());
+            Assert.Equal(
+                safeReadableMalformed,
+                readableEvent.GetProperty("payload").GetProperty("source")
+                    .GetProperty("opaqueText").GetString());
+            Assert.DoesNotContain(seededSyntheticSecret, readableEnvelope.GetRawText());
+
+            JsonElement invalidEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                accepted[2].GetProperty("observationUuid").GetGuid().ToString()))
+                .RootElement.Clone();
+            JsonElement operatorOmission = invalidEnvelope.GetProperty("event")
+                .GetProperty("payload").GetProperty("source").GetProperty("omission");
+            Assert.Equal(
+                "unknown",
+                invalidEnvelope.GetProperty("event").GetProperty("actor").GetString());
+            Assert.Equal(
+                "source_record_uninspectable",
+                operatorOmission.GetProperty("reason").GetString());
+            Assert.Equal(
+                externalSessionId,
+                operatorOmission.GetProperty("sourceIdentity")
+                    .GetProperty("externalSessionId").GetString());
+            Assert.Equal(
+                2,
+                operatorOmission.GetProperty("sourceIdentity")
+                    .GetProperty("sourcePosition").GetInt64());
+            string operatorInvalid = invalidEnvelope.GetRawText();
+            Assert.DoesNotContain('\uFFFD', operatorInvalid);
+            Assert.DoesNotContain("\"typ", operatorInvalid, StringComparison.Ordinal);
+
+            JsonElement[] retries = new JsonElement[3];
+            using (var retry =
+                TestProcessRunner.StartCaptureTracer(EnvironmentFor(retryStateDirectory)))
+            {
+                Task<string> stderr = retry.StandardError.ReadToEndAsync();
+                try
+                {
+                    for (int index = 0; index < retries.Length; index++)
+                    {
+                        retries[index] = await ReadTracerReceiptAsync(retry);
+                    }
+                }
+                finally
+                {
+                    if (!retry.HasExited)
+                    {
+                        retry.Kill(entireProcessTree: true);
+                        await retry.WaitForExitAsync();
+                    }
+                    await stderr;
+                }
+            }
+            Assert.All(
+                retries,
+                receipt => Assert.Equal(
+                    "already_accepted",
+                    receipt.GetProperty("status").GetString()));
+            Assert.Equal(
+                accepted.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()),
+                retries.Select(receipt =>
+                    receipt.GetProperty("observationUuid").GetGuid()));
+            Assert.Equal(
+                accepted.Select(receipt =>
+                    receipt.GetProperty("observation")
+                        .GetProperty("sourceStreamUuid").GetGuid()),
+                retries.Select(receipt =>
+                    receipt.GetProperty("observation")
+                        .GetProperty("sourceStreamUuid").GetGuid()));
+
+            CaptureRuntimeStreamState finalState = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal(2, finalState.EnqueuedThrough);
+            Assert.Empty(finalState.Queue);
         }
         finally
         {
@@ -6437,6 +6803,84 @@ public sealed class CaptureTests : HttpSeamTestBase
                 }
             }
         };
+
+    private static object TerminalMalformedRepresentationObservation(
+        string externalSessionId,
+        string locatorSeed,
+        string adapterVersion,
+        string recordType)
+    {
+        object safeRepresentation = recordType switch
+        {
+            "malformed_json" => new
+            {
+                opaqueText = """{"type":"response_item","payload":""",
+                parseError = new
+                {
+                    reason = "json_parse_error",
+                    policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                    sourceIdentity = new
+                    {
+                        externalSessionId,
+                        sourcePosition = 0,
+                        locatorKind = "byte_range"
+                    }
+                }
+            },
+            "source_record_omission" => new
+            {
+                omission = new
+                {
+                    reason = "source_record_uninspectable",
+                    originalByteCount = 9,
+                    policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                    contentPolicy = "invalid_utf8",
+                    sourceIdentity = new
+                    {
+                        externalSessionId,
+                        sourcePosition = 0,
+                        locatorKind = "byte_range"
+                    }
+                }
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(recordType))
+        };
+
+        return new
+        {
+            contractVersion = 1,
+            sourceSessionId = externalSessionId,
+            sourcePosition = 0,
+            locator = new
+            {
+                kind = "byte_range",
+                byteOffset = 0,
+                byteLength = 9,
+                sourceContentSha256 = Convert.ToHexString(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(locatorSeed))).ToLowerInvariant()
+            },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.154.synthetic",
+                recordType,
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload = safeRepresentation,
+            events = new object[]
+            {
+                new
+                {
+                    partKey = "record:opaque",
+                    partOrder = 0,
+                    kind = "opaque",
+                    actor = "unknown",
+                    payload = new { source = safeRepresentation }
+                }
+            }
+        };
+    }
 
     private static object SourceOwnedBinaryOmissionLookalikeObservation(
         string externalSessionId,

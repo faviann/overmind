@@ -239,10 +239,17 @@ snapshot followed by an atomic rename, under a process-shared lock file.
 against one immutable transcript byte snapshot, parses and adapts records from
 that same snapshot, defers an unterminated final JSONL record,
 and accepts that record only after newline completion or an explicit terminal
-flag from configured discovery. It adapts a terminal record, runs the local
-safety boundary, and only then calls the durable claim transaction. Its locator
-identity binds transcript identity, source position, byte range and record
-digest, plus the new verified-prefix evidence.
+flag from configured discovery. This deferral applies equally to partial valid
+JSON, readable malformed JSON, and invalid encoding: none enters
+`enqueuedThrough` while the final record can still grow. Once terminal,
+strictly readable malformed JSON is a scanned opaque parse-error event, while
+invalid UTF-8 is a content-free explicit omission carrying fixed source and
+fidelity-policy provenance. Both deterministic fidelity outcomes advance;
+scanner or serialization failures remain operational failures and claim
+nothing. It adapts the terminal representation, runs the local safety boundary,
+and only then calls the durable claim transaction. Its locator identity binds
+transcript identity, source position, byte range and record digest, plus the
+new verified-prefix evidence.
 
 **`CodexTranscriptDiscovery`, `CodexTranscriptScanCycle`,
 `CaptureRescanConfiguration`, and `CaptureRescanScheduler`** — enumerate every

@@ -705,7 +705,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "4",
+                "7",
                 "0.144.synthetic",
                 "same source record"));
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
@@ -719,7 +719,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "7",
+                "8",
                 "false-version",
                 "same source record"));
         Assert.Equal(HttpStatusCode.Conflict, falseProvenanceRetry.StatusCode);
@@ -732,7 +732,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "7",
+                "8",
                 "0.144.synthetic",
                 "same source record"));
         Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
@@ -750,7 +750,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 childId,
                 0,
                 locator,
-                "7",
+                "8",
                 "0.144.synthetic",
                 "changed source record"));
         Assert.Equal(HttpStatusCode.Conflict, changedSource.StatusCode);
@@ -1134,6 +1134,234 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task CodexRelationshipFixturesRoundTripWithoutResolvingTargetsOrMergingStreams()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-relationship-fixtures-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        var adapter = new CodexJsonlAdapter();
+        var cases = new[]
+        {
+            (
+                Fixture: "codex-cli-0.77.parent-only.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("parent_session", "01970000-0000-7000-8000-000000000000"),
+                    ("source_classification", "01970000-0000-7000-8000-000000000001")
+                }),
+            (
+                Fixture: "codex-cli-0.90.fork-only.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("forked_from", "01970000-0000-7000-8000-000000000009"),
+                    ("source_classification", "01970000-0000-7000-8000-000000000011")
+                }),
+            (
+                Fixture: "codex-cli-0.120.parent-fork.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("forked_from", "01970000-0000-7000-8000-000000000018"),
+                    ("parent_session", "01970000-0000-7000-8000-000000000019"),
+                    ("source_classification", "01970000-0000-7000-8000-000000000021"),
+                    ("thread_source_classification", "01970000-0000-7000-8000-000000000021")
+                }),
+            (
+                Fixture: "codex-cli-0.144.nested-child.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("parent_session", "01970000-0000-7000-8000-000000000029"),
+                    ("source_classification", "01970000-0000-7000-8000-000000000031"),
+                    ("spawned_by", "01970000-0000-7000-8000-000000000029"),
+                    ("thread_source_classification", "01970000-0000-7000-8000-000000000031")
+                }),
+            (
+                Fixture: "codex-cli-0.144.absent-relationship.synthetic.jsonl",
+                Facts: new[]
+                {
+                    ("source_classification", "01970000-0000-7000-8000-000000000041"),
+                    ("thread_source_classification", "01970000-0000-7000-8000-000000000041")
+                })
+        };
+        var streamUuids = new List<Guid>();
+        JsonElement danglingParent = default;
+
+        foreach (var item in cases)
+        {
+            string path = Path.Combine(
+                _root, "fixtures", "adapter-conformance", item.Fixture);
+            CodexTranscriptStream stream =
+                Assert.Single(CodexTranscriptDiscovery.Enumerate(path));
+            JsonElement sourceRecord =
+                JsonDocument.Parse(File.ReadLines(path).First()).RootElement.Clone();
+            CaptureObservationRequest observation =
+                Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                    adapter.Adapt(new TrustedSourceObservation(
+                        stream.SourceIdentity!,
+                        0,
+                        new CaptureSourceLocator.NativeId($"fixture:{item.Fixture}"),
+                        CaptureSourceMaterialKind.PersistedRecord,
+                        sourceRecord,
+                        true))).Observation;
+
+            using HttpResponseMessage response = await client.PostAsJsonAsync(
+                "/capture/v1/observations", observation);
+            response.EnsureSuccessStatusCode();
+            JsonElement receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Guid observationUuid = receipt.GetProperty("observationUuid").GetGuid();
+            Guid sourceStreamUuid = receipt.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid();
+            streamUuids.Add(sourceStreamUuid);
+
+            JsonElement envelope = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "receipt", observationUuid.ToString())).RootElement;
+            Assert.Equal(
+                sourceRecord.GetProperty("timestamp").GetString(),
+                envelope.GetProperty("observation").GetProperty("sourceTimestamp")
+                    .GetProperty("raw").GetString());
+            Assert.Equal(
+                JsonValueKind.Null,
+                envelope.GetProperty("event").GetProperty("occurredAt").ValueKind);
+            Assert.Equal(
+                item.Facts,
+                envelope.GetProperty("relationships").EnumerateArray().Select(relationship =>
+                    (
+                        relationship.GetProperty("type").GetString()!,
+                        relationship.GetProperty("target").GetProperty("nativeId").GetString()!
+                    )));
+            Assert.All(
+                envelope.GetProperty("relationships").EnumerateArray(),
+                relationship =>
+                {
+                    Assert.Equal(
+                        "session",
+                        relationship.GetProperty("target").GetProperty("kind").GetString());
+                    Assert.Equal(
+                        JsonValueKind.Null,
+                        relationship.GetProperty("target")
+                            .GetProperty("sourceStreamUuid").ValueKind);
+                });
+            if (item.Fixture == "codex-cli-0.77.parent-only.synthetic.jsonl")
+            {
+                danglingParent = envelope.GetProperty("relationships").EnumerateArray()
+                    .Single(relationship =>
+                        relationship.GetProperty("type").GetString() == "parent_session")
+                    .Clone();
+            }
+
+            JsonElement replay = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "replay", sourceStreamUuid.ToString())).RootElement;
+            Assert.Equal(sourceStreamUuid, replay.GetProperty("sourceStreamUuid").GetGuid());
+            Assert.Equal(
+                "capture_observations.source_position",
+                replay.GetProperty("orderBasis").GetProperty("observation").GetString());
+            Assert.Equal(
+                "captured_events.part_order",
+                replay.GetProperty("orderBasis").GetProperty("event").GetString());
+            Assert.Equal(
+                [0L],
+                replay.GetProperty("events").EnumerateArray().Select(entry =>
+                    entry.GetProperty("sourcePosition").GetInt64()));
+        }
+
+        Assert.Equal(cases.Length, streamUuids.Distinct().Count());
+
+        string rootSession = $"root-{Guid.NewGuid():N}";
+        CaptureObservationRequest rootObservation =
+            Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                adapter.Adapt(new TrustedSourceObservation(
+                    new CaptureSourceIdentity(rootSession),
+                    0,
+                    new CaptureSourceLocator.NativeId("legitimate-root"),
+                    CaptureSourceMaterialKind.PersistedRecord,
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        type = "session_meta",
+                        payload = new
+                        {
+                            session_id = rootSession,
+                            id = "root-thread",
+                            source = "cli",
+                            thread_source = "user"
+                        }
+                    }),
+                    true))).Observation;
+        using HttpResponseMessage rootResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations", rootObservation);
+        rootResponse.EnsureSuccessStatusCode();
+        JsonElement rootReceipt = await rootResponse.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement rootEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            rootReceipt.GetProperty("observationUuid").GetGuid().ToString())).RootElement;
+        Assert.Empty(rootEnvelope.GetProperty("relationships").EnumerateArray());
+        Assert.Equal(
+            "01970000-0000-7000-8000-000000000000",
+            danglingParent.GetProperty("target").GetProperty("nativeId").GetString());
+        Assert.Equal(
+            JsonValueKind.Null,
+            danglingParent.GetProperty("target").GetProperty("sourceStreamUuid").ValueKind);
+    }
+
+    [Fact]
+    public async Task ChildGapDoesNotBlockParentOrSiblingCaptureCheckpoints()
+    {
+        var captureKey = CaptureCredential();
+        await EnrollAsync($"codex-related-checkpoints-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        string externalSessionId = $"related-{Guid.NewGuid():N}";
+
+        async Task<JsonElement> PostAsync(string childId, long position)
+        {
+            using HttpResponseMessage response = await client.PostAsJsonAsync(
+                "/capture/v1/observations",
+                ExplicitIdentityObservation(
+                    externalSessionId,
+                    externalSessionId,
+                    childId,
+                    position,
+                    $"{childId}:{position}",
+                    "8",
+                    "0.144.synthetic",
+                    $"{childId} at {position}"));
+            string body = await response.Content.ReadAsStringAsync();
+            return JsonDocument.Parse(body).RootElement.Clone();
+        }
+
+        JsonElement parent = await PostAsync("parent", 0);
+        JsonElement failedChild = await PostAsync("child", 1);
+        JsonElement sibling = await PostAsync("sibling", 0);
+
+        Assert.Equal("new", parent.GetProperty("status").GetString());
+        Assert.Equal(
+            "blocked_by_earlier_gap",
+            failedChild.GetProperty("reason").GetString());
+        Assert.Equal("new", sibling.GetProperty("status").GetString());
+
+        JsonElement child = await PostAsync("child", 0);
+        Assert.Equal("new", child.GetProperty("status").GetString());
+        Guid[] sourceStreams =
+        [
+            parent.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid(),
+            child.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid(),
+            sibling.GetProperty("observation").GetProperty("sourceStreamUuid").GetGuid()
+        ];
+        Assert.Equal(3, sourceStreams.Distinct().Count());
+
+        foreach (Guid sourceStream in sourceStreams)
+        {
+            JsonElement replay = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "replay", sourceStream.ToString())).RootElement;
+            Assert.Equal(
+                [0L],
+                replay.GetProperty("events").EnumerateArray().Select(item =>
+                    item.GetProperty("sourcePosition").GetInt64()));
+            Assert.Equal(
+                "capture_observations.source_position",
+                replay.GetProperty("orderBasis").GetProperty("observation").GetString());
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerKeepsExactTransportBoundaryWholeAndAdvancesTheNextByteAsOmission()
     {
         const string retainedTail = "WHOLE-TRANSPORT-BOUNDARY-TAIL";
@@ -1408,7 +1636,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "7",
+                    "8",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -1436,7 +1664,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "7",
+                    "8",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -1599,7 +1827,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 Assert.Equal("new", receipt.GetProperty("status").GetString());
                 Assert.Equal(
-                    "7",
+                    "8",
                     receipt.GetProperty("observation").GetProperty("adapter")
                         .GetProperty("version").GetString());
             });
@@ -2126,7 +2354,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 {
                     Assert.Equal(expectedStatus, receipt.GetProperty("status").GetString());
                     Assert.Equal(
-                        "7",
+                        "8",
                         receipt.GetProperty("observation").GetProperty("adapter")
                             .GetProperty("version").GetString());
                 });
@@ -2668,7 +2896,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 JsonElement observation = receipt.GetProperty("observation");
                 Assert.Equal(
-                    "7",
+                    "8",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
                 JsonElement capturedEvent =
                     Assert.Single(receipt.GetProperty("events").EnumerateArray());

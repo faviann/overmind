@@ -9,6 +9,62 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 {
+    [Theory]
+    [InlineData(
+        "codex-cli-0.77.parent-only.synthetic.jsonl",
+        "parent_session:01970000-0000-7000-8000-000000000000",
+        "source_classification:01970000-0000-7000-8000-000000000001")]
+    [InlineData(
+        "codex-cli-0.90.fork-only.synthetic.jsonl",
+        "forked_from:01970000-0000-7000-8000-000000000009",
+        "source_classification:01970000-0000-7000-8000-000000000011")]
+    [InlineData(
+        "codex-cli-0.120.parent-fork.synthetic.jsonl",
+        "parent_session:01970000-0000-7000-8000-000000000019",
+        "forked_from:01970000-0000-7000-8000-000000000018",
+        "source_classification:01970000-0000-7000-8000-000000000021",
+        "thread_source_classification:01970000-0000-7000-8000-000000000021")]
+    [InlineData(
+        "codex-cli-0.144.nested-child.synthetic.jsonl",
+        "parent_session:01970000-0000-7000-8000-000000000029",
+        "spawned_by:01970000-0000-7000-8000-000000000029",
+        "source_classification:01970000-0000-7000-8000-000000000031",
+        "thread_source_classification:01970000-0000-7000-8000-000000000031")]
+    [InlineData(
+        "codex-cli-0.144.absent-relationship.synthetic.jsonl",
+        "source_classification:01970000-0000-7000-8000-000000000041",
+        "thread_source_classification:01970000-0000-7000-8000-000000000041")]
+    public async Task CodexRelationshipFixturesPreserveEveryDistinctSourceStatedFact(
+        string fixtureName,
+        params string[] expectedFacts)
+    {
+        string fixture = Path.Combine(
+            _root, "fixtures", "adapter-conformance", fixtureName);
+        CodexTranscriptStream stream =
+            Assert.Single(CodexTranscriptDiscovery.Enumerate(fixture));
+        TrustedSourceObservation sessionMeta = Assert.Single(
+            JsonlSourceReader.Read(
+                await File.ReadAllBytesAsync(fixture),
+                stream.SourceIdentity!,
+                terminalAtEndOfFile: true),
+            observation => observation.SourcePosition == 0);
+
+        CaptureEvent capturedEvent = Assert.Single(
+            Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                new CodexJsonlAdapter().Adapt(sessionMeta)).Observation.Events);
+
+        Assert.Equal(
+            expectedFacts,
+            capturedEvent.Relationships!.Select(relationship =>
+                $"{relationship.Type}:{relationship.Target.NativeId}"));
+        Assert.All(
+            capturedEvent.Relationships!,
+            relationship => Assert.Equal("session", relationship.Target.Kind));
+        Assert.All(
+            capturedEvent.Relationships!,
+            relationship => Assert.Null(relationship.Target.SourceStreamUuid));
+    }
+
     [Fact]
     public async Task CodexToolFamiliesRetainNativeIdentityContentAndExplicitOutcomes()
     {
@@ -388,7 +444,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         Assert.Equal("turn_context", turnContext.Source.RecordType);
         Assert.Equal("gpt-5.6-terra", turnContext.Source.Model);
         Assert.Null(turnContext.Source.Provider);
-        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "7"), adapter.Identity);
+        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "8"), adapter.Identity);
     }
 
     [Fact]
@@ -744,7 +800,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         });
         Assert.All(
             terminal,
-            outcome => Assert.Equal("7", outcome.Observation.Adapter.Version));
+            outcome => Assert.Equal("8", outcome.Observation.Adapter.Version));
 
         CaptureObservationRequest session = terminal[0].Observation;
         CaptureEvent sessionContext = Assert.Single(session.Events);
@@ -1162,7 +1218,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .ToArray();
 
         Assert.Equal(6, terminal.Length);
-        Assert.Equal("7", terminal[0].Observation.Adapter.Version);
+        Assert.Equal("8", terminal[0].Observation.Adapter.Version);
         Assert.Equal(
             [2, 1, 1, 1, 2, 1],
             terminal.Select(outcome => outcome.Observation.Events.Count));

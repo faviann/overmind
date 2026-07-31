@@ -167,6 +167,10 @@ It retains a sanitized source-native target identity and may resolve to an
 Overmind trace or session at retrieval time; capture order does not determine
 whether the relationship can be stored.
 
+Distinct statements remain distinct relationships even when they name the same
+native target. Parent, fork, spawn, and source-classification evidence never
+becomes capture source-stream identity or a cross-stream ordering claim.
+
 **Dangling relationship** — a source relationship whose stated target is not
 present in the captured ledger. It differs from a legitimate root, for which
 the source stated no parent. A dangling relationship is retained as evidence

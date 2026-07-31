@@ -58,13 +58,25 @@ produce a guessed identity: that rollout carries its identity failure into its
 own scan, where it is reported and skipped, and every other enumerated stream
 still runs.
 
+The Codex session-metadata context event retains each relationship statement
+independently: top-level `parent_thread_id` is `parent_session`,
+`forked_from_id` is `forked_from`, nested
+`source.subagent.thread_spawn.parent_thread_id` is `spawned_by`, and explicit
+`source` and `thread_source` subagent classifications are respectively
+`source_classification` and `thread_source_classification` directed at the
+observed child thread. These facts are not deduplicated when, for example, the
+top-level parent and nested spawn evidence name the same native session.
+Unavailable fields emit no relationship. Targets remain unscoped native
+identities, so a missing parent never blocks append and is observably different
+from a root with no source-stated parent.
+
 The canonical import receipt and `memctl capture receipt` expose the source
 identity loaded from the durable stream. An adapter upgrade may normalize
 adapter/source provenance without changing the immutable source record; the
-server recognizes Codex v3/v4/v5/v6→v7 signatures narrowly where the record's
+server recognizes prior Codex adapter signatures narrowly where the record's
 derived events are unchanged and only adapter/signature identity moved. A
-record whose derived tool events changed in v7, a changed locator, or changed
-source content remains a conflict.
+record whose derived tool events changed in v7, whose relationship facts
+changed in v8, a changed locator, or changed source content remains a conflict.
 
 ## Tolerant parsing
 
@@ -204,6 +216,11 @@ boundary view paired with canonical `compacted` summary/history evidence. The
 parallel and out-of-order native identities, missing names, string and
 structured values, explicit canonical outcomes, and visible turn abort/error
 records.
+
+The five version-labelled relationship families cover parent-only, fork-only,
+combined parent/fork, nested spawn, and no-parent shapes. They assert the
+explicit stable child identity separately from every typed relationship and
+round-trip dangling native targets without resolution or cross-stream order.
 
 `CodexJsonlAdapter` is the only adapter referenced by the separately built
 disabled tracer image. `DisposableClaudeJsonlAdapter` is defined in the test

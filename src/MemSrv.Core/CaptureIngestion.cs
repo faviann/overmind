@@ -452,13 +452,10 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     }
 
     // For every record kind whose derived events a version bump left alone,
-    // adapter versions v3 through v7 produce identical content from the same immutable
-    // record; only the adapter version and the identity shape of the signature
-    // changed, so a retry of an already-accepted position after the upgrade is
-    // the same content under a pre-upgrade signature. A record kind whose
-    // derived events the bump did change is not covered: its pre-upgrade
-    // signature no longer reconstructs, and the retry remains a conflict.
-    private static readonly string[] PreUpgradeCodexAdapterVersions = ["3", "4", "5", "6"];
+    // substituting the prior adapter identity reconstructs its accepted
+    // signature. A record whose derived events changed does not reconstruct
+    // and remains a conflict.
+    private static readonly string[] PreVersion7CodexAdapterVersions = ["3", "4", "5", "6"];
 
     private static IReadOnlyList<string> CompatibleContentSignatures(
         CaptureObservationCommand command,
@@ -468,13 +465,17 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (!string.Equals(command.Source.Harness, "codex", StringComparison.Ordinal)
             || !string.Equals(
                 command.Adapter.Name, "codex-synthetic-jsonl", StringComparison.Ordinal)
-            || !string.Equals(command.Adapter.Version, "7", StringComparison.Ordinal))
+            || command.Adapter.Version is not ("7" or "8"))
         {
             return [];
         }
 
-        var signatures = new List<string>(PreUpgradeCodexAdapterVersions.Length * 2);
-        foreach (string version in PreUpgradeCodexAdapterVersions)
+        string[] priorVersions = string.Equals(
+            command.Adapter.Version, "8", StringComparison.Ordinal)
+                ? [.. PreVersion7CodexAdapterVersions, "7"]
+                : PreVersion7CodexAdapterVersions;
+        var signatures = new List<string>(priorVersions.Length * 2);
+        foreach (string version in priorVersions)
         {
             var legacyAdapter = command.Adapter with { Version = version };
             signatures.Add(Sign(

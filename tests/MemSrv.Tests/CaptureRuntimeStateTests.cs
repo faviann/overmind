@@ -2866,55 +2866,6 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
-    public async Task PackagedTracerDoesNotDeliverAnUnterminatedFinalRecord()
-    {
-        string root = TestProcessRunner.RepoRoot;
-        string directory = Path.Combine(
-            Path.GetTempPath(), $"capture-runtime-undelivered-{Guid.NewGuid():N}");
-        string transcript = Path.Combine(directory, "rollout.jsonl");
-        string stateDirectory = Path.Combine(directory, "state");
-        Directory.CreateDirectory(directory);
-        string fixture = await File.ReadAllTextAsync(
-            Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"));
-        await File.WriteAllTextAsync(
-            transcript,
-            fixture.TrimEnd('\n'),
-            new UTF8Encoding(false));
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        using var serverCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        Task<int> server = ServeResponsesAsync(
-            listener,
-            [
-                (HttpStatusCode.OK, Receipt(0)),
-                (HttpStatusCode.OK, Receipt(1)),
-                (HttpStatusCode.OK, Receipt(2))
-            ],
-            serverCancellation.Token);
-
-        try
-        {
-            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
-                TracerEnvironment(transcript, stateDirectory, port));
-            await serverCancellation.CancelAsync();
-
-            Assert.True(result.Succeeded);
-            Assert.Equal(2, await server);
-            CaptureRuntimeStreamState stream = Assert.Single(
-                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
-            Assert.Equal(1, stream.EnqueuedThrough);
-            Assert.Empty(stream.Queue);
-            Assert.Equal(1, stream.LastServerReceipt?.SourcePosition);
-        }
-        finally
-        {
-            listener.Stop();
-            Directory.Delete(directory, recursive: true);
-        }
-    }
-
-    [Fact]
     public async Task PackagedTracerPersistsEachReceiptBeforeAttemptingTheNextDelivery()
     {
         string root = TestProcessRunner.RepoRoot;

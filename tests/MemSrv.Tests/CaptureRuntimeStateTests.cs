@@ -1168,6 +1168,45 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public void LargeValidJsonMalformedLookalikeIsRejectedWithinBoundedResources()
+    {
+        CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(
+            TerminalMalformedCommand("[0]"));
+        const int numberCount = 4 * 1024 * 1024;
+        string validJson = string.Create(
+            (numberCount * 2) + 1,
+            numberCount,
+            static (buffer, count) =>
+            {
+                buffer[0] = '[';
+                for (int index = 0; index < count; index++)
+                {
+                    int offset = 1 + (index * 2);
+                    buffer[offset] = '0';
+                    buffer[offset + 1] = index == count - 1 ? ']' : ',';
+                }
+            });
+        CaptureObservationCommand lookalike = TerminalMalformedCommand(validJson);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var clock = Stopwatch.StartNew();
+
+        bool recognized =
+            CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(lookalike);
+
+        clock.Stop();
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.False(recognized);
+        Assert.True(
+            allocated < 32L * 1024 * 1024,
+            $"Strict JSON recognition allocated {allocated:N0} bytes for an " +
+            "8 MiB valid-JSON lookalike.");
+        Assert.True(
+            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            $"Strict JSON recognition took {clock.Elapsed}; the published deadline is " +
+            $"{SafetyBudgets.Default.MaxScanTime}.");
+    }
+
+    [Fact]
     public void BinaryOmissionRecognitionRequiresTheCompleteTrustedPolicyShape()
     {
         CaptureObservationCommand Command(JsonElement payload) => new(
@@ -3351,6 +3390,60 @@ public sealed class CaptureRuntimeStateTests
                     [])
             ],
             SourceIdentity: new CaptureSourceIdentity(identity));
+
+    private static CaptureObservationCommand TerminalMalformedCommand(string opaqueText)
+    {
+        const string externalSessionId = "resource-bound-malformed-session";
+        JsonElement sourcePayload = JsonSerializer.SerializeToElement(new
+        {
+            opaqueText,
+            parseError = new
+            {
+                reason = CaptureFidelityPolicy.MalformedJsonReason,
+                policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                sourceIdentity = new
+                {
+                    externalSessionId,
+                    childId = (string?)null,
+                    sourcePosition = 0,
+                    locatorKind = "byte_range"
+                }
+            }
+        });
+        JsonElement eventPayload = JsonSerializer.SerializeToElement(new
+        {
+            recordType = "malformed_json",
+            payloadType = (string?)null,
+            source = sourcePayload
+        });
+        return new CaptureObservationCommand(
+            1,
+            new CaptureSourceIdentity(externalSessionId),
+            0,
+            new CaptureSourceLocator.ByteRange(
+                0,
+                Encoding.UTF8.GetByteCount(opaqueText),
+                new string('0', 64)),
+            null,
+            new CaptureSource(
+                "codex",
+                null,
+                "malformed_json",
+                MaterialKind: "persisted_record"),
+            new CaptureAdapter("codex-synthetic-jsonl", "10"),
+            sourcePayload,
+            [
+                new CaptureEvent(
+                    "record:opaque",
+                    0,
+                    "opaque",
+                    "unknown",
+                    eventPayload,
+                    null,
+                    [])
+            ],
+            null);
+    }
 
     private sealed class StatefulEventList(
         params CaptureEvent[] enumerations) : IReadOnlyList<CaptureEvent>

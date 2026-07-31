@@ -1168,42 +1168,23 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
-    public void LargeValidJsonMalformedLookalikeIsRejectedWithinBoundedResources()
+    public void MaterializedMalformedEnvelopeIsRecognizedWithoutCopyingOpaqueText()
     {
         CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(
-            TerminalMalformedCommand("[0]"));
-        const int numberCount = 4 * 1024 * 1024;
-        string validJson = string.Create(
-            (numberCount * 2) + 1,
-            numberCount,
-            static (buffer, count) =>
-            {
-                buffer[0] = '[';
-                for (int index = 0; index < count; index++)
-                {
-                    int offset = 1 + (index * 2);
-                    buffer[offset] = '0';
-                    buffer[offset + 1] = index == count - 1 ? ']' : ',';
-                }
-            });
-        CaptureObservationCommand lookalike = TerminalMalformedCommand(validJson);
+            TerminalMalformedCommand("warm"));
+        string opaqueText = new('x', 4 * 1024 * 1024);
+        CaptureObservationCommand command = TerminalMalformedCommand(opaqueText);
         long before = GC.GetAllocatedBytesForCurrentThread();
-        var clock = Stopwatch.StartNew();
 
         bool recognized =
-            CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(lookalike);
+            CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(command);
 
-        clock.Stop();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-        Assert.False(recognized);
+        Assert.True(recognized);
         Assert.True(
-            allocated < 32L * 1024 * 1024,
-            $"Strict JSON recognition allocated {allocated:N0} bytes for an " +
-            "8 MiB valid-JSON lookalike.");
-        Assert.True(
-            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
-            $"Strict JSON recognition took {clock.Elapsed}; the published deadline is " +
-            $"{SafetyBudgets.Default.MaxScanTime}.");
+            allocated < 512L * 1024,
+            $"Malformed-envelope recognition allocated {allocated:N0} bytes for an " +
+            "already-materialized 4 MiB opaque string.");
     }
 
     [Fact]
@@ -3420,10 +3401,7 @@ public sealed class CaptureRuntimeStateTests
             1,
             new CaptureSourceIdentity(externalSessionId),
             0,
-            new CaptureSourceLocator.ByteRange(
-                0,
-                Encoding.UTF8.GetByteCount(opaqueText),
-                new string('0', 64)),
+            new CaptureSourceLocator.ByteRange(0, 1, new string('0', 64)),
             null,
             new CaptureSource(
                 "codex",

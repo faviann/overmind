@@ -1190,121 +1190,17 @@ public static class CaptureFidelityPolicy
 
     private static bool IsMalformedJsonRepresentation(
         JsonElement value,
-        CaptureObservationCommand observation)
-    {
-        if (!HasOnlyProperties(value, "opaqueText", "parseError")
-            || !value.TryGetProperty("opaqueText", out JsonElement opaqueText)
-            || opaqueText.ValueKind != JsonValueKind.String
-            || opaqueText.GetString() is not { Length: > 0 } text)
-        {
-            return false;
-        }
-
-        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
-        int utf8ByteCount = CountUtf8Bytes(text, deadline);
-        return HasTerminalRecordLength(utf8ByteCount, observation)
-            && FailsStrictJsonParsing(text, utf8ByteCount, deadline)
-            && value.TryGetProperty("parseError", out JsonElement parseError)
-            && HasOnlyProperties(parseError, "reason", "policyVersion", "sourceIdentity")
-            && HasString(parseError, "reason", MalformedJsonReason)
-            && HasString(parseError, "policyVersion", CurrentVersion)
-            && parseError.TryGetProperty(
-                "sourceIdentity",
-                out JsonElement sourceIdentity)
-            && HasTerminalRecordSourceIdentity(sourceIdentity, observation);
-    }
-
-    private static bool FailsStrictJsonParsing(
-        string text,
-        int utf8ByteCount,
-        GovernedDeadline deadline)
-    {
-        byte[] utf8 = GC.AllocateUninitializedArray<byte>(utf8ByteCount);
-        deadline.AssertWithinDeadline();
-        EncodeUtf8(text, utf8, deadline);
-
-        try
-        {
-            var reader = new Utf8JsonReader(utf8, isFinalBlock: true, state: default);
-            bool sawToken = false;
-            while (reader.Read())
-            {
-                sawToken = true;
-                deadline.AssertWithinDeadline();
-            }
-            deadline.AssertWithinDeadline();
-            return !sawToken || reader.BytesConsumed != utf8.Length;
-        }
-        catch (JsonException)
-        {
-            return true;
-        }
-    }
-
-    private static int CountUtf8Bytes(string text, GovernedDeadline deadline)
-    {
-        const int encodingChunkChars = 4 * 1024;
-        Span<byte> scratch = stackalloc byte[(encodingChunkChars * 3) + 3];
-        Encoder encoder = new UTF8Encoding(false, true).GetEncoder();
-        ReadOnlySpan<char> remaining = text.AsSpan();
-        long total = 0;
-        while (!remaining.IsEmpty)
-        {
-            int chunkLength = Math.Min(remaining.Length, encodingChunkChars);
-            bool isFinalChunk = chunkLength == remaining.Length;
-            deadline.AssertWithinDeadline();
-            encoder.Convert(
-                remaining[..chunkLength],
-                scratch,
-                isFinalChunk,
-                out int charsUsed,
-                out int bytesUsed,
-                out _);
-            remaining = remaining[charsUsed..];
-            total = checked(total + bytesUsed);
-            if (total > SafetyBudgets.Default.MaxObservationBytes)
-            {
-                throw new SafetyScanException(
-                    "strict JSON compatibility validation exceeded the fixed " +
-                    $"{SafetyBudgets.Default.MaxObservationBytes}-byte observation ceiling");
-            }
-            deadline.AssertWithinDeadline();
-        }
-        return checked((int)total);
-    }
-
-    private static void EncodeUtf8(
-        string text,
-        Span<byte> destination,
-        GovernedDeadline deadline)
-    {
-        const int encodingChunkChars = 4 * 1024;
-        Encoder encoder = new UTF8Encoding(false, true).GetEncoder();
-        ReadOnlySpan<char> remaining = text.AsSpan();
-        int written = 0;
-        while (!remaining.IsEmpty)
-        {
-            int chunkLength = Math.Min(remaining.Length, encodingChunkChars);
-            bool isFinalChunk = chunkLength == remaining.Length;
-            deadline.AssertWithinDeadline();
-            encoder.Convert(
-                remaining[..chunkLength],
-                destination[written..],
-                isFinalChunk,
-                out int charsUsed,
-                out int bytesUsed,
-                out _);
-            remaining = remaining[charsUsed..];
-            written = checked(written + bytesUsed);
-            deadline.AssertWithinDeadline();
-        }
-        if (written != destination.Length)
-        {
-            throw new SafetyScanException(
-                "strict JSON compatibility validation produced an inconsistent " +
-                "UTF-8 byte count");
-        }
-    }
+        CaptureObservationCommand observation) =>
+        HasOnlyProperties(value, "opaqueText", "parseError")
+        && value.TryGetProperty("opaqueText", out JsonElement opaqueText)
+        && opaqueText.ValueKind == JsonValueKind.String
+        && !opaqueText.ValueEquals(string.Empty)
+        && value.TryGetProperty("parseError", out JsonElement parseError)
+        && HasOnlyProperties(parseError, "reason", "policyVersion", "sourceIdentity")
+        && HasString(parseError, "reason", MalformedJsonReason)
+        && HasString(parseError, "policyVersion", CurrentVersion)
+        && parseError.TryGetProperty("sourceIdentity", out JsonElement sourceIdentity)
+        && HasTerminalRecordSourceIdentity(sourceIdentity, observation);
 
     private static bool IsUninspectableRecordRepresentation(
         JsonElement value,

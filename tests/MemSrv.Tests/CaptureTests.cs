@@ -1896,7 +1896,7 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
-    public async Task VersionTenConvergesForValidJsonInParseErrorEnvelopeLookalike()
+    public async Task VersionTenExactParseErrorEnvelopeCannotConvergeAsVersionNineEvenWhenOpaqueTextIsValidJson()
     {
         string captureKey = CaptureCredential();
         string externalSessionId = $"external-{Guid.NewGuid():N}";
@@ -1915,8 +1915,6 @@ public sealed class CaptureTests : HttpSeamTestBase
                 recordType: "malformed_json",
                 opaqueText: "{}"));
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
-        JsonElement acceptedReceipt =
-            await accepted.Content.ReadFromJsonAsync<JsonElement>();
 
         using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
             "/capture/v1/observations",
@@ -1927,13 +1925,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 recordType: "malformed_json",
                 opaqueText: "{}"));
 
-        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
-        JsonElement retryReceipt =
-            await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
-        Assert.Equal(
-            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
-            retryReceipt.GetProperty("observationUuid").GetGuid());
+        Assert.Equal(HttpStatusCode.Conflict, upgradedRetry.StatusCode);
     }
 
     [Fact]

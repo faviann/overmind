@@ -104,7 +104,13 @@ internal static class MatchRanking
 /// <see cref="ScanBudgetState"/> that fails the whole scan closed when a budget
 /// is exhausted.
 /// </summary>
-internal sealed class SecretScanner
+internal interface ISafetyScanner
+{
+    LeafOutcome ScanLeaf(string value, string? propertyName, ScanBudgetState state);
+    bool IsSensitiveField(string propertyName, ScanBudgetState state);
+}
+
+internal sealed class SecretScanner : ISafetyScanner
 {
     private const string LiteralRuleId = "operator-literal";
 

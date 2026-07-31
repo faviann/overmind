@@ -29,6 +29,19 @@ An operational "fail closed" outcome means the scan throws
 does not advance. The next legitimate record is still accepted at the same
 source position.
 
+The content-free outcome projection keeps this operational state separate from
+fidelity. Missing/invalid policy is `scanner_policy_unavailable`; matcher
+timeout is `matcher_timeout`; other bounded exhaustion is
+`scan_budget_exhausted`; incomplete required inspection is
+`required_inspection_incomplete`; unexpected scanner refusal is
+`scanner_internal_failure`. Those outcomes report `captureHealth=blocked` and
+claim/checkpoint nothing. Deterministic transport, content-size,
+unsupported-binary, malformed-readable, and invalid-UTF-8 outcomes instead
+report `captureFidelity=degraded`, append explicit evidence, and advance.
+Counts expose only a closed harness, reason, and `unknown`, `up_to_1_mib`,
+`over_1_mib_through_64_mib`, `over_64_mib_through_128_mib`, or
+`over_128_mib` size band.
+
 `MaxObservationBytes` has a separate deterministic fidelity outcome at the
 `CaptureIngestion` interface. A positive injected bound may tighten but never
 loosen the fixed 128 MiB ceiling. An original observation above the effective bound is replaced

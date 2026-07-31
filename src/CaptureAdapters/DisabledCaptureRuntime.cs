@@ -115,8 +115,26 @@ public static class DisabledCaptureRuntime
             // on the wire; observations already compacted for the transport
             // limit carry that omission instead. The server remains the sole
             // author of canonical scan provenance in either case.
-            safetyGate.AssertObservationWithinBudget(observationJson);
-            string candidateJson = safetyGate.ScanJson(observationJson).Redacted;
+            string candidateJson;
+            try
+            {
+                safetyGate.AssertObservationWithinBudget(observationJson);
+                candidateJson = safetyGate.ScanJson(observationJson).Redacted;
+            }
+            catch (SafetyConfigurationException failure)
+            {
+                failure.ReportCaptureOutcome(
+                    terminal.Observation.Source.Harness,
+                    evidence.ByteLength);
+                throw;
+            }
+            catch (SafetyScanException failure)
+            {
+                failure.ReportCaptureOutcome(
+                    terminal.Observation.Source.Harness,
+                    evidence.ByteLength);
+                throw;
+            }
             if (!string.Equals(
                     candidateJson, queued.RedactedSafeCandidate, StringComparison.Ordinal))
             {

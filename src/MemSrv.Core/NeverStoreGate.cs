@@ -40,14 +40,30 @@ public sealed class NeverStoreGate
         _state = Load(_rulesPath, _literalsPath, _budgets);
     }
 
-    public bool IsConfigured => _state.RuleSet is not null;
+    internal NeverStoreGate(
+        ISafetyScanner scanner,
+        SafetyBudgets? budgets = null,
+        string ruleSetVersion = "injected-scanner")
+    {
+        ArgumentNullException.ThrowIfNull(scanner);
+        _rulesPath = "";
+        _literalsPath = null;
+        _budgets = budgets ?? SafetyBudgets.Default;
+        _state = new State(
+            null,
+            new FailClosedSafetyScanner(scanner),
+            ruleSetVersion,
+            null);
+    }
+
+    public bool IsConfigured => _state.Scanner is not null;
 
     /// <summary>Safe reason the gate is unusable, or null. Never contains a candidate value.</summary>
     public string? FailureReason => _state.FailureReason;
 
     public SafetyBudgets Budgets => _budgets;
 
-    public string RuleSetVersion => _state.RuleSet?.Version ?? "";
+    public string RuleSetVersion => _state.RuleSetVersion;
 
     /// <summary>
     /// Re-reads the rule and literal files. Returns false and keeps the
@@ -188,7 +204,7 @@ public sealed class NeverStoreGate
     private static void WriteSanitized(
         JsonElement element,
         string? propertyName,
-        SecretScanner scanner,
+        ISafetyScanner scanner,
         ScanBudgetState state,
         Utf8JsonWriter writer,
         SanitizationLedger ledger)
@@ -294,7 +310,7 @@ public sealed class NeverStoreGate
     /// takes part in the same collision check as any other key.
     /// </summary>
     private static string SanitizeName(
-        string name, SecretScanner scanner, ScanBudgetState state, SanitizationLedger ledger)
+        string name, ISafetyScanner scanner, ScanBudgetState state, SanitizationLedger ledger)
     {
         var outcome = scanner.ScanLeaf(name, null, state);
         if (outcome.IsOmitted)
@@ -337,7 +353,7 @@ public sealed class NeverStoreGate
         public void Omit(string reason) => Omissions.Add(reason);
     }
 
-    private SecretScanner RequireConfigured()
+    private ISafetyScanner RequireConfigured()
     {
         var state = _state;
         if (state.Scanner is null)
@@ -352,12 +368,48 @@ public sealed class NeverStoreGate
         if (SecretRuleSet.TryLoad(
                 rulesPath, literalsPath, budgets.MaxRuleTime, out var ruleSet, out string? reason))
         {
-            return new State(ruleSet, new SecretScanner(ruleSet!, budgets), null);
+            return new State(
+                ruleSet,
+                new FailClosedSafetyScanner(new SecretScanner(ruleSet!, budgets)),
+                ruleSet!.Version,
+                null);
         }
-        return new State(null, null, reason);
+        return new State(null, null, "", reason);
     }
 
-    private sealed record State(SecretRuleSet? RuleSet, SecretScanner? Scanner, string? FailureReason);
+    private sealed record State(
+        SecretRuleSet? RuleSet,
+        ISafetyScanner? Scanner,
+        string RuleSetVersion,
+        string? FailureReason);
+
+    private sealed class FailClosedSafetyScanner(ISafetyScanner scanner) : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            Guard(() => scanner.ScanLeaf(value, propertyName, state));
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) =>
+            Guard(() => scanner.IsSensitiveField(propertyName, state));
+
+        private static T Guard<T>(Func<T> scan)
+        {
+            try
+            {
+                return scan();
+            }
+            catch (SafetyScanException)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                throw new SafetyScannerInternalException();
+            }
+        }
+    }
 }
 
 public sealed record NeverStoreScan(

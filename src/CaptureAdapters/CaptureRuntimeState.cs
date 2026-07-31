@@ -106,7 +106,8 @@ public sealed record CaptureRuntimeQueueItem
         string sourceStream,
         long sourcePosition,
         CaptureRuntimeLocatorEvidence deterministicLocatorEvidence,
-        string redactedSafeCandidate)
+        string redactedSafeCandidate,
+        CaptureOutcomeSummary? outcome = null)
     {
         if (sourcePosition != deterministicLocatorEvidence.SourcePosition)
         {
@@ -117,17 +118,20 @@ public sealed record CaptureRuntimeQueueItem
         SourcePosition = sourcePosition;
         DeterministicLocatorEvidence = deterministicLocatorEvidence;
         RedactedSafeCandidate = redactedSafeCandidate;
+        Outcome = outcome ?? CaptureOutcomeAggregation.Empty;
     }
 
     public CaptureRuntimeQueueItem(
         string sourceStream,
         CaptureRuntimeLocatorEvidence deterministicLocatorEvidence,
-        string redactedSafeCandidate)
+        string redactedSafeCandidate,
+        CaptureOutcomeSummary? outcome = null)
         : this(
             sourceStream,
             deterministicLocatorEvidence.SourcePosition,
             deterministicLocatorEvidence,
-            redactedSafeCandidate)
+            redactedSafeCandidate,
+            outcome)
     {
     }
 
@@ -135,6 +139,7 @@ public sealed record CaptureRuntimeQueueItem
     public long SourcePosition { get; }
     public CaptureRuntimeLocatorEvidence DeterministicLocatorEvidence { get; }
     public string RedactedSafeCandidate { get; }
+    public CaptureOutcomeSummary Outcome { get; }
 }
 
 public sealed record CaptureServerReceiptState(
@@ -641,8 +646,26 @@ public static class CodexCaptureClaimer
                     terminal.Observation,
                     maxTransportBytes);
             string boundedJson = bounded.Serialized;
-            safetyGate.AssertObservationWithinBudget(boundedJson);
-            string candidateJson = safetyGate.ScanJson(boundedJson).Redacted;
+            string candidateJson;
+            try
+            {
+                safetyGate.AssertObservationWithinBudget(boundedJson);
+                candidateJson = safetyGate.ScanJson(boundedJson).Redacted;
+            }
+            catch (SafetyConfigurationException failure)
+            {
+                failure.ReportCaptureOutcome(
+                    terminal.Observation.Source.Harness,
+                    byteRange.Length);
+                throw;
+            }
+            catch (SafetyScanException failure)
+            {
+                failure.ReportCaptureOutcome(
+                    terminal.Observation.Source.Harness,
+                    byteRange.Length);
+                throw;
+            }
             var locatorEvidence = new CaptureRuntimeLocatorEvidence(
                 transcriptIdentity,
                 record.SourcePosition,
@@ -653,7 +676,11 @@ public static class CodexCaptureClaimer
             var claim = new CaptureRuntimeQueueItem(
                 sourceStream,
                 locatorEvidence,
-                candidateJson);
+                candidateJson,
+                RuntimeOutcome(
+                    terminal.Observation.Source.Harness,
+                    bounded,
+                    byteRange.Length));
             if (await state.ClaimAsync(
                     claim,
                     expectedPrefix,
@@ -705,6 +732,36 @@ public static class CodexCaptureClaimer
 
     private static string Digest(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    private static CaptureOutcomeSummary RuntimeOutcome(
+        string harness,
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded,
+        long sourceByteCount)
+    {
+        if (bounded.WasOmitted)
+        {
+            return CaptureOutcomeAggregation.Summarize(
+            [
+                CaptureOutcomeAggregation.FidelityOmission(
+                    harness,
+                    CaptureFidelityPolicy.TransportLimitReason,
+                    bounded.OriginalByteCount)
+            ]);
+        }
+
+        CaptureObservationCommand command =
+            CaptureObservationCommand.FromRequest(bounded.Observation);
+        return CaptureFidelityPolicy.ClassifyDeterministicFidelity(command)
+            is { } fidelity
+            ? CaptureOutcomeAggregation.Summarize(
+            [
+                CaptureOutcomeAggregation.FidelityOmission(
+                    harness,
+                    fidelity.Reason,
+                    sourceByteCount)
+            ])
+            : CaptureOutcomeAggregation.Empty;
+    }
 }
 
 public sealed class CapturePrefixChangedException(string sourceStream, string reason)

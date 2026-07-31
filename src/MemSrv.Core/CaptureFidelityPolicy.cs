@@ -332,6 +332,73 @@ public static class CaptureFidelityPolicy
         };
     }
 
+    /// <summary>
+    /// Classifies only exact policy- or adapter-owned deterministic fidelity
+    /// representations. Source-owned lookalikes are not outcomes.
+    /// </summary>
+    public static CaptureDeterministicFidelity? ClassifyDeterministicFidelity(
+        CaptureObservationCommand observation)
+    {
+        if (IsAdapterOwnedTerminalMalformedRepresentation(observation))
+        {
+            return observation.Source.RecordType switch
+            {
+                "malformed_json" => new(
+                    MalformedJsonReason,
+                    ((CaptureSourceLocator.ByteRange)observation.Locator).Length),
+                "source_record_omission" => new(
+                    InvalidUtf8ContentPolicy,
+                    ((CaptureSourceLocator.ByteRange)observation.Locator).Length),
+                _ => null
+            };
+        }
+        if (ContainsUnsupportedBinaryOmission(observation))
+        {
+            return new(
+                UnsupportedBinaryReason,
+                observation.Locator is CaptureSourceLocator.ByteRange binaryRange
+                    ? binaryRange.Length
+                    : CountSerializedBytes(observation));
+        }
+        if (!string.Equals(
+                observation.Adapter.Name,
+                "capture-fidelity-policy",
+                StringComparison.Ordinal)
+            || !string.Equals(
+                observation.Adapter.Version,
+                CurrentVersion,
+                StringComparison.Ordinal)
+            || observation.SourcePayload.ValueKind != JsonValueKind.Object
+            || !observation.SourcePayload.TryGetProperty(
+                "omission",
+                out JsonElement omission)
+            || !HasOnlyProperties(
+                omission,
+                "reason",
+                "originalByteCount",
+                "policyVersion",
+                "sourceIdentity")
+            || omission.GetProperty("reason").GetString() is not { } reason
+            || reason is not (
+                TransportLimitReason
+                or ContentLimitReason
+                or UnsupportedBinaryReason)
+            || !omission.TryGetProperty(
+                "originalByteCount",
+                out JsonElement originalByteCount)
+            || !originalByteCount.TryGetInt64(out long count)
+            || count < 0
+            || !HasString(omission, "policyVersion", CurrentVersion)
+            || !omission.TryGetProperty(
+                "sourceIdentity",
+                out JsonElement sourceIdentity)
+            || !HasTrustedSourceIdentity(sourceIdentity, observation))
+        {
+            return null;
+        }
+        return new(reason, count);
+    }
+
     public static BoundedCaptureRepresentation<CaptureObservationRequest>
         SerializeForTransport(
         CaptureObservationRequest observation,
@@ -1168,15 +1235,16 @@ public static class CaptureFidelityPolicy
             }
         }
 
+        bool hasChildProperty = value.TryGetProperty("childId", out JsonElement child);
         bool childMatches = observation.SourceIdentity.ChildId is null
-            ? !value.TryGetProperty("childId", out _)
-            : value.TryGetProperty("childId", out JsonElement child)
+            ? !hasChildProperty || child.ValueKind == JsonValueKind.Null
+            : hasChildProperty
                 && child.ValueKind == JsonValueKind.String
                 && string.Equals(
                     child.GetString(),
                     observation.SourceIdentity.ChildId,
                     StringComparison.Ordinal);
-        return seen.Count == (observation.SourceIdentity.ChildId is null ? 3 : 4)
+        return seen.Count == (hasChildProperty ? 4 : 3)
             && HasString(
                 value,
                 "externalSessionId",
@@ -1428,3 +1496,7 @@ public sealed record BinaryFidelitySelection<T>(
 {
     public bool WasOmitted => OmissionCount > 0;
 }
+
+public sealed record CaptureDeterministicFidelity(
+    string Reason,
+    long OriginalByteCount);

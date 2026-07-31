@@ -368,7 +368,8 @@ public sealed record CapturedEventEnvelope(
     int ContractVersion,
     CaptureObservationReceipt Observation,
     CanonicalCapturedEvent Event,
-    IReadOnlyList<CaptureRelationship> Relationships);
+    IReadOnlyList<CaptureRelationship> Relationships,
+    CaptureOutcomeSummary Outcome);
 
 /// <summary>
 /// Durable evidence used to derive presentation order for one source-stream
@@ -447,4 +448,5 @@ public sealed record CaptureImportReceipt(
     string EffectiveNamespace,
     string RouteBasis,
     CaptureObservationReceipt Observation,
-    IReadOnlyList<CapturedEventReceipt> Events);
+    IReadOnlyList<CapturedEventReceipt> Events,
+    CaptureOutcomeSummary Outcome);

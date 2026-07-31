@@ -421,7 +421,8 @@ public sealed class CaptureRuntimeStateTests
                     "sourceStream",
                     "sourcePosition",
                     "deterministicLocatorEvidence",
-                    "redactedSafeCandidate"
+                    "redactedSafeCandidate",
+                    "outcome"
                 ],
                 persistedQueueItem.EnumerateObject().Select(property => property.Name));
             JsonElement persistedLocatorEvidence =
@@ -908,6 +909,11 @@ public sealed class CaptureRuntimeStateTests
                 CaptureFidelityPolicy.TransportLimitReason,
                 claim.RedactedSafeCandidate,
                 StringComparison.Ordinal);
+            Assert.Equal("healthy", claim.Outcome.CaptureHealth);
+            Assert.Equal("degraded", claim.Outcome.CaptureFidelity);
+            Assert.Equal(
+                CaptureFidelityPolicy.TransportLimitReason,
+                Assert.Single(claim.Outcome.Counters).Reason);
             Assert.DoesNotContain(
                 new string('p', 256),
                 claim.RedactedSafeCandidate,
@@ -2498,6 +2504,139 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task ScannerPolicyFailureReportsBlockedHealthAndClaimsNothing()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-scanner-outcome-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":"safe"}}""" +
+            "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            var missingGate = new NeverStoreGate(
+                Path.Combine(directory, "missing-never-store.yaml"));
+
+            SafetyConfigurationException failure =
+                await Assert.ThrowsAsync<SafetyConfigurationException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new CodexJsonlAdapter(),
+                        transcript,
+                        "scanner-outcome-stream",
+                        state,
+                        missingGate));
+
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal("complete", failure.Outcome?.CaptureFidelity);
+            Assert.Equal(
+                CaptureOutcomeReason.ScannerPolicyUnavailable,
+                Assert.Single(failure.Outcome!.Counters).Reason);
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScannerInternalFailureReportsBlockedHealthAndClaimsNothing()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-scanner-internal-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":"safe"}}""" +
+            "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            SafetyScannerInternalException failure =
+                await Assert.ThrowsAsync<SafetyScannerInternalException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new CodexJsonlAdapter(),
+                        transcript,
+                        "scanner-internal-stream",
+                        state,
+                        new NeverStoreGate(new ThrowingSafetyScanner())));
+
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(
+                CaptureOutcomeReason.ScannerInternalFailure,
+                Assert.Single(failure.Outcome!.Counters).Reason);
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DeliveryScannerInternalFailureSendsNothingAndPersistsNoReceipt()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string fixture = Path.Combine(root, "fixtures/codex-synthetic.jsonl");
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-delivery-scanner-internal-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            const string sourceStream = "delivery-scanner-internal-stream";
+            IReadOnlyList<CaptureRuntimeQueueItem> claims =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new CodexJsonlAdapter(),
+                    fixture,
+                    sourceStream,
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    terminalAtEndOfFile: true);
+            Assert.NotEmpty(claims);
+            bool persistedReceipt = false;
+
+            SafetyScannerInternalException failure =
+                await Assert.ThrowsAsync<SafetyScannerInternalException>(
+                    () => DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                        new CodexJsonlAdapter(),
+                        fixture,
+                        sourceStream,
+                        claims,
+                        new Uri("http://127.0.0.1:1"),
+                        "unused",
+                        new NeverStoreGate(new ThrowingSafetyScanner()),
+                        (_, _, _) =>
+                        {
+                            persistedReceipt = true;
+                            return Task.CompletedTask;
+                        },
+                        terminalAtEndOfFile: true));
+
+            Assert.False(persistedReceipt);
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(
+                CaptureOutcomeReason.ScannerInternalFailure,
+                Assert.Single(failure.Outcome!.Counters).Reason);
+            Assert.NotEmpty(Assert.Single((await state.ReadAsync()).Streams).Queue);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerDoesNotDeliverAnUnterminatedFinalRecord()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -3454,5 +3593,17 @@ public sealed class CaptureRuntimeStateTests
 
         public void Advance(TimeSpan elapsed) =>
             _timestamp = checked(_timestamp + elapsed.Ticks);
+    }
+
+    private sealed class ThrowingSafetyScanner : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            throw new InvalidOperationException("scanner implementation detail");
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) =>
+            throw new InvalidOperationException("scanner implementation detail");
     }
 }

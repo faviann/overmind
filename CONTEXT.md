@@ -102,6 +102,13 @@ boundary, such as missing or invalid scanner rules or an internal scanner
 error. No canonical observation is accepted and source progress does not
 advance until the failure is repaired.
 
+**Capture outcome projection** — a content-free operational view that keeps
+capture health separate from capture fidelity. It groups only closed reasons
+by harness and bounded size band; it contains no content, exact byte count,
+credential, request, locator, digest, or source identity. It is rebuilt from
+canonical receipt evidence or accompanies local safe runtime state rather than
+forming another datastore.
+
 **Safe source payload** — source content after the universal deterministic
 pre-append gate. Recognized textual secrets are replaced even when supplied by
 the user; the payload never retains the matched value or a reversible

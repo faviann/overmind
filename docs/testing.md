@@ -91,6 +91,12 @@ native record, and a Codex `native_id` record requiring valid binary omission,
 claims nothing and persists no raw content. `CaptureIngestion` is
 the corresponding seam for proving content compaction, the fixed 128 MiB clamp,
 and keyed-signature streaming before append.
+The content-free outcome projection is authorized at
+`CaptureOutcomeAggregation`, `CaptureImportReceipt`, and
+`ICaptureRuntimeState`: tests assert its closed harness/reason/size-band shape,
+independent health and fidelity states, and absence of exact sizes and record
+identity. Packaged HTTP and `memctl capture receipt` remain the proof that the
+same projection crosses API and operator seams.
 The production deadline is deliberately not caller-injectable. Bounded tests
 exercise elapsed time under that fixed deadline; a mechanical test may supply a
 controlled `TimeProvider` to the production absolute-deadline structure to prove

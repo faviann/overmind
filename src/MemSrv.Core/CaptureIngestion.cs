@@ -25,6 +25,31 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureObservationCommand command,
         CancellationToken cancellationToken = default)
     {
+        try
+        {
+            return await ImportCoreAsync(binding, command, cancellationToken);
+        }
+        catch (SafetyConfigurationException failure)
+        {
+            failure.ReportCaptureOutcome(
+                command.Source.Harness,
+                SourceByteCountOrUnknown(command));
+            throw;
+        }
+        catch (SafetyScanException failure)
+        {
+            failure.ReportCaptureOutcome(
+                command.Source.Harness,
+                SourceByteCountOrUnknown(command));
+            throw;
+        }
+    }
+
+    private async Task<CaptureImportReceipt> ImportCoreAsync(
+        CaptureBindingContext binding,
+        CaptureObservationCommand command,
+        CancellationToken cancellationToken)
+    {
         CaptureLedger.RequireSafetyConfigured(neverStore);
         ValidateMandatory(binding, command);
         CaptureObservationCommand originalCommand = command;
@@ -40,6 +65,52 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         string inputJson = bounded.Serialized;
         long originalByteCount = bounded.OriginalByteCount;
         command = bounded.Observation;
+        var captureOutcomes = new List<CaptureOutcomeRecord>();
+        string? preclassifiedFidelityReason = null;
+        bool carriesPreclassifiedFidelity =
+            string.Equals(
+                originalCommand.Adapter.Name,
+                "capture-fidelity-policy",
+                StringComparison.Ordinal)
+            || originalCommand.Source.RecordType is
+                "malformed_json" or "source_record_omission";
+        if (carriesPreclassifiedFidelity
+            && CaptureFidelityPolicy.ClassifyDeterministicFidelity(originalCommand)
+                is { } existingFidelity)
+        {
+            preclassifiedFidelityReason = existingFidelity.Reason;
+            captureOutcomes.Add(CaptureOutcomeAggregation.FidelityOmission(
+                originalCommand.Source.Harness,
+                existingFidelity.Reason,
+                existingFidelity.OriginalByteCount));
+        }
+        if (bounded.WasOmitted)
+        {
+            captureOutcomes.Add(CaptureOutcomeAggregation.FidelityOmission(
+                originalCommand.Source.Harness,
+                CaptureFidelityPolicy.ContentLimitReason,
+                originalByteCount));
+        }
+        if (binaryFidelity.WasOmitted)
+        {
+            long? binaryByteCount =
+                string.Equals(
+                    command.Adapter.Name,
+                    "capture-fidelity-policy",
+                    StringComparison.Ordinal)
+                && CaptureFidelityPolicy.ClassifyDeterministicFidelity(command)
+                    is { Reason: CaptureFidelityPolicy.UnsupportedBinaryReason } wholeBinary
+                    ? wholeBinary.OriginalByteCount
+                    : originalCommand.Locator is CaptureSourceLocator.ByteRange binaryRange
+                        ? binaryRange.Length
+                        : null;
+            captureOutcomes.Add(CaptureOutcomeAggregation.FidelityOmission(
+                originalCommand.Source.Harness,
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                binaryByteCount));
+        }
+        CaptureOutcomeSummary captureOutcome =
+            CaptureOutcomeAggregation.Summarize(captureOutcomes);
         ValidateSemantic(command);
         CaptureObservationCommand signatureCommand =
             bounded.WasOmitted || binaryFidelity.WasOmitted
@@ -71,6 +142,10 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (binaryFidelity.WasOmitted)
         {
             scan.Omit(CaptureFidelityPolicy.UnsupportedBinaryReason);
+        }
+        if (preclassifiedFidelityReason is not null)
+        {
+            scan.Omit(preclassifiedFidelityReason);
         }
         AssertSafe(command.SourceIdentity.ExternalSessionId, scan);
         if (command.SourceIdentity.ChildId is not null)
@@ -256,7 +331,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 await transaction.CommitAsync(cancellationToken);
                 return new CaptureImportReceipt(
                     locatorMatch.ObservationUuid, "already_accepted", locatorMatch.SourcePosition,
-                    stream.EffectiveNamespace, "established", oldObservation!, oldEvents);
+                    stream.EffectiveNamespace, "established", oldObservation!, oldEvents,
+                    captureOutcome);
             }
 
             await transaction.RollbackAsync(cancellationToken);
@@ -378,8 +454,14 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         await transaction.CommitAsync(cancellationToken);
         return new CaptureImportReceipt(
             observationUuid, "new", command.SourcePosition,
-            stream.EffectiveNamespace, publicRouteBasis, observation!, receipts);
+            stream.EffectiveNamespace, publicRouteBasis, observation!, receipts,
+            captureOutcome);
     }
+
+    private static long? SourceByteCountOrUnknown(CaptureObservationCommand command) =>
+        command.Locator is CaptureSourceLocator.ByteRange range
+            ? range.Length
+            : null;
 
     private static CaptureConflictException ConflictAt(CaptureObservationCommand command) =>
         new("accepted_source_conflict",

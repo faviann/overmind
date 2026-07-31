@@ -793,7 +793,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
             .ToArray();
 
-        Assert.Equal(11, terminal.Length);
+        Assert.Equal(12, terminal.Length);
         string[] categories = ["attachment", "archive", "executable", "image", "audio"];
         long[] byteCounts = [4, 3, 2, 4, 5];
         string[] provenanceOrigins =
@@ -933,6 +933,21 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             CaptureFidelityPolicy.UnsupportedBinaryReason,
             spoofedNestedSignature.GetProperty("capture_fidelity_omission")
                 .GetProperty("reason").GetString());
+
+        JsonElement spoofedRootSource = terminal[11].Observation.SourcePayload
+            .GetProperty("source");
+        foreach (string propertyName in new[] { "signature", "encrypted_content" })
+        {
+            JsonElement spoofedMetadata = spoofedRootSource.GetProperty(propertyName);
+            Assert.False(spoofedMetadata.TryGetProperty("byte_payload", out _));
+            Assert.Equal(
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                spoofedMetadata.GetProperty("capture_fidelity_omission")
+                    .GetProperty("reason").GetString());
+        }
+        Assert.Equal(
+            "Raw root spoof safe sibling remains.",
+            spoofedRootSource.GetProperty("safeSibling").GetString());
     }
 
     [Fact]

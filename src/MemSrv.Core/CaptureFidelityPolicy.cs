@@ -9,7 +9,7 @@ namespace MemSrv.Core;
 /// </summary>
 public static class CaptureFidelityPolicy
 {
-    public const string CurrentVersion = "capture-fidelity/2026-07-31.8";
+    public const string CurrentVersion = "capture-fidelity/2026-07-31.9";
     public const int ProductionTransportBytes = 1_000_000;
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
@@ -56,7 +56,8 @@ public static class CaptureFidelityPolicy
             sourceIdentity,
             sourcePosition,
             locatorKind,
-            effectiveBound);
+            effectiveBound,
+            TrustedTraversalRootContext.RawSource);
         if (rewritten.ExceededBound)
         {
             return new(sourcePayload, 0);
@@ -86,7 +87,8 @@ public static class CaptureFidelityPolicy
             observation.SourceIdentity,
             observation.SourcePosition,
             observation.Locator.Kind,
-            remaining);
+            remaining,
+            TrustedTraversalRootContext.RawSource);
         if (rewrittenSource.ExceededBound)
         {
             return new(observation, 0);
@@ -108,7 +110,10 @@ public static class CaptureFidelityPolicy
                 observation.SourceIdentity,
                 observation.SourcePosition,
                 observation.Locator.Kind,
-                remaining);
+                remaining,
+                IsAdapterOwnedCodexReasoningEnvelope(observation, item)
+                    ? TrustedTraversalRootContext.AdapterEvent
+                    : TrustedTraversalRootContext.None);
             if (rewrittenPayload.ExceededBound)
             {
                 return new(observation, 0);
@@ -316,13 +321,29 @@ public static class CaptureFidelityPolicy
         return counter.BytesWritten;
     }
 
+    private static bool IsAdapterOwnedCodexReasoningEnvelope(
+        CaptureObservationCommand observation,
+        CaptureEvent item) =>
+        string.Equals(observation.Source.Harness, "codex", StringComparison.Ordinal)
+        && string.Equals(
+            observation.Source.RecordType,
+            "response_item",
+            StringComparison.Ordinal)
+        && string.Equals(
+            observation.Adapter.Name,
+            "codex-synthetic-jsonl",
+            StringComparison.Ordinal)
+        && string.Equals(item.Kind, "opaque", StringComparison.Ordinal)
+        && string.Equals(item.PartKey, "reasoning:opaque", StringComparison.Ordinal);
+
     private static RewrittenJson RewriteUnsupportedBinaryContent(
         JsonElement source,
         string harness,
         CaptureSourceIdentity sourceIdentity,
         long sourcePosition,
         string? locatorKind,
-        long maxBytes)
+        long maxBytes,
+        TrustedTraversalRootContext rootContext)
     {
         using (var deadline = new CountingSerializationStream(
             SafetyBudgets.Default.MaxScanTime))
@@ -332,7 +353,7 @@ public static class CaptureFidelityPolicy
                 harness,
                 deadline,
                 inKnownCodexReasoningPayload: false,
-                isRoot: true);
+                rootContext);
             deadline.AssertWithinDeadline();
             if (candidates == 0)
             {
@@ -356,7 +377,8 @@ public static class CaptureFidelityPolicy
                     harness,
                     sourceIdentity,
                     sourcePosition,
-                    locatorKind);
+                    locatorKind,
+                    rootContext);
                 WriteRewritten(source, writer, state, knownOpaqueMetadata: false);
                 writer.Flush();
                 stream.AssertWithinDeadline();
@@ -385,7 +407,7 @@ public static class CaptureFidelityPolicy
         string harness,
         GovernedSerializationStream deadline,
         bool inKnownCodexReasoningPayload,
-        bool isRoot)
+        TrustedTraversalRootContext rootContext)
     {
         deadline.AssertWithinDeadline();
         if (value.ValueKind == JsonValueKind.Array)
@@ -398,7 +420,7 @@ public static class CaptureFidelityPolicy
                     harness,
                     deadline,
                     inKnownCodexReasoningPayload: false,
-                    isRoot: false);
+                    TrustedTraversalRootContext.None);
             }
             return arrayCount;
         }
@@ -414,11 +436,11 @@ public static class CaptureFidelityPolicy
             out _);
         bool isCodexResponseItem = string.Equals(
                 harness, "codex", StringComparison.Ordinal)
-            && isRoot
+            && rootContext == TrustedTraversalRootContext.RawSource
             && HasString(value, "type", "response_item");
         bool isCodexReasoningOpaqueEnvelope = string.Equals(
                 harness, "codex", StringComparison.Ordinal)
-            && isRoot
+            && rootContext == TrustedTraversalRootContext.AdapterEvent
             && HasString(value, "recordType", "response_item")
             && HasString(value, "payloadType", "reasoning");
         bool isCodexReasoningPayload = HasString(value, "type", "reasoning");
@@ -447,7 +469,7 @@ public static class CaptureFidelityPolicy
                 harness,
                 deadline,
                 childIsKnownReasoning,
-                isRoot: false);
+                TrustedTraversalRootContext.None);
         }
         return count;
     }
@@ -499,10 +521,12 @@ public static class CaptureFidelityPolicy
         bool isCodexResponseItem = string.Equals(
                 state.Harness, "codex", StringComparison.Ordinal)
             && state.Depth == 0
+            && state.RootContext == TrustedTraversalRootContext.RawSource
             && HasString(value, "type", "response_item");
         bool isCodexReasoningOpaqueEnvelope = string.Equals(
                 state.Harness, "codex", StringComparison.Ordinal)
             && state.Depth == 0
+            && state.RootContext == TrustedTraversalRootContext.AdapterEvent
             && HasString(value, "recordType", "response_item")
             && HasString(value, "payloadType", "reasoning");
         bool isCodexReasoningPayload = HasString(value, "type", "reasoning");
@@ -868,16 +892,25 @@ public static class CaptureFidelityPolicy
         string harness,
         CaptureSourceIdentity sourceIdentity,
         long sourcePosition,
-        string? locatorKind)
+        string? locatorKind,
+        TrustedTraversalRootContext rootContext)
     {
         public GovernedSerializationStream Stream { get; } = stream;
         public string Harness { get; } = harness;
         public CaptureSourceIdentity SourceIdentity { get; } = sourceIdentity;
         public long SourcePosition { get; } = sourcePosition;
         public string? LocatorKind { get; } = locatorKind;
+        public TrustedTraversalRootContext RootContext { get; } = rootContext;
         public int Depth { get; set; }
         public bool InCodexResponsePayload { get; set; }
         public int OmissionCount { get; set; }
+    }
+
+    private enum TrustedTraversalRootContext
+    {
+        None,
+        RawSource,
+        AdapterEvent
     }
 
     private sealed record RewrittenJson(

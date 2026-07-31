@@ -304,7 +304,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             Task<string> stderr = process.StandardError.ReadToEndAsync();
             try
             {
-                var receipts = new JsonElement[11];
+                var receipts = new JsonElement[12];
                 for (int index = 0; index < receipts.Length; index++)
                 {
                     receipts[index] = await ReadTracerReceiptAsync(process);
@@ -391,11 +391,39 @@ public sealed class CaptureTests : HttpSeamTestBase
                 spoofedShown,
                 StringComparison.Ordinal);
 
+            string spoofedRootShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipts[11].GetProperty("observationUuid").GetGuid().ToString());
+            Assert.DoesNotContain("[71,72]", spoofedRootShown, StringComparison.Ordinal);
+            Assert.DoesNotContain("[73,74]", spoofedRootShown, StringComparison.Ordinal);
+            Assert.Contains(
+                "\"safeSibling\":\"Raw root spoof safe sibling remains.\"",
+                spoofedRootShown,
+                StringComparison.Ordinal);
+            Assert.Equal(
+                4,
+                spoofedRootShown.Split(
+                    $"\"reason\":\"{CaptureFidelityPolicy.UnsupportedBinaryReason}\"",
+                    StringSplitOptions.None).Length - 1);
+            string spoofedRootApi = receipts[11].GetRawText();
+            Assert.DoesNotContain("[71,72]", spoofedRootApi, StringComparison.Ordinal);
+            Assert.DoesNotContain("[73,74]", spoofedRootApi, StringComparison.Ordinal);
+            Assert.Equal(
+                "Raw root spoof safe sibling remains.",
+                receipts[11].GetProperty("observation").GetProperty("safeSourcePayload")
+                    .GetProperty("source").GetProperty("safeSibling").GetString());
+            Assert.Equal(
+                "Raw root spoof safe sibling remains.",
+                Assert.Single(receipts[11].GetProperty("events").EnumerateArray())
+                    .GetProperty("payload").GetProperty("source")
+                    .GetProperty("source").GetProperty("safeSibling").GetString());
+
             CaptureRuntimeStreamState firstState = Assert.Single(
                 (await new FileCaptureRuntimeState(firstStateDirectory).ReadAsync()).Streams);
-            Assert.Equal(10, firstState.EnqueuedThrough);
+            Assert.Equal(11, firstState.EnqueuedThrough);
             Assert.Empty(firstState.Queue);
-            Assert.Equal(10, firstState.LastServerReceipt?.SourcePosition);
+            Assert.Equal(11, firstState.LastServerReceipt?.SourcePosition);
             string durableRuntimeState = await File.ReadAllTextAsync(
                 Path.Combine(firstStateDirectory, "capture-state.json"));
             foreach (string omittedBytes in new[]
@@ -406,7 +434,9 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "[137,80,78,71]",
                     "[82,73,70,70,1]",
                     "[201,202]",
-                    "[61,62]"
+                    "[61,62]",
+                    "[71,72]",
+                    "[73,74]"
                 })
             {
                 Assert.DoesNotContain(

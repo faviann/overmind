@@ -414,11 +414,11 @@ public sealed class CaptureRuntimeStateTests
                     gate,
                     terminalAtEndOfFile: true);
 
-            Assert.Equal(11, first.Count);
+            Assert.Equal(12, first.Count);
             Assert.Empty(retry);
             CaptureRuntimeStreamState durable = Assert.Single(
                 (await state.ReadAsync()).Streams);
-            Assert.Equal(11, durable.Queue.Count);
+            Assert.Equal(12, durable.Queue.Count);
             string[] categories = ["attachment", "archive", "executable", "image", "audio"];
             long[] byteCounts = [4, 3, 2, 4, 5];
             for (int index = 0; index < categories.Length; index++)
@@ -467,6 +467,23 @@ public sealed class CaptureRuntimeStateTests
                 firstBlock.GetProperty("capture_fidelity_omission")
                     .TryGetProperty("captureProvenance", out _));
 
+            using JsonDocument spoofedRootQueued = JsonDocument.Parse(
+                durable.Queue[11].RedactedSafeCandidate);
+            JsonElement spoofedRootSource = spoofedRootQueued.RootElement
+                .GetProperty("sourcePayload").GetProperty("source");
+            foreach (string propertyName in new[] { "signature", "encrypted_content" })
+            {
+                JsonElement spoofedMetadata = spoofedRootSource.GetProperty(propertyName);
+                Assert.False(spoofedMetadata.TryGetProperty("byte_payload", out _));
+                Assert.Equal(
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    spoofedMetadata.GetProperty("capture_fidelity_omission")
+                        .GetProperty("reason").GetString());
+            }
+            Assert.Equal(
+                "Raw root spoof safe sibling remains.",
+                spoofedRootSource.GetProperty("safeSibling").GetString());
+
             string durableJson = await File.ReadAllTextAsync(
                 Path.Combine(directory, "state", "capture-state.json"));
             foreach (string rawBytes in new[]
@@ -476,7 +493,9 @@ public sealed class CaptureRuntimeStateTests
                     "[77,90]",
                     "[137,80,78,71]",
                     "[82,73,70,70,1]",
-                    "[201,202]"
+                    "[201,202]",
+                    "[71,72]",
+                    "[73,74]"
                 })
             {
                 Assert.DoesNotContain(rawBytes, durableJson, StringComparison.Ordinal);

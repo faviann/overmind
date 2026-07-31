@@ -107,9 +107,15 @@ Adapters are versioned tolerant tagged unions:
   likewise remain ordinary replayable evidence. Untagged values and malformed byte
   representations are not classified by this union. Only direct `signature`
   and `encrypted_content` children reached from the root known Codex reasoning
-  payload or the root adapter-owned opaque envelope remain ordinary metadata;
-  nested objects cannot self-assert either wrapper, and the same names in
-  arbitrary objects do not exempt a nested valid `binary_content`;
+  payload or the root adapter-owned opaque envelope remain ordinary metadata.
+  These are separate closed traversal contexts: a raw source record can earn
+  only the root Codex `response_item` → `payload.type=reasoning` exception,
+  while an adapter event can earn only the adapter-produced root
+  `recordType=response_item`, `payloadType=reasoning`,
+  `source.type=reasoning` exception. Raw root fields cannot self-assert the
+  adapter-event context, nested objects cannot self-assert either wrapper, and
+  the same names in arbitrary objects do not exempt a nested valid
+  `binary_content`;
   there is no extension, entropy, or generic string classifier;
 - Codex response items explicitly tagged `reasoning` preserve explicitly tagged
   `summary_text` and `reasoning_text` blocks as canonical `reasoning`; encrypted

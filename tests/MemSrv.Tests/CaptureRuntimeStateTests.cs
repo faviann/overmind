@@ -2687,6 +2687,112 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task AdapterFidelityFailureReportsBlockedHealthAndClaimsNothing()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-adapter-fidelity-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":"safe"}}""" +
+            "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            SafetyScanException failure = await Assert.ThrowsAsync<SafetyScanException>(
+                () => CodexCaptureClaimer.ClaimCompletedAsync(
+                    new AdapterFidelityFailureAdapter(),
+                    transcript,
+                    "adapter-fidelity-stream",
+                    state,
+                    new NeverStoreGate(Path.Combine(
+                        TestProcessRunner.RepoRoot,
+                        "config/never_store.yaml"))));
+
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+            CaptureOutcomeCounter counter = Assert.Single(failure.Outcome!.Counters);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, counter.Reason);
+            Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TransportSerializationFailureReportsBlockedHealthAndSendsNothing()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string fixture = Path.Combine(root, "fixtures/codex-synthetic.jsonl");
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-delivery-transport-fidelity-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            const string sourceStream = "delivery-transport-fidelity-stream";
+            IReadOnlyList<CaptureRuntimeQueueItem> claims =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new CodexJsonlAdapter(),
+                    fixture,
+                    sourceStream,
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    terminalAtEndOfFile: true);
+            Assert.NotEmpty(claims);
+            CaptureRuntimeStreamState beforeDelivery =
+                Assert.Single((await state.ReadAsync()).Streams);
+            bool persistedReceipt = false;
+
+            SafetyScanException failure = await Assert.ThrowsAsync<SafetyScanException>(
+                () => DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                    new TransportSerializationFailureAdapter(),
+                    fixture,
+                    sourceStream,
+                    claims,
+                    new Uri("http://127.0.0.1:1"),
+                    "unused",
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    (_, _, _) =>
+                    {
+                        persistedReceipt = true;
+                        return Task.CompletedTask;
+                    },
+                    terminalAtEndOfFile: true));
+
+            Assert.False(persistedReceipt);
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+            CaptureOutcomeCounter counter = Assert.Single(failure.Outcome!.Counters);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, counter.Reason);
+            Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+            CaptureRuntimeStreamState afterDelivery =
+                Assert.Single((await state.ReadAsync()).Streams);
+            Assert.Equal(beforeDelivery.EnqueuedThrough, afterDelivery.EnqueuedThrough);
+            Assert.Equal(
+                beforeDelivery.Queue.Select(item =>
+                    (item.DeterministicLocatorEvidence.Identity,
+                        item.RedactedSafeCandidate)),
+                afterDelivery.Queue.Select(item =>
+                    (item.DeterministicLocatorEvidence.Identity,
+                        item.RedactedSafeCandidate)));
+            Assert.Null(afterDelivery.LastServerReceipt);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task DeliveryScannerInternalFailureSendsNothingAndPersistsNoReceipt()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -3667,6 +3773,67 @@ public sealed class CaptureRuntimeStateTests
                     ],
                     SourceIdentity: new CaptureSourceIdentity("current-identity")));
         }
+    }
+
+    private sealed class AdapterFidelityFailureAdapter : ICaptureSourceAdapter
+    {
+        private readonly CodexJsonlAdapter _inner = new();
+
+        public string Harness => _inner.Harness;
+        public CaptureAdapter Identity => _inner.Identity;
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                _inner.Adapt(source));
+            CaptureObservationCommand command =
+                CaptureObservationCommand.FromRequest(terminal.Observation);
+            _ = CaptureFidelityPolicy.SerializeForContent(command, 1);
+            return terminal;
+        }
+    }
+
+    private sealed class TransportSerializationFailureAdapter : ICaptureSourceAdapter
+    {
+        private readonly CodexJsonlAdapter _inner = new();
+
+        public string Harness => _inner.Harness;
+        public CaptureAdapter Identity => _inner.Identity;
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                _inner.Adapt(source));
+            return terminal with
+            {
+                Observation = terminal.Observation with
+                {
+                    Events = new TransportSerializationFailureEventList(
+                        terminal.Observation.Events[0])
+                }
+            };
+        }
+    }
+
+    private sealed class TransportSerializationFailureEventList(CaptureEvent item)
+        : IReadOnlyList<CaptureEvent>
+    {
+        public int Count => 1;
+        public CaptureEvent this[int index] => index == 0
+            ? item
+            : throw new ArgumentOutOfRangeException(nameof(index));
+
+        public IEnumerator<CaptureEvent> GetEnumerator()
+        {
+            var time = new ManualTimeProvider();
+            var deadline = new GovernedDeadline(TimeSpan.FromSeconds(30), time);
+            time.Advance(TimeSpan.FromSeconds(31));
+            deadline.AssertWithinDeadline();
+            return Enumerable.Repeat(item, 1).GetEnumerator();
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
     }
 
     private static CaptureObservationRequest ResourceBoundObservation(

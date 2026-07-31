@@ -625,31 +625,28 @@ public static class CodexCaptureClaimer
             {
                 continue;
             }
-            var terminal = adapter.Adapt(record) as CaptureSourcePositionOutcome.Terminal;
-            if (terminal is null)
-            {
-                break;
-            }
             if (record.Locator is not CaptureSourceLocator.ByteRange byteRange)
             {
                 throw new InvalidDataException(
                     "Persisted Codex records require a verified byte-range locator.");
             }
-            VerifyRecord(sourceBytes, byteRange, sourceStream, record.SourcePosition);
-
-            long prefixLength = checked(byteRange.Offset + byteRange.Length);
-            var prefix = new CapturePrefixEvidence(
-                prefixLength,
-                Digest(sourceBytes.AsSpan(0, checked((int)prefixLength))));
-            BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
-                CaptureFidelityPolicy.SerializeForTransport(
-                    terminal.Observation,
-                    maxTransportBytes);
-            string boundedJson = bounded.Serialized;
+            CaptureSourcePositionOutcome.Terminal? terminal;
+            BoundedCaptureRepresentation<CaptureObservationRequest> bounded;
             string candidateJson;
             NeverStoreScan candidateScan;
             try
             {
+                terminal = adapter.Adapt(record)
+                    as CaptureSourcePositionOutcome.Terminal;
+                if (terminal is null)
+                {
+                    break;
+                }
+                VerifyRecord(sourceBytes, byteRange, sourceStream, record.SourcePosition);
+                bounded = CaptureFidelityPolicy.SerializeForTransport(
+                    terminal.Observation,
+                    maxTransportBytes);
+                string boundedJson = bounded.Serialized;
                 safetyGate.AssertObservationWithinBudget(boundedJson);
                 candidateScan = safetyGate.ScanJson(boundedJson);
                 candidateJson = candidateScan.Redacted;
@@ -657,17 +654,21 @@ public static class CodexCaptureClaimer
             catch (SafetyConfigurationException failure)
             {
                 failure.ReportCaptureOutcome(
-                    terminal.Observation.Source.Harness,
+                    adapter.Harness,
                     byteRange.Length);
                 throw;
             }
             catch (SafetyScanException failure)
             {
                 failure.ReportCaptureOutcome(
-                    terminal.Observation.Source.Harness,
+                    adapter.Harness,
                     byteRange.Length);
                 throw;
             }
+            long prefixLength = checked(byteRange.Offset + byteRange.Length);
+            var prefix = new CapturePrefixEvidence(
+                prefixLength,
+                Digest(sourceBytes.AsSpan(0, checked((int)prefixLength))));
             var locatorEvidence = new CaptureRuntimeLocatorEvidence(
                 transcriptIdentity,
                 record.SourcePosition,

@@ -80,7 +80,7 @@ public static class JsonlSourceReader
                                 reason = CaptureFidelityPolicy.MalformedJsonReason,
                                 policyVersion = CaptureFidelityPolicy.CurrentVersion,
                                 sourceIdentity = SourceProvenance(
-                                    sourceIdentity, sourcePosition, "byte_range")
+                                    sourceIdentity, sourcePosition)
                             }
                         });
                         interpretation =
@@ -98,7 +98,7 @@ public static class JsonlSourceReader
                                 policyVersion = CaptureFidelityPolicy.CurrentVersion,
                                 contentPolicy = CaptureFidelityPolicy.InvalidUtf8ContentPolicy,
                                 sourceIdentity = SourceProvenance(
-                                    sourceIdentity, sourcePosition, "byte_range")
+                                    sourceIdentity, sourcePosition)
                             }
                         });
                         interpretation = CaptureSourceRecordInterpretation.Uninspectable;
@@ -123,13 +123,12 @@ public static class JsonlSourceReader
 
     private static object SourceProvenance(
         CaptureSourceIdentity sourceIdentity,
-        long sourcePosition,
-        string locatorKind) =>
+        long sourcePosition) =>
         new
         {
             externalSessionId = sourceIdentity.ExternalSessionId,
             childId = sourceIdentity.ChildId,
             sourcePosition,
-            locatorKind
+            locatorKind = "byte_range"
         };
 }

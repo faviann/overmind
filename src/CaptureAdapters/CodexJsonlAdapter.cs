@@ -60,10 +60,10 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             }
         }
 
-        IReadOnlyList<CaptureEvent> events =
+        bool requiresOpaqueRecordEvent =
             source.RecordInterpretation is not CaptureSourceRecordInterpretation.Structured
-            ? [Opaque(recordType, null, record, "record:opaque")]
-            : isUnsupportedShape
+            || isUnsupportedShape;
+        IReadOnlyList<CaptureEvent> events = requiresOpaqueRecordEvent
             ? [Opaque(recordType, null, record, "record:opaque")]
             : Interpret(record, recordType, payload, source.SourcePosition);
         var request = new CaptureObservationRequest(

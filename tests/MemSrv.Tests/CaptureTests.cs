@@ -1819,6 +1819,51 @@ public sealed class CaptureTests : HttpSeamTestBase
     [Theory]
     [InlineData("malformed_json")]
     [InlineData("source_record_omission")]
+    public async Task VersionTenConvergesForStructuredSourceOwnedTerminalDiscriminator(
+        string recordType)
+    {
+        string captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-v10-source-owned-{Guid.NewGuid():N}";
+        await EnrollAsync(
+            $"codex-adapter-v10-source-owned-{Guid.NewGuid():N}",
+            captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            StructuredSourceOwnedTerminalDiscriminatorObservation(
+                externalSessionId,
+                childId,
+                locator,
+                adapterVersion: "9",
+                recordType));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        JsonElement acceptedReceipt =
+            await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            StructuredSourceOwnedTerminalDiscriminatorObservation(
+                externalSessionId,
+                childId,
+                locator,
+                adapterVersion: "10",
+                recordType));
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        JsonElement retryReceipt =
+            await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Theory]
+    [InlineData("malformed_json")]
+    [InlineData("source_record_omission")]
     public async Task VersionTenTerminalMalformedRepresentationsCannotMasqueradeAsVersionNine(
         string recordType)
     {
@@ -6810,11 +6855,12 @@ public sealed class CaptureTests : HttpSeamTestBase
         string adapterVersion,
         string recordType)
     {
+        const string opaqueText = """{"type":"response_item","payload":""";
         object safeRepresentation = recordType switch
         {
             "malformed_json" => new
             {
-                opaqueText = """{"type":"response_item","payload":""",
+                opaqueText,
                 parseError = new
                 {
                     reason = "json_parse_error",
@@ -6822,6 +6868,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     sourceIdentity = new
                     {
                         externalSessionId,
+                        childId = (string?)null,
                         sourcePosition = 0,
                         locatorKind = "byte_range"
                     }
@@ -6838,6 +6885,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     sourceIdentity = new
                     {
                         externalSessionId,
+                        childId = (string?)null,
                         sourcePosition = 0,
                         locatorKind = "byte_range"
                     }
@@ -6845,6 +6893,9 @@ public sealed class CaptureTests : HttpSeamTestBase
             },
             _ => throw new ArgumentOutOfRangeException(nameof(recordType))
         };
+        long recordByteLength = recordType == "malformed_json"
+            ? Encoding.UTF8.GetByteCount(opaqueText)
+            : 9;
 
         return new
         {
@@ -6855,14 +6906,14 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 kind = "byte_range",
                 byteOffset = 0,
-                byteLength = 9,
+                byteLength = recordByteLength,
                 sourceContentSha256 = Convert.ToHexString(
                     SHA256.HashData(Encoding.UTF8.GetBytes(locatorSeed))).ToLowerInvariant()
             },
             source = new
             {
                 harness = "codex",
-                harnessVersion = "0.154.synthetic",
+                harnessVersion = (string?)null,
                 recordType,
                 materialKind = "persisted_record"
             },
@@ -6876,7 +6927,62 @@ public sealed class CaptureTests : HttpSeamTestBase
                     partOrder = 0,
                     kind = "opaque",
                     actor = "unknown",
-                    payload = new { source = safeRepresentation }
+                    payload = new
+                    {
+                        recordType,
+                        payloadType = (string?)null,
+                        source = safeRepresentation
+                    },
+                    relationships = Array.Empty<object>()
+                }
+            }
+        };
+    }
+
+    private static object StructuredSourceOwnedTerminalDiscriminatorObservation(
+        string externalSessionId,
+        string childId,
+        string locatorSeed,
+        string adapterVersion,
+        string recordType)
+    {
+        object sourcePayload = new
+        {
+            type = recordType,
+            message = "unchanged structured source-owned record"
+        };
+        return new
+        {
+            contractVersion = 1,
+            sourceSessionId = externalSessionId,
+            sourceIdentity = new { externalSessionId, childId },
+            sourcePosition = 0,
+            locator = new
+            {
+                kind = "byte_range",
+                byteOffset = 0,
+                byteLength = 32,
+                sourceContentSha256 = Convert.ToHexString(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(locatorSeed))).ToLowerInvariant()
+            },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.154.synthetic",
+                recordType,
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload,
+            events = new object[]
+            {
+                new
+                {
+                    partKey = "opaque/0",
+                    partOrder = 0,
+                    kind = "opaque",
+                    actor = "unknown",
+                    payload = new { recordType, payloadType = (string?)null, source = sourcePayload }
                 }
             }
         };

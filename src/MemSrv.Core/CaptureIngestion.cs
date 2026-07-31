@@ -492,8 +492,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             "9" => [.. PreVersion7CodexAdapterVersions, "7", "8"],
             "10" when binaryFidelityWasOmitted
                 || CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(command)
-                || command.Source.RecordType is "malformed_json"
-                    or "source_record_omission" => [],
+                || CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(command)
+                    => [],
             "10" => [.. PreVersion7CodexAdapterVersions, "7", "8", "9"],
             _ => []
         };

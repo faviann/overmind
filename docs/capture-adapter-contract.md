@@ -77,7 +77,7 @@ server recognizes prior Codex adapter signatures narrowly where the record's
 derived events are unchanged and only adapter/signature identity moved. A
 record whose derived tool events changed in v7, whose relationship facts
 changed in v8, whose binary safe representation changed in v9, a changed
-terminal-malformed representation changed in v10, a changed locator, or changed
+terminal-malformed representation in v10, a changed locator, or changed
 source content remains a conflict. Unchanged pre-v10 records may converge under
 v10 compatibility; a command carrying the v9 binary-fidelity representation or
 either v10 terminal-malformed representation is never offered a prior-adapter

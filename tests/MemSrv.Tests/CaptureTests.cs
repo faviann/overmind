@@ -173,8 +173,13 @@ public sealed class CaptureTests : HttpSeamTestBase
             CaptureFidelityPolicy.UnsupportedBinaryReason,
             importCounter.GetProperty("reason").GetString());
         Assert.Equal(
-            CaptureSizeBand.Unknown,
+            CaptureSizeBand.UpTo1MiB,
             importCounter.GetProperty("sizeBand").GetString());
+        Assert.Equal(3, importCounter.GetProperty("count").GetInt64());
+        Assert.DoesNotContain(
+            "originalByteCount",
+            importOutcome.GetRawText(),
+            StringComparison.Ordinal);
         JsonElement safeBlock = receipt.GetProperty("observation")
             .GetProperty("safeSourcePayload").GetProperty("payload")
             .GetProperty("content")[0];

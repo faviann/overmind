@@ -1564,7 +1564,19 @@ public sealed class CaptureRuntimeStateTests
             CaptureRuntimeStreamState persisted = Assert.Single(
                 (await inner.ReadAsync()).Streams);
             Assert.Equal(0, persisted.EnqueuedThrough);
-            Assert.Equal(claim, Assert.Single(persisted.Queue));
+            CaptureRuntimeQueueItem persistedClaim = Assert.Single(persisted.Queue);
+            Assert.Equal(claim.SourceStream, persistedClaim.SourceStream);
+            Assert.Equal(
+                claim.DeterministicLocatorEvidence,
+                persistedClaim.DeterministicLocatorEvidence);
+            Assert.Equal(
+                claim.RedactedSafeCandidate,
+                persistedClaim.RedactedSafeCandidate);
+            Assert.Equal(
+                JsonSerializer.Serialize(claim.Outcome, CaptureLedger.JsonOptions),
+                JsonSerializer.Serialize(
+                    persistedClaim.Outcome,
+                    CaptureLedger.JsonOptions));
         }
         finally
         {

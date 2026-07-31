@@ -68,35 +68,11 @@ public sealed class CaptureOutcomeSummary(
     string captureHealth,
     string captureFidelity,
     IReadOnlyList<CaptureOutcomeCounter> counters)
-    : IEquatable<CaptureOutcomeSummary>
 {
     public int ContractVersion { get; } = contractVersion;
     public string CaptureHealth { get; } = captureHealth;
     public string CaptureFidelity { get; } = captureFidelity;
     public IReadOnlyList<CaptureOutcomeCounter> Counters { get; } = counters;
-
-    public bool Equals(CaptureOutcomeSummary? other) =>
-        other is not null
-        && ContractVersion == other.ContractVersion
-        && string.Equals(CaptureHealth, other.CaptureHealth, StringComparison.Ordinal)
-        && string.Equals(CaptureFidelity, other.CaptureFidelity, StringComparison.Ordinal)
-        && Counters.SequenceEqual(other.Counters);
-
-    public override bool Equals(object? obj) =>
-        obj is CaptureOutcomeSummary other && Equals(other);
-
-    public override int GetHashCode()
-    {
-        var hash = new HashCode();
-        hash.Add(ContractVersion);
-        hash.Add(CaptureHealth, StringComparer.Ordinal);
-        hash.Add(CaptureFidelity, StringComparer.Ordinal);
-        foreach (CaptureOutcomeCounter counter in Counters)
-        {
-            hash.Add(counter);
-        }
-        return hash.ToHashCode();
-    }
 }
 
 /// <summary>
@@ -191,7 +167,8 @@ public static class CaptureOutcomeAggregation
     public static CaptureOutcomeSummary Empty { get; } = Summarize([]);
 
     public static CaptureOutcomeSummary FromCanonical(
-        CaptureObservationReceipt observation)
+        CaptureObservationReceipt observation,
+        IEnumerable<JsonElement>? eventPayloads = null)
     {
         ArgumentNullException.ThrowIfNull(observation);
         var reasons = observation.Scan.RuleIds
@@ -200,10 +177,50 @@ public static class CaptureOutcomeAggregation
             .Where(CaptureOutcomeReason.IsFidelity)
             .ToHashSet(StringComparer.Ordinal);
 
-        return Summarize(reasons.Select(reason => FidelityOmission(
-            observation.Source.Harness,
-            reason,
-            CanonicalByteCount(observation, reason))));
+        var outcomes = reasons
+            .Where(reason => reason != CaptureFidelityPolicy.UnsupportedBinaryReason)
+            .Select(reason => FidelityOmission(
+                observation.Source.Harness,
+                reason,
+                CanonicalByteCount(observation, reason)))
+            .ToList();
+        if (reasons.Contains(CaptureFidelityPolicy.UnsupportedBinaryReason))
+        {
+            long? wholeCount = PolicyOmissionByteCount(
+                observation,
+                CaptureFidelityPolicy.UnsupportedBinaryReason);
+            if (wholeCount is not null)
+            {
+                outcomes.Add(FidelityOmission(
+                    observation.Source.Harness,
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    wholeCount));
+            }
+            else
+            {
+                IReadOnlyList<long> counts =
+                    CaptureFidelityPolicy.UnsupportedBinaryOmissionByteCounts(
+                        observation,
+                        eventPayloads ?? []);
+                if (counts.Count == 0)
+                {
+                    outcomes.Add(FidelityOmission(
+                        observation.Source.Harness,
+                        CaptureFidelityPolicy.UnsupportedBinaryReason,
+                        observation.Locator is CaptureSourceLocator.ByteRange range
+                            ? range.Length
+                            : null));
+                }
+                else
+                {
+                    outcomes.AddRange(counts.Select(count => FidelityOmission(
+                        observation.Source.Harness,
+                        CaptureFidelityPolicy.UnsupportedBinaryReason,
+                        count)));
+                }
+            }
+        }
+        return Summarize(outcomes);
     }
 
     public static string Classify(SafetyScanException failure)

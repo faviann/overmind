@@ -156,6 +156,56 @@ public sealed class CaptureOutcomeTests
         Assert.Equal(CaptureSizeBand.Unknown, outcome.SizeBand);
     }
 
+    [Fact]
+    public void CanonicalBinaryOmissionsPreserveEachExactPolicyCountByBoundedBand()
+    {
+        const string externalSessionId = "canonical-binary-session";
+        object Omission(long originalByteCount) => new
+        {
+            reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+            category = "image",
+            originalByteCount,
+            policyVersion = CaptureFidelityPolicy.CurrentVersion,
+            sourceIdentity = new
+            {
+                externalSessionId,
+                sourcePosition = 0,
+                locatorKind = "native_id"
+            }
+        };
+        CaptureObservationReceipt observation = CanonicalObservation(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            new CaptureSourceLocator.NativeId("native"),
+            JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission = Omission(4),
+                capture_fidelity_omission_1 = Omission(4),
+                capture_fidelity_omission_2 = Omission(2L * 1024 * 1024)
+            }),
+            externalSessionId: externalSessionId);
+
+        CaptureOutcomeSummary outcome =
+            CaptureOutcomeAggregation.FromCanonical(observation);
+
+        Assert.Collection(
+            outcome.Counters,
+            counter =>
+            {
+                Assert.Equal(CaptureSizeBand.Over1MiBThrough64MiB, counter.SizeBand);
+                Assert.Equal(1, counter.Count);
+            },
+            counter =>
+            {
+                Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+                Assert.Equal(2, counter.Count);
+            });
+        string serialized = JsonSerializer.Serialize(
+            outcome,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.DoesNotContain("originalByteCount", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("2097152", serialized, StringComparison.Ordinal);
+    }
+
     private static CaptureObservationReceipt CanonicalObservation(
         string? reason,
         CaptureSourceLocator locator,

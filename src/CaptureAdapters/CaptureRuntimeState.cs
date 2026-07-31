@@ -751,6 +751,17 @@ public static class CodexCaptureClaimer
 
         CaptureObservationCommand command =
             CaptureObservationCommand.FromRequest(bounded.Observation);
+        IReadOnlyList<long> binaryByteCounts =
+            CaptureFidelityPolicy.UnsupportedBinaryOmissionByteCounts(command);
+        if (binaryByteCounts.Count > 0)
+        {
+            return CaptureOutcomeAggregation.Summarize(
+                binaryByteCounts.Select(count =>
+                    CaptureOutcomeAggregation.FidelityOmission(
+                        harness,
+                        CaptureFidelityPolicy.UnsupportedBinaryReason,
+                        count)));
+        }
         return CaptureFidelityPolicy.ClassifyDeterministicFidelity(command)
             is { } fidelity
             ? CaptureOutcomeAggregation.Summarize(

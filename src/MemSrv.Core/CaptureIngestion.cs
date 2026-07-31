@@ -93,21 +93,23 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         }
         if (binaryFidelity.WasOmitted)
         {
-            long? binaryByteCount =
-                string.Equals(
+            IReadOnlyList<long> binaryByteCounts =
+                CaptureFidelityPolicy.UnsupportedBinaryOmissionByteCounts(command);
+            if (binaryByteCounts.Count == 0
+                && string.Equals(
                     command.Adapter.Name,
                     "capture-fidelity-policy",
                     StringComparison.Ordinal)
                 && CaptureFidelityPolicy.ClassifyDeterministicFidelity(command)
-                    is { Reason: CaptureFidelityPolicy.UnsupportedBinaryReason } wholeBinary
-                    ? wholeBinary.OriginalByteCount
-                    : originalCommand.Locator is CaptureSourceLocator.ByteRange binaryRange
-                        ? binaryRange.Length
-                        : null;
-            captureOutcomes.Add(CaptureOutcomeAggregation.FidelityOmission(
-                originalCommand.Source.Harness,
-                CaptureFidelityPolicy.UnsupportedBinaryReason,
-                binaryByteCount));
+                    is { Reason: CaptureFidelityPolicy.UnsupportedBinaryReason } wholeBinary)
+            {
+                binaryByteCounts = [wholeBinary.OriginalByteCount];
+            }
+            captureOutcomes.AddRange(binaryByteCounts.Select(binaryByteCount =>
+                CaptureOutcomeAggregation.FidelityOmission(
+                    originalCommand.Source.Harness,
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    binaryByteCount)));
         }
         CaptureOutcomeSummary captureOutcome =
             CaptureOutcomeAggregation.Summarize(captureOutcomes);

@@ -120,6 +120,22 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             Assert.Empty(tracer.Stdout);
             Assert.Contains("refuses to run", tracer.Stderr);
             Assert.Contains(expectedReason, tracer.Stderr, StringComparison.OrdinalIgnoreCase);
+            JsonElement tracerOutcome = StructuredTracerOutcome(tracer.Stderr);
+            Assert.Equal("blocked", tracerOutcome.GetProperty("captureHealth").GetString());
+            Assert.Equal("complete", tracerOutcome.GetProperty("captureFidelity").GetString());
+            JsonElement tracerCounter = Assert.Single(
+                tracerOutcome.GetProperty("counters").EnumerateArray());
+            Assert.Equal("codex", tracerCounter.GetProperty("harness").GetString());
+            Assert.Equal(
+                CaptureOutcomeAggregation.SafetyFailureClass,
+                tracerCounter.GetProperty("class").GetString());
+            Assert.Equal(
+                CaptureOutcomeReason.ScannerPolicyUnavailable,
+                tracerCounter.GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureSizeBand.Unknown,
+                tracerCounter.GetProperty("sizeBand").GetString());
+            Assert.Equal(1, tracerCounter.GetProperty("count").GetInt64());
         }
         finally
         {
@@ -741,7 +757,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         CapturedEventEnvelope envelope = Assert.Single(
             await new OperatorCaptureReads(RuntimeConnection)
                 .ReadCapturedEventEnvelopesAsync(first.ObservationUuid));
-        Assert.Equal(first.Outcome, envelope.Outcome);
+        Assert.Equal(
+            JsonSerializer.Serialize(first.Outcome, CaptureLedger.JsonOptions),
+            JsonSerializer.Serialize(envelope.Outcome, CaptureLedger.JsonOptions));
     }
 
     [Theory]
@@ -1294,6 +1312,17 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             Assert.Equal(0, Volatile.Read(ref requestCount));
             Assert.Contains("failed closed", tracer.Stderr);
             Assert.Contains("match-count budget of 10000", tracer.Stderr);
+            JsonElement outcome = StructuredTracerOutcome(tracer.Stderr);
+            Assert.Equal("blocked", outcome.GetProperty("captureHealth").GetString());
+            JsonElement counter = Assert.Single(
+                outcome.GetProperty("counters").EnumerateArray());
+            Assert.Equal(
+                CaptureOutcomeReason.ScanBudgetExhausted,
+                counter.GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureSizeBand.UpTo1MiB,
+                counter.GetProperty("sizeBand").GetString());
+            Assert.Equal(1, counter.GetProperty("count").GetInt64());
             // AC10 still holds on the refusal path.
             Assert.DoesNotContain("AKIA0000", tracer.Stderr, StringComparison.Ordinal);
             Assert.DoesNotContain(captureKey, tracer.Stderr, StringComparison.Ordinal);
@@ -1491,6 +1520,18 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     private static string Snapshot(StringBuilder buffer)
     {
         lock (buffer) { return buffer.ToString(); }
+    }
+
+    private static JsonElement StructuredTracerOutcome(string stderr)
+    {
+        string line = Assert.Single(
+            stderr.Split(
+                Environment.NewLine,
+                StringSplitOptions.RemoveEmptyEntries),
+            value => value.StartsWith(
+                "{\"contractVersion\":",
+                StringComparison.Ordinal));
+        return JsonDocument.Parse(line).RootElement.Clone();
     }
 
     private static object Observation(

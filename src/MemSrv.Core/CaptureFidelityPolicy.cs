@@ -278,9 +278,65 @@ public static class CaptureFidelityPolicy
     /// </summary>
     public static bool ContainsUnsupportedBinaryOmission(
         CaptureObservationCommand observation) =>
-        ContainsUnsupportedBinaryOmission(observation.SourcePayload, observation)
-        || observation.Events.Any(
-            item => ContainsUnsupportedBinaryOmission(item.Payload, observation));
+        UnsupportedBinaryOmissionByteCounts(observation).Count > 0;
+
+    /// <summary>
+    /// Returns the safe original byte count from every exact policy-owned
+    /// unsupported-binary omission in a command.
+    /// </summary>
+    public static IReadOnlyList<long> UnsupportedBinaryOmissionByteCounts(
+        CaptureObservationCommand observation)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        var counts = new List<long>();
+        CollectUnsupportedBinaryOmissionByteCounts(
+            observation.SourcePayload,
+            observation.SourceIdentity,
+            observation.SourcePosition,
+            observation.Locator.Kind,
+            counts);
+        foreach (CaptureEvent item in observation.Events)
+        {
+            CollectUnsupportedBinaryOmissionByteCounts(
+                item.Payload,
+                observation.SourceIdentity,
+                observation.SourcePosition,
+                observation.Locator.Kind,
+                counts);
+        }
+        return counts;
+    }
+
+    /// <summary>
+    /// Reconstructs the same exact policy-owned omission counts from canonical
+    /// observation and event payloads. Canonical observations do not expose
+    /// source position, so the policy marker's non-negative position remains
+    /// trusted through immutable scan provenance.
+    /// </summary>
+    public static IReadOnlyList<long> UnsupportedBinaryOmissionByteCounts(
+        CaptureObservationReceipt observation,
+        IEnumerable<JsonElement> eventPayloads)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        ArgumentNullException.ThrowIfNull(eventPayloads);
+        var counts = new List<long>();
+        CollectUnsupportedBinaryOmissionByteCounts(
+            observation.SafeSourcePayload,
+            observation.SourceIdentity,
+            sourcePosition: null,
+            observation.Locator.Kind,
+            counts);
+        foreach (JsonElement payload in eventPayloads)
+        {
+            CollectUnsupportedBinaryOmissionByteCounts(
+                payload,
+                observation.SourceIdentity,
+                sourcePosition: null,
+                observation.Locator.Kind,
+                counts);
+        }
+        return counts;
+    }
 
     /// <summary>
     /// Reports whether a command is exactly one of the adapter-owned v10
@@ -392,7 +448,11 @@ public static class CaptureFidelityPolicy
             || !omission.TryGetProperty(
                 "sourceIdentity",
                 out JsonElement sourceIdentity)
-            || !HasTrustedSourceIdentity(sourceIdentity, observation))
+            || !HasTrustedSourceIdentity(
+                sourceIdentity,
+                observation.SourceIdentity,
+                observation.SourcePosition,
+                observation.Locator.Kind))
         {
             return null;
         }
@@ -1084,9 +1144,12 @@ public static class CaptureFidelityPolicy
         return candidate;
     }
 
-    private static bool ContainsUnsupportedBinaryOmission(
+    private static void CollectUnsupportedBinaryOmissionByteCounts(
         JsonElement value,
-        CaptureObservationCommand observation)
+        CaptureSourceIdentity expectedIdentity,
+        long? sourcePosition,
+        string locatorKind,
+        List<long> counts)
     {
         switch (value.ValueKind)
         {
@@ -1097,26 +1160,35 @@ public static class CaptureFidelityPolicy
                             value,
                             property.Name,
                             property.Value,
-                            observation)
-                        || ContainsUnsupportedBinaryOmission(
-                            property.Value,
-                            observation))
+                            expectedIdentity,
+                            sourcePosition,
+                            locatorKind))
                     {
-                        return true;
+                        counts.Add(property.Value.GetProperty(
+                            "originalByteCount").GetInt64());
+                    }
+                    else
+                    {
+                        CollectUnsupportedBinaryOmissionByteCounts(
+                            property.Value,
+                            expectedIdentity,
+                            sourcePosition,
+                            locatorKind,
+                            counts);
                     }
                 }
-                return false;
+                break;
             case JsonValueKind.Array:
                 foreach (JsonElement item in value.EnumerateArray())
                 {
-                    if (ContainsUnsupportedBinaryOmission(item, observation))
-                    {
-                        return true;
-                    }
+                    CollectUnsupportedBinaryOmissionByteCounts(
+                        item,
+                        expectedIdentity,
+                        sourcePosition,
+                        locatorKind,
+                        counts);
                 }
-                return false;
-            default:
-                return false;
+                break;
         }
     }
 
@@ -1124,9 +1196,15 @@ public static class CaptureFidelityPolicy
         JsonElement parent,
         string name,
         JsonElement value,
-        CaptureObservationCommand observation)
+        CaptureSourceIdentity expectedIdentity,
+        long? sourcePosition,
+        string locatorKind)
     {
-        if (!IsUnsupportedBinaryOmission(value, observation))
+        if (!IsUnsupportedBinaryOmission(
+                value,
+                expectedIdentity,
+                sourcePosition,
+                locatorKind))
         {
             return false;
         }
@@ -1166,7 +1244,9 @@ public static class CaptureFidelityPolicy
 
     private static bool IsUnsupportedBinaryOmission(
         JsonElement value,
-        CaptureObservationCommand observation)
+        CaptureSourceIdentity expectedIdentity,
+        long? sourcePosition,
+        string locatorKind)
     {
         if (value.ValueKind != JsonValueKind.Object
             || !HasOnlyBinaryOmissionProperties(value)
@@ -1181,7 +1261,11 @@ public static class CaptureFidelityPolicy
             || !HasString(value, "policyVersion", CurrentVersion)
             || !value.TryGetProperty("sourceIdentity", out JsonElement sourceIdentity)
             || sourceIdentity.ValueKind != JsonValueKind.Object
-            || !HasTrustedSourceIdentity(sourceIdentity, observation))
+            || !HasTrustedSourceIdentity(
+                sourceIdentity,
+                expectedIdentity,
+                sourcePosition,
+                locatorKind))
         {
             return false;
         }
@@ -1219,7 +1303,9 @@ public static class CaptureFidelityPolicy
 
     private static bool HasTrustedSourceIdentity(
         JsonElement value,
-        CaptureObservationCommand observation)
+        CaptureSourceIdentity expectedIdentity,
+        long? expectedSourcePosition,
+        string expectedLocatorKind)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (JsonProperty property in value.EnumerateObject())
@@ -1236,24 +1322,26 @@ public static class CaptureFidelityPolicy
         }
 
         bool hasChildProperty = value.TryGetProperty("childId", out JsonElement child);
-        bool childMatches = observation.SourceIdentity.ChildId is null
+        bool childMatches = expectedIdentity.ChildId is null
             ? !hasChildProperty || child.ValueKind == JsonValueKind.Null
             : hasChildProperty
                 && child.ValueKind == JsonValueKind.String
                 && string.Equals(
                     child.GetString(),
-                    observation.SourceIdentity.ChildId,
+                    expectedIdentity.ChildId,
                     StringComparison.Ordinal);
         return seen.Count == (hasChildProperty ? 4 : 3)
             && HasString(
                 value,
                 "externalSessionId",
-                observation.SourceIdentity.ExternalSessionId)
+                expectedIdentity.ExternalSessionId)
             && childMatches
             && value.TryGetProperty("sourcePosition", out JsonElement position)
             && position.TryGetInt64(out long sourcePosition)
-            && sourcePosition == observation.SourcePosition
-            && HasString(value, "locatorKind", observation.Locator.Kind);
+            && (expectedSourcePosition is null
+                ? sourcePosition >= 0
+                : sourcePosition == expectedSourcePosition)
+            && HasString(value, "locatorKind", expectedLocatorKind);
     }
 
     private static bool IsMalformedJsonRepresentation(

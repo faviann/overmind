@@ -177,6 +177,81 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task BinaryRewriteBeyondContentBoundAppendsOnlyAWholeObservationOmission()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"binary-content-overflow-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        JsonElement sourcePayload = JsonSerializer.SerializeToElement(new
+        {
+            type = "response_item",
+            payload = new
+            {
+                type = "message",
+                content = Enumerable.Range(0, 300).Select(_ => new
+                {
+                    type = "binary_content",
+                    category = "attachment",
+                    byte_payload = new[] { 91, 92, 93 }
+                })
+            }
+        });
+        JsonElement safeEventPayload =
+            JsonSerializer.SerializeToElement(new { text = "safe event" });
+        var command = new CaptureObservationCommand(
+            1,
+            new CaptureSourceIdentity(sourceSessionId),
+            0,
+            new CaptureSourceLocator.NativeId($"binary-overflow-{Guid.NewGuid():N}"),
+            null,
+            new CaptureSource("codex", null, "response_item", null, null, null),
+            new CaptureAdapter("test", "1"),
+            sourcePayload,
+            [
+                new CaptureEvent(
+                    "message/0",
+                    0,
+                    "message",
+                    "user",
+                    safeEventPayload,
+                    null,
+                    [])
+            ],
+            null);
+        const int contentBound = 64 * 1_024;
+        Assert.True(
+            Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(
+                command,
+                CaptureLedger.JsonOptions)) < contentBound);
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxObservationBytes = contentBound }));
+
+        CaptureImportReceipt receipt = await ingestion.ImportAsync(binding, command);
+
+        Assert.Equal("new", receipt.Status);
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            receipt.Observation.SafeSourcePayload.GetProperty("omission")
+                .GetProperty("reason").GetString());
+        Assert.Equal(
+            "observation/omitted",
+            Assert.Single(receipt.Events).Event.PartKey);
+        string canonical = JsonSerializer.Serialize(receipt, CaptureLedger.JsonOptions);
+        Assert.DoesNotContain("\"byte_payload\"", canonical, StringComparison.Ordinal);
+        Assert.DoesNotContain("[91,92,93]", canonical, StringComparison.Ordinal);
+
+        CaptureImportReceipt retry = await ingestion.ImportAsync(binding, command);
+        Assert.Equal("already_accepted", retry.Status);
+        Assert.Equal(receipt.ObservationUuid, retry.ObservationUuid);
+    }
+
+    [Fact]
     public async Task OversizedContentIsCompactedAndSignedWithoutWholeOriginalAllocation()
     {
         string captureKey = CaptureCredential();

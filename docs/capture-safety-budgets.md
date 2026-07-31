@@ -67,6 +67,11 @@ asserts the deadline again after materialization. It walks already-parsed JSON
 without constructing a raw string or mutable JSON tree. A record with no valid
 binary candidate is returned unchanged; a record with a candidate is streamed
 into a byte-capped rewritten representation while its validated byte array is skipped.
+If that safe rewrite grows beyond the active ceiling, policy preserves the
+recognized-binary outcome and emits the bounded whole-observation
+`unsupported_binary_content` omission (or fails closed when the mandatory
+identity-bearing omission cannot fit); it never returns the smaller raw
+record.
 The compact record repeats the trusted source identity and position (plus
 locator kind) from the adapter or authenticated ingestion command; it never
 depends on optional block-local identity. Root-only Codex reasoning envelope

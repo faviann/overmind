@@ -71,7 +71,14 @@ authenticated API ingestion of raw `native_id` content remains valid because
 ingestion signs the original command before canonical omission. Binary
 classification and rewriting stream from the already-parsed source element
 into a buffer capped by the applicable fixed 1,000,000-byte transport or 128
-MiB content ceiling. Candidate classification, bounded rewriting,
+MiB content ceiling. Recognizing binary content is irreversible for the
+current operation: if the safe field-level rewrite grows beyond that ceiling,
+policy selects the same content-free whole-observation shape with
+`unsupported_binary_content` as its reason. It never restores the in-limit raw
+observation. The local `native_id` rule still refuses this outcome before
+claim; a verified `byte_range` may queue the bounded whole-observation
+omission, and authenticated ingestion may append it while signing the original
+command. Candidate classification, bounded rewriting,
 `JsonDocument` parsing, and root cloning/materialization share one absolute
 `MaxScanTime` deadline for the entire public fidelity operation; no phase or
 event receives a fresh clock, and the deadline is asserted after

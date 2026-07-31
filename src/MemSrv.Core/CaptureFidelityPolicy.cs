@@ -9,7 +9,7 @@ namespace MemSrv.Core;
 /// </summary>
 public static class CaptureFidelityPolicy
 {
-    public const string CurrentVersion = "capture-fidelity/2026-07-31.9";
+    public const string CurrentVersion = "capture-fidelity/2026-07-31.10";
     public const int ProductionTransportBytes = 1_000_000;
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
@@ -62,7 +62,7 @@ public static class CaptureFidelityPolicy
             deadline);
         if (rewritten.ExceededBound)
         {
-            return new(sourcePayload, 0);
+            return new(sourcePayload, 0, RewriteExceededBound: true);
         }
         return new(rewritten.Value, rewritten.OmissionCount);
     }
@@ -95,7 +95,10 @@ public static class CaptureFidelityPolicy
             deadline);
         if (rewrittenSource.ExceededBound)
         {
-            return new(observation, 0);
+            return OmitWholeObservationForUnsupportedBinary(
+                observation,
+                remaining,
+                deadline);
         }
         remaining -= rewrittenSource.SerializedBytes;
         int omissionCount = rewrittenSource.OmissionCount;
@@ -121,7 +124,12 @@ public static class CaptureFidelityPolicy
                 deadline);
             if (rewrittenPayload.ExceededBound)
             {
-                return new(observation, 0);
+                return OmitWholeObservationForUnsupportedBinary(
+                    observation,
+                    Math.Min(
+                        maxContentBytes,
+                        SafetyBudgets.Default.MaxObservationBytes),
+                    deadline);
             }
             remaining -= rewrittenPayload.SerializedBytes;
             omissionCount += rewrittenPayload.OmissionCount;
@@ -197,6 +205,75 @@ public static class CaptureFidelityPolicy
         return bounded with { Observation = snapshot };
     }
 
+    /// <summary>
+    /// Selects the content-free whole-observation representation required when
+    /// a recognized binary rewrite itself cannot fit the transport bound.
+    /// This is separate from ordinary over-limit serialization so an in-limit
+    /// raw request can never regain eligibility after its safe rewrite grew.
+    /// </summary>
+    public static BoundedCaptureRepresentation<CaptureObservationRequest>
+        SerializeUnsupportedBinaryOverflowForTransport(
+        CaptureObservationRequest observation,
+        int maxTransportBytes = ProductionTransportBytes)
+    {
+        if (maxTransportBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxTransportBytes),
+                maxTransportBytes,
+                "The transport bound must be positive.");
+        }
+
+        int effectiveBound = Math.Min(
+            maxTransportBytes,
+            ProductionTransportBytes);
+        CaptureObservationCommand validated =
+            CaptureObservationCommand.FromRequest(observation);
+        if (validated.Locator is CaptureSourceLocator.NativeId)
+        {
+            throw new InvalidOperationException(
+                "A native_id observation whose unsupported binary rewrite exceeds " +
+                "the transport bound fails closed because transport omission " +
+                "requires binding-stable content identity.");
+        }
+
+        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
+        long originalByteCount = CountSerializedBytes(observation, deadline);
+        CaptureObservationRequest omitted = OmitForTransport(
+            observation,
+            originalByteCount,
+            validated.SourceIdentity,
+            UnsupportedBinaryReason);
+        string omittedJson;
+        try
+        {
+            using var stream = new BoundedBufferSerializationStream(
+                effectiveBound,
+                deadline);
+            JsonSerializer.Serialize(stream, omitted, CaptureLedger.JsonOptions);
+            stream.AssertWithinDeadline();
+            omittedJson = Encoding.UTF8.GetString(stream.WrittenMemory.Span);
+        }
+        catch (CaptureRepresentationLimitException)
+        {
+            throw new InvalidOperationException(
+                "The required capture source identity and locator cannot fit " +
+                $"within the {effectiveBound}-byte transport limit.");
+        }
+        CaptureObservationRequest snapshot =
+            JsonSerializer.Deserialize<CaptureObservationRequest>(
+                omittedJson,
+                CaptureLedger.JsonOptions)
+            ?? throw new InvalidOperationException(
+                "The bounded transport representation could not be reconstructed.");
+        deadline.AssertWithinDeadline();
+        return new(
+            snapshot,
+            omittedJson,
+            originalByteCount,
+            WasOmitted: true);
+    }
+
     public static BoundedCaptureRepresentation<CaptureObservationCommand>
         SerializeForContent(
         CaptureObservationCommand observation,
@@ -217,7 +294,8 @@ public static class CaptureFidelityPolicy
             SerializeWithinLimit(
             observation,
             effectiveBound,
-            OmitForContentLimit,
+            (command, originalByteCount) =>
+                OmitForContentLimit(command, originalByteCount),
             _ => new SafetyScanException(
                 $"the observation budget of {effectiveBound} bytes was exceeded"));
         CaptureObservationRequest snapshot =
@@ -234,10 +312,11 @@ public static class CaptureFidelityPolicy
 
     private static CaptureObservationCommand OmitForContentLimit(
         CaptureObservationCommand observation,
-        long originalByteCount)
+        long originalByteCount,
+        string reason = ContentLimitReason)
     {
         JsonElement provenance = Provenance(
-            ContentLimitReason,
+            reason,
             originalByteCount,
             observation.SourceIdentity,
             observation.SourcePosition,
@@ -256,10 +335,11 @@ public static class CaptureFidelityPolicy
     private static CaptureObservationRequest OmitForTransport(
         CaptureObservationRequest observation,
         long originalByteCount,
-        CaptureSourceIdentity canonicalIdentity)
+        CaptureSourceIdentity canonicalIdentity,
+        string reason = TransportLimitReason)
     {
         JsonElement provenance = Provenance(
-            TransportLimitReason,
+            reason,
             originalByteCount,
             canonicalIdentity,
             observation.SourcePosition,
@@ -321,14 +401,42 @@ public static class CaptureFidelityPolicy
 
     private static long CountSerializedBytes<T>(T observation)
     {
-        using var counter = new CountingSerializationStream(
-            SafetyBudgets.Default.MaxScanTime);
+        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
+        return CountSerializedBytes(observation, deadline);
+    }
+
+    private static long CountSerializedBytes<T>(
+        T observation,
+        GovernedDeadline deadline)
+    {
+        using var counter = new CountingSerializationStream(deadline);
         JsonSerializer.Serialize(
             counter,
             observation,
             CaptureLedger.JsonOptions);
         counter.AssertWithinDeadline();
         return counter.BytesWritten;
+    }
+
+    private static BinaryFidelitySelection<CaptureObservationCommand>
+        OmitWholeObservationForUnsupportedBinary(
+            CaptureObservationCommand observation,
+            long effectiveBound,
+            GovernedDeadline deadline)
+    {
+        long originalByteCount = CountSerializedBytes(observation, deadline);
+        CaptureObservationCommand omitted = OmitForContentLimit(
+            observation,
+            originalByteCount,
+            UnsupportedBinaryReason);
+        long omittedByteCount = CountSerializedBytes(omitted, deadline);
+        if (omittedByteCount > effectiveBound)
+        {
+            throw new SafetyScanException(
+                "the required unsupported-binary omission cannot fit within " +
+                $"the observation budget of {effectiveBound} bytes");
+        }
+        return new(omitted, OmissionCount: 1);
     }
 
     private static bool IsAdapterOwnedCodexReasoningEnvelope(
@@ -1025,7 +1133,8 @@ public sealed record BoundedCaptureRepresentation<T>(
 
 public sealed record BinaryFidelitySelection<T>(
     T Observation,
-    int OmissionCount)
+    int OmissionCount,
+    bool RewriteExceededBound = false)
 {
     public bool WasOmitted => OmissionCount > 0;
 }

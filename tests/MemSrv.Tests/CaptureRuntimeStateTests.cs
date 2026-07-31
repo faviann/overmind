@@ -514,6 +514,65 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task BinaryRewriteBeyondTransportBoundQueuesOnlyAWholeObservationOmission()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-binary-overflow-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        string rawRecord = JsonSerializer.Serialize(new
+        {
+            type = "synthetic",
+            content = Enumerable.Range(0, 3_400).Select(_ => new
+            {
+                type = "binary_content",
+                category = "attachment",
+                byte_payload = new[] { 91, 92, 93 }
+            })
+        });
+        await File.WriteAllTextAsync(
+            transcript,
+            rawRecord + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            CaptureRuntimeQueueItem claim = Assert.Single(
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new CodexJsonlAdapter(),
+                    transcript,
+                    "binary-overflow-runtime",
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    terminalAtEndOfFile: true));
+
+            Assert.True(
+                Encoding.UTF8.GetByteCount(claim.RedactedSafeCandidate)
+                <= CaptureFidelityPolicy.ProductionTransportBytes);
+            using JsonDocument queued = JsonDocument.Parse(claim.RedactedSafeCandidate);
+            Assert.Equal(
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                queued.RootElement.GetProperty("sourcePayload")
+                    .GetProperty("omission").GetProperty("reason").GetString());
+            Assert.Equal(
+                "observation/omitted",
+                Assert.Single(queued.RootElement.GetProperty("events").EnumerateArray())
+                    .GetProperty("partKey").GetString());
+            string durableState = await File.ReadAllTextAsync(
+                Path.Combine(directory, "state", "capture-state.json"));
+            Assert.DoesNotContain("\"byte_payload\"", durableState, StringComparison.Ordinal);
+            Assert.DoesNotContain("[91,92,93]", durableState, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task NativeBinaryMediaFailsBeforeClaimAndPersistsNoRawContent()
     {
         string directory = Path.Combine(

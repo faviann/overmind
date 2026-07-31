@@ -28,7 +28,7 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 source.SourcePosition,
                 source.Locator.Kind,
                 CaptureFidelityPolicy.ProductionTransportBytes);
-        if (fidelity.WasOmitted
+        if ((fidelity.WasOmitted || fidelity.RewriteExceededBound)
             && source.Locator is CaptureSourceLocator.NativeId)
         {
             throw new InvalidDataException(
@@ -90,6 +90,14 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             record.Clone(),
             events,
             SourceIdentity: source.SourceIdentity);
+        if (fidelity.RewriteExceededBound)
+        {
+            request = CaptureFidelityPolicy
+                .SerializeUnsupportedBinaryOverflowForTransport(
+                    request,
+                    CaptureFidelityPolicy.ProductionTransportBytes)
+                .Observation;
+        }
         return new CaptureSourcePositionOutcome.Terminal(source.SourcePosition, request);
     }
 

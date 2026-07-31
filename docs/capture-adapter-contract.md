@@ -104,8 +104,12 @@ Adapters are versioned tolerant tagged unions:
   ordinary replayable sibling evidence after the same governed recursive
   rewrite, so nested valid `binary_content` cannot bypass the policy.
   Safe sibling metadata, a source-stated `omission`, and model-visible `text`
-  likewise remain ordinary replayable evidence. Untagged values and malformed byte
-  representations are not classified by this union. Only direct `signature`
+  likewise remain ordinary replayable evidence. If the safe field-level
+  rewrite itself exceeds the active fidelity ceiling, recognition is retained
+  and capture selects a content-free whole-observation
+  `unsupported_binary_content` omission; the smaller raw representation never
+  regains eligibility. Untagged values and malformed byte representations are
+  not classified by this union. Only direct `signature`
   and `encrypted_content` children reached from the root known Codex reasoning
   payload or the root adapter-owned opaque envelope remain ordinary metadata.
   These are separate closed traversal contexts: a raw source record can earn

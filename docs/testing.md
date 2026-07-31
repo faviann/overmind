@@ -86,9 +86,9 @@ conflicting legacy/current identity before durable claim. `CaptureFidelityPolicy
 is the authorized mechanism seam for proving that pathological over-limit JSON
 is streaming-counted with bounded additional allocation and elapsed time,
 count/materialize mutation cannot return an over-cap representation, and an
-    over-limit native locator fails closed. The runtime state seam proves such a
-    native record, and a Codex `native_id` record requiring valid binary omission,
-    claims nothing and persists no raw content. `CaptureIngestion` is
+over-limit native locator fails closed. The runtime state seam proves such a
+native record, and a Codex `native_id` record requiring valid binary omission,
+claims nothing and persists no raw content. `CaptureIngestion` is
 the corresponding seam for proving content compaction, the fixed 128 MiB clamp,
 and keyed-signature streaming before append.
 The production deadline is deliberately not caller-injectable. Bounded tests

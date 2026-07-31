@@ -488,6 +488,93 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task AuthorizedOperatorNavigatesEveryStoredSessionRelationshipInBothDirections()
+    {
+        string binding = $"codex-navigation-complete-{Guid.NewGuid():N}";
+        string captureKey = CaptureCredential();
+        string parentNativeId = $"navigation-parent-{Guid.NewGuid():N}";
+        await EnrollAsync(binding, captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage parentResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                parentNativeId,
+                childId: null,
+                $"navigation-parent-record-{Guid.NewGuid():N}",
+                parentNativeId: null,
+                workingDirectory: null));
+        parentResponse.EnsureSuccessStatusCode();
+        JsonElement parentReceipt = await parentResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid parentStreamUuid = parentReceipt.GetProperty("observation")
+            .GetProperty("sourceStreamUuid").GetGuid();
+
+        string[] relationshipTypes = ["parent_session", "spawned_by", "forked_from"];
+        var relatedStreams = new Dictionary<string, Guid>(StringComparer.Ordinal);
+        foreach (string relationshipType in relationshipTypes)
+        {
+            using HttpResponseMessage relatedResponse = await client.PostAsJsonAsync(
+                "/capture/v1/observations",
+                SessionRelationshipObservation(
+                    $"navigation-source-{relationshipType}-{Guid.NewGuid():N}",
+                    $"navigation-child-{relationshipType}-{Guid.NewGuid():N}",
+                    $"navigation-record-{relationshipType}-{Guid.NewGuid():N}",
+                    parentNativeId,
+                    workingDirectory: null,
+                    relationshipType: relationshipType));
+            relatedResponse.EnsureSuccessStatusCode();
+            JsonElement relatedReceipt =
+                await relatedResponse.Content.ReadFromJsonAsync<JsonElement>();
+            relatedStreams.Add(
+                relationshipType,
+                relatedReceipt.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid());
+        }
+
+        JsonElement parentNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate", parentStreamUuid.ToString(),
+            "--namespace", "capture/unscoped")).RootElement;
+        Dictionary<string, JsonElement> incomingByType = parentNavigation
+            .GetProperty("relationships")
+            .EnumerateArray()
+            .ToDictionary(
+                edge => edge.GetProperty("evidence")
+                    .GetProperty("relationshipType").GetString()!,
+                edge => edge.Clone(),
+                StringComparer.Ordinal);
+        Assert.Equal(relationshipTypes.Order(), incomingByType.Keys.Order());
+        foreach ((string relationshipType, Guid relatedStreamUuid) in relatedStreams)
+        {
+            JsonElement incoming = incomingByType[relationshipType];
+            Assert.Equal("incoming", incoming.GetProperty("direction").GetString());
+            Assert.Equal("available", incoming.GetProperty("availability").GetString());
+            Assert.Equal(
+                relatedStreamUuid,
+                incoming.GetProperty("evidence").GetProperty("sourceStreamUuid").GetGuid());
+            Assert.Equal(
+                relatedStreamUuid,
+                incoming.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+
+            JsonElement reverse = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "navigate", relatedStreamUuid.ToString(),
+                "--namespace", "capture/unscoped")).RootElement;
+            JsonElement outgoing = Assert.Single(
+                reverse.GetProperty("relationships").EnumerateArray());
+            Assert.Equal("outgoing", outgoing.GetProperty("direction").GetString());
+            Assert.Equal("available", outgoing.GetProperty("availability").GetString());
+            Assert.Equal(
+                relationshipType,
+                outgoing.GetProperty("evidence").GetProperty("relationshipType").GetString());
+            Assert.Equal(
+                parentNativeId,
+                outgoing.GetProperty("evidence").GetProperty("targetNativeId").GetString());
+            Assert.Equal(
+                parentStreamUuid,
+                outgoing.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+        }
+    }
+
+    [Fact]
     public async Task UnavailableExplicitRelationshipTargetDoesNotLeakThroughPackagedNavigation()
     {
         string binding = $"codex-explicit-navigation-{Guid.NewGuid():N}";
@@ -5652,7 +5739,8 @@ public sealed class CaptureTests : HttpSeamTestBase
         string nativeId,
         string? parentNativeId,
         string? workingDirectory,
-        Guid? targetSourceStreamUuid = null) => new
+        Guid? targetSourceStreamUuid = null,
+        string relationshipType = "parent_session") => new
         {
             contractVersion = 1,
             sourceIdentity = new { externalSessionId, childId },
@@ -5684,7 +5772,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                         {
                             new
                             {
-                                type = "parent_session",
+                                type = relationshipType,
                                 target = new
                                 {
                                     sourceStreamUuid = targetSourceStreamUuid,

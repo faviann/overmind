@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using CaptureAdapters;
 using MemSrv.Core;
@@ -9,6 +10,114 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
 {
+    [Fact]
+    public void CodexMalformedTailStaysIncompleteUntilTerminalEvidenceExists()
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes("""{"type":"response_item","payload":""");
+        TrustedSourceObservation source = Assert.Single(
+            JsonlSourceReader.Read(
+                bytes,
+                "malformed-active-tail",
+                terminalAtEndOfFile: false));
+
+        var outcome = Assert.IsType<CaptureSourcePositionOutcome.Incomplete>(
+            new CodexJsonlAdapter().Adapt(source));
+
+        Assert.Equal(0, outcome.SourcePosition);
+        Assert.Equal("source record may still be extended", outcome.Reason);
+        var locator = Assert.IsType<CaptureSourceLocator.ByteRange>(source.Locator);
+        Assert.Equal(0, locator.Offset);
+        Assert.Equal(bytes.Length, locator.Length);
+    }
+
+    [Fact]
+    public void TerminalReadableMalformedCodexRecordBecomesOpaqueParseErrorEvidence()
+    {
+        const string malformed = """{"type":"response_item","payload":{"text":"readable"}""";
+        byte[] bytes = Encoding.UTF8.GetBytes(malformed);
+        TrustedSourceObservation source = Assert.Single(
+            JsonlSourceReader.Read(
+                bytes,
+                new CaptureSourceIdentity("malformed-readable", "child-readable"),
+                terminalAtEndOfFile: true));
+
+        CaptureObservationRequest observation =
+            Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                new CodexJsonlAdapter().Adapt(source)).Observation;
+
+        Assert.Equal("malformed_json", observation.Source.RecordType);
+        Assert.Equal(malformed, observation.SourcePayload.GetProperty("opaqueText").GetString());
+        JsonElement parseError = observation.SourcePayload.GetProperty("parseError");
+        Assert.Equal("json_parse_error", parseError.GetProperty("reason").GetString());
+        Assert.Equal(
+            CaptureFidelityPolicy.CurrentVersion,
+            parseError.GetProperty("policyVersion").GetString());
+        JsonElement sourceIdentity = parseError.GetProperty("sourceIdentity");
+        Assert.Equal(
+            "malformed-readable",
+            sourceIdentity.GetProperty("externalSessionId").GetString());
+        Assert.Equal("child-readable", sourceIdentity.GetProperty("childId").GetString());
+        Assert.Equal(0, sourceIdentity.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal("byte_range", sourceIdentity.GetProperty("locatorKind").GetString());
+
+        CaptureEvent captured = Assert.Single(observation.Events);
+        Assert.Equal("opaque", captured.Kind);
+        Assert.Equal("unknown", captured.Actor);
+        Assert.Equal(
+            malformed,
+            captured.Payload.GetProperty("source").GetProperty("opaqueText").GetString());
+        Assert.Equal(
+            "json_parse_error",
+            captured.Payload.GetProperty("source").GetProperty("parseError")
+                .GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public void TerminalInvalidEncodingBecomesContentFreeSafeOmission()
+    {
+        byte[] bytes = [0x7b, 0x22, 0x74, 0x79, 0x70, 0x65, 0x22, 0x3a, 0xff];
+        TrustedSourceObservation source = Assert.Single(
+            JsonlSourceReader.Read(
+                bytes,
+                new CaptureSourceIdentity("malformed-invalid-encoding"),
+                terminalAtEndOfFile: true));
+
+        CaptureObservationRequest observation =
+            Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                new CodexJsonlAdapter().Adapt(source)).Observation;
+
+        Assert.Equal("source_record_omission", observation.Source.RecordType);
+        Assert.False(observation.SourcePayload.TryGetProperty("opaqueText", out _));
+        JsonElement omission = observation.SourcePayload.GetProperty("omission");
+        Assert.Equal(
+            "source_record_uninspectable",
+            omission.GetProperty("reason").GetString());
+        Assert.Equal(bytes.Length, omission.GetProperty("originalByteCount").GetInt64());
+        Assert.Equal(
+            CaptureFidelityPolicy.CurrentVersion,
+            omission.GetProperty("policyVersion").GetString());
+        Assert.Equal(
+            "invalid_utf8",
+            omission.GetProperty("contentPolicy").GetString());
+        JsonElement sourceIdentity = omission.GetProperty("sourceIdentity");
+        Assert.Equal(
+            "malformed-invalid-encoding",
+            sourceIdentity.GetProperty("externalSessionId").GetString());
+        Assert.Equal(0, sourceIdentity.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal("byte_range", sourceIdentity.GetProperty("locatorKind").GetString());
+
+        string representation = observation.SourcePayload.GetRawText();
+        Assert.DoesNotContain('\uFFFD', representation);
+        Assert.DoesNotContain("\"typ", representation, StringComparison.Ordinal);
+        CaptureEvent captured = Assert.Single(observation.Events);
+        Assert.Equal("opaque", captured.Kind);
+        Assert.Equal("unknown", captured.Actor);
+        Assert.Equal(
+            "source_record_uninspectable",
+            captured.Payload.GetProperty("source").GetProperty("omission")
+                .GetProperty("reason").GetString());
+    }
+
     [Theory]
     [InlineData(
         "codex-cli-0.77.parent-only.synthetic.jsonl",
@@ -444,7 +553,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         Assert.Equal("turn_context", turnContext.Source.RecordType);
         Assert.Equal("gpt-5.6-terra", turnContext.Source.Model);
         Assert.Null(turnContext.Source.Provider);
-        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "9"), adapter.Identity);
+        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "10"), adapter.Identity);
     }
 
     [Fact]
@@ -1015,7 +1124,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         });
         Assert.All(
             terminal,
-            outcome => Assert.Equal("9", outcome.Observation.Adapter.Version));
+            outcome => Assert.Equal("10", outcome.Observation.Adapter.Version));
 
         CaptureObservationRequest session = terminal[0].Observation;
         CaptureEvent sessionContext = Assert.Single(session.Events);
@@ -1433,7 +1542,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .ToArray();
 
         Assert.Equal(6, terminal.Length);
-        Assert.Equal("9", terminal[0].Observation.Adapter.Version);
+        Assert.Equal("10", terminal[0].Observation.Adapter.Version);
         Assert.Equal(
             [2, 1, 1, 1, 2, 1],
             terminal.Select(outcome => outcome.Observation.Events.Count));

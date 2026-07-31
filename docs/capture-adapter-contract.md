@@ -77,9 +77,11 @@ server recognizes prior Codex adapter signatures narrowly where the record's
 derived events are unchanged and only adapter/signature identity moved. A
 record whose derived tool events changed in v7, whose relationship facts
 changed in v8, whose binary safe representation changed in v9, a changed
-locator, or changed source content remains a conflict. Unchanged pre-v9 records
-may converge under v9 compatibility; a command carrying the v9 binary-fidelity
-representation is never offered a prior-adapter compatibility signature.
+terminal-malformed representation in v10, a changed locator, or changed
+source content remains a conflict. Unchanged pre-v10 records may converge under
+v10 compatibility; a command carrying the v9 binary-fidelity representation or
+either v10 terminal-malformed representation is never offered a prior-adapter
+compatibility signature.
 
 ## Tolerant parsing
 
@@ -87,6 +89,26 @@ Adapters are versioned tolerant tagged unions:
 
 - known discriminators map to canonical message, tool call/result, error,
   compaction, lifecycle, and other earned event kinds;
+- an unterminated final JSONL record in an active Codex rollout remains
+  `Incomplete`, even when its current bytes are malformed JSON or invalid
+  UTF-8. Newline termination, archive placement, or equivalent configured
+  terminal evidence makes that exact byte range terminal; capture never treats
+  a readable or decodable prefix as the complete record;
+- terminal malformed JSON whose complete bytes decode as strict UTF-8 becomes
+  one `opaque` event with canonical `unknown` actor because the source states no
+  actor. Its scanned `opaqueText` is the complete record
+  text, and `parseError` retains the fixed `json_parse_error` reason, fidelity
+  policy version, trusted external session/optional child, source position,
+  and `byte_range` locator kind. Capture does not repair it or guess a known
+  tagged-union variant;
+- terminal malformed JSON that cannot be decoded as strict UTF-8 becomes one
+  content-free opaque omission, likewise with canonical `unknown` actor. The
+  omission retains only the fixed
+  `source_record_uninspectable` reason, original record-content byte count,
+  `invalid_utf8` content policy, fidelity policy version, and the same trusted
+  source identity/position/locator-kind provenance. It retains no decoded
+  prefix, replacement-character text, or raw bytes. Both deterministic
+  terminal outcomes advance normally after the universal safety gate;
 - unsupported record or content variants become `opaque` events and retain
   their complete scanned source representation, including discriminators,
   additive fields, and safety-redacted sensitive evidence after ingestion;
@@ -237,6 +259,8 @@ The synthetic, version-labelled families are:
 - `fixtures/adapter-conformance/codex-cli-0.120.parent-fork.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.nested-child.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.144.absent-relationship.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-terminal-malformed-readable.synthetic.txt`
+- `fixtures/adapter-conformance/codex-terminal-invalid-utf8.synthetic.hex`
 - `fixtures/adapter-conformance/claude-code-2.1.201.synthetic.jsonl`
 
 The Codex and Claude general families pass through the same conformance
@@ -264,6 +288,9 @@ records. The 0.146 binary/media family covers all five closed unsupported-byte
 categories, mandatory trusted source identity, safe metadata and model-visible
 text retention, content-free original-byte-count omissions, root opaque
 signature/encrypted negative controls, and a spoofed nested-wrapper regression.
+The terminal-malformed fixtures cover complete readable parse-error evidence
+including local redaction and content-free invalid-UTF-8 omission without
+storing a replacement-decoded prefix.
 The built `CodexCaptureTracer` consumes this family through scheduled transcript
 discovery, authenticated capture, deterministic retry, and `memctl` operator
 receipt reads; the legacy three-record compatibility fixture remains unchanged.

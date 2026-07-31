@@ -14,6 +14,9 @@ public static class CaptureFidelityPolicy
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
     public const string UnsupportedBinaryReason = "unsupported_binary_content";
+    public const string MalformedJsonReason = "json_parse_error";
+    public const string UninspectableSourceRecordReason = "source_record_uninspectable";
+    public const string InvalidUtf8ContentPolicy = "invalid_utf8";
     public const string BinaryOmissionField = "capture_fidelity_omission";
 
     private static readonly HashSet<string> UnsupportedBinaryCategories =
@@ -278,6 +281,56 @@ public static class CaptureFidelityPolicy
         ContainsUnsupportedBinaryOmission(observation.SourcePayload, observation)
         || observation.Events.Any(
             item => ContainsUnsupportedBinaryOmission(item.Payload, observation));
+
+    /// <summary>
+    /// Reports whether a command is exactly one of the adapter-owned v10
+    /// terminal-record fidelity representations. The source discriminator
+    /// alone is source-owned and therefore insufficient.
+    /// </summary>
+    public static bool IsAdapterOwnedTerminalMalformedRepresentation(
+        CaptureObservationCommand observation)
+    {
+        if (observation.ContractVersion != 1
+            || !string.Equals(observation.Source.Harness, "codex", StringComparison.Ordinal)
+            || !string.Equals(
+                observation.Adapter.Name,
+                "codex-synthetic-jsonl",
+                StringComparison.Ordinal)
+            || !string.Equals(observation.Adapter.Version, "10", StringComparison.Ordinal)
+            || observation.Locator is not CaptureSourceLocator.ByteRange
+            || observation.SourceTimestamp is not null
+            || observation.RouteEvidence is not null
+            || observation.Source.HarnessVersion is not null
+            || observation.Source.Model is not null
+            || observation.Source.Provider is not null
+            || !string.Equals(
+                observation.Source.MaterialKind,
+                "persisted_record",
+                StringComparison.Ordinal)
+            || observation.Events is not [CaptureEvent terminalEvent]
+            || !string.Equals(terminalEvent.PartKey, "record:opaque", StringComparison.Ordinal)
+            || terminalEvent.PartOrder != 0
+            || !string.Equals(terminalEvent.Kind, "opaque", StringComparison.Ordinal)
+            || !string.Equals(terminalEvent.Actor, "unknown", StringComparison.Ordinal)
+            || terminalEvent.OccurredAt is not null
+            || terminalEvent.Relationships is not { Count: 0 }
+            || !IsExactTerminalEventProjection(
+                terminalEvent.Payload,
+                observation.Source.RecordType,
+                observation.SourcePayload))
+        {
+            return false;
+        }
+
+        return observation.Source.RecordType switch
+        {
+            "malformed_json" =>
+                IsMalformedJsonRepresentation(observation.SourcePayload, observation),
+            "source_record_omission" =>
+                IsUninspectableRecordRepresentation(observation.SourcePayload, observation),
+            _ => false
+        };
+    }
 
     public static BoundedCaptureRepresentation<CaptureObservationRequest>
         SerializeForTransport(
@@ -1133,6 +1186,110 @@ public static class CaptureFidelityPolicy
             && position.TryGetInt64(out long sourcePosition)
             && sourcePosition == observation.SourcePosition
             && HasString(value, "locatorKind", observation.Locator.Kind);
+    }
+
+    private static bool IsMalformedJsonRepresentation(
+        JsonElement value,
+        CaptureObservationCommand observation) =>
+        HasOnlyProperties(value, "opaqueText", "parseError")
+        && value.TryGetProperty("opaqueText", out JsonElement opaqueText)
+        && opaqueText.ValueKind == JsonValueKind.String
+        && !opaqueText.ValueEquals(string.Empty)
+        && value.TryGetProperty("parseError", out JsonElement parseError)
+        && HasOnlyProperties(parseError, "reason", "policyVersion", "sourceIdentity")
+        && HasString(parseError, "reason", MalformedJsonReason)
+        && HasString(parseError, "policyVersion", CurrentVersion)
+        && parseError.TryGetProperty("sourceIdentity", out JsonElement sourceIdentity)
+        && HasTerminalRecordSourceIdentity(sourceIdentity, observation);
+
+    private static bool IsUninspectableRecordRepresentation(
+        JsonElement value,
+        CaptureObservationCommand observation) =>
+        HasOnlyProperties(value, "omission")
+        && value.TryGetProperty("omission", out JsonElement omission)
+        && HasOnlyProperties(
+            omission,
+            "reason",
+            "originalByteCount",
+            "policyVersion",
+            "contentPolicy",
+            "sourceIdentity")
+        && HasString(omission, "reason", UninspectableSourceRecordReason)
+        && omission.TryGetProperty("originalByteCount", out JsonElement byteCount)
+        && byteCount.TryGetInt64(out long count)
+        && count > 0
+        && HasTerminalRecordLength(count, observation)
+        && HasString(omission, "policyVersion", CurrentVersion)
+        && HasString(omission, "contentPolicy", InvalidUtf8ContentPolicy)
+        && omission.TryGetProperty("sourceIdentity", out JsonElement sourceIdentity)
+        && HasTerminalRecordSourceIdentity(sourceIdentity, observation);
+
+    private static bool HasTerminalRecordSourceIdentity(
+        JsonElement value,
+        CaptureObservationCommand observation)
+    {
+        if (!HasOnlyProperties(
+                value,
+                "externalSessionId",
+                "childId",
+                "sourcePosition",
+                "locatorKind")
+            || !HasString(
+                value,
+                "externalSessionId",
+                observation.SourceIdentity.ExternalSessionId)
+            || !value.TryGetProperty("childId", out JsonElement child)
+            || !value.TryGetProperty("sourcePosition", out JsonElement position)
+            || !position.TryGetInt64(out long sourcePosition)
+            || sourcePosition != observation.SourcePosition
+            || !HasString(value, "locatorKind", "byte_range"))
+        {
+            return false;
+        }
+
+        return observation.SourceIdentity.ChildId is null
+            ? child.ValueKind == JsonValueKind.Null
+            : child.ValueKind == JsonValueKind.String
+                && string.Equals(
+                    child.GetString(),
+                    observation.SourceIdentity.ChildId,
+                    StringComparison.Ordinal);
+    }
+
+    private static bool HasTerminalRecordLength(
+        long contentByteCount,
+        CaptureObservationCommand observation) =>
+        observation.Locator is CaptureSourceLocator.ByteRange range
+        && range.Length - contentByteCount is >= 0 and <= 2;
+
+    private static bool IsExactTerminalEventProjection(
+        JsonElement value,
+        string? recordType,
+        JsonElement sourcePayload) =>
+        recordType is not null
+        && HasOnlyProperties(value, "recordType", "payloadType", "source")
+        && HasString(value, "recordType", recordType)
+        && value.TryGetProperty("payloadType", out JsonElement payloadType)
+        && payloadType.ValueKind == JsonValueKind.Null
+        && value.TryGetProperty("source", out JsonElement source)
+        && JsonElement.DeepEquals(source, sourcePayload);
+
+    private static bool HasOnlyProperties(JsonElement value, params string[] expected)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var remaining = new HashSet<string>(expected, StringComparer.Ordinal);
+        foreach (JsonProperty property in value.EnumerateObject())
+        {
+            if (!remaining.Remove(property.Name))
+            {
+                return false;
+            }
+        }
+        return remaining.Count == 0;
     }
 
     private static bool HasOptionalNonBlankString(

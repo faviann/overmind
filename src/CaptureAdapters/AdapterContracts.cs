@@ -13,12 +13,21 @@ public sealed record TrustedSourceObservation(
     CaptureSourceLocator Locator,
     CaptureSourceMaterialKind MaterialKind,
     JsonElement SourcePayload,
-    bool IsTerminal);
+    bool IsTerminal,
+    CaptureSourceRecordInterpretation RecordInterpretation =
+        CaptureSourceRecordInterpretation.Structured);
 
 public enum CaptureSourceMaterialKind
 {
     PersistedRecord,
     HookFact
+}
+
+public enum CaptureSourceRecordInterpretation
+{
+    Structured,
+    MalformedReadableText,
+    Uninspectable
 }
 
 /// <summary>

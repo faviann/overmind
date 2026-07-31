@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "9");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "10");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -22,10 +22,15 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 
         JsonElement record = source.SourcePayload;
         bool isObjectRecord = record.ValueKind == JsonValueKind.Object;
-        string? recordType = isObjectRecord
-            ? JsonAdapterHelpers.NullableString(record, "type")
-                ?? JsonAdapterHelpers.NullableString(record, "hook_event_name")
-            : null;
+        string? recordType = source.RecordInterpretation switch
+        {
+            CaptureSourceRecordInterpretation.MalformedReadableText => "malformed_json",
+            CaptureSourceRecordInterpretation.Uninspectable => "source_record_omission",
+            _ when isObjectRecord =>
+                JsonAdapterHelpers.NullableString(record, "type")
+                ?? JsonAdapterHelpers.NullableString(record, "hook_event_name"),
+            _ => null
+        };
         string? harnessVersion = isObjectRecord
             ? UsableString(record, "cli_version")
                 ?? UsableString(record, "version")
@@ -55,7 +60,10 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             }
         }
 
-        IReadOnlyList<CaptureEvent> events = isUnsupportedShape
+        bool requiresOpaqueRecordEvent =
+            source.RecordInterpretation is not CaptureSourceRecordInterpretation.Structured
+            || isUnsupportedShape;
+        IReadOnlyList<CaptureEvent> events = requiresOpaqueRecordEvent
             ? [Opaque(recordType, null, record, "record:opaque")]
             : Interpret(record, recordType, payload, source.SourcePosition);
         var request = new CaptureObservationRequest(

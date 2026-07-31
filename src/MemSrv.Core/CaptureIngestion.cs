@@ -478,7 +478,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (!string.Equals(command.Source.Harness, "codex", StringComparison.Ordinal)
             || !string.Equals(
                 command.Adapter.Name, "codex-synthetic-jsonl", StringComparison.Ordinal)
-            || command.Adapter.Version is not ("7" or "8" or "9"))
+            || command.Adapter.Version is not ("7" or "8" or "9" or "10"))
         {
             return [];
         }
@@ -490,6 +490,11 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             "9" when binaryFidelityWasOmitted
                 || CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(command) => [],
             "9" => [.. PreVersion7CodexAdapterVersions, "7", "8"],
+            "10" when binaryFidelityWasOmitted
+                || CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(command)
+                || CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(command)
+                    => [],
+            "10" => [.. PreVersion7CodexAdapterVersions, "7", "8", "9"],
             _ => []
         };
         var signatures = new List<string>(priorVersions.Length * 2);

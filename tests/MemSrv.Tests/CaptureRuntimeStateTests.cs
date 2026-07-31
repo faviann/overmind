@@ -11,6 +11,156 @@ namespace MemSrv.Tests;
 
 public sealed class CaptureRuntimeStateTests
 {
+    [Fact]
+    public async Task MalformedTailsAdvanceOnlyAfterTerminalEvidenceAndRetriesRestartSafely()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-malformed-tail-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        string complete = CodexMessageRecord("complete");
+        const string readableMalformed = """{"type":"response_item","payload":{"text":"terminal"}""";
+        byte[] activeBytes = Encoding.UTF8.GetBytes(
+            complete + "\n" + readableMalformed);
+        await File.WriteAllBytesAsync(transcript, activeBytes);
+
+        try
+        {
+            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var adapter = new CodexJsonlAdapter();
+            var firstState = new FileCaptureRuntimeState(stateDirectory);
+
+            CaptureRuntimeQueueItem first = Assert.Single(
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter, transcript, "malformed-runtime", firstState, gate));
+            Assert.Equal(0, first.SourcePosition);
+            CaptureRuntimeStreamState deferred = Assert.Single(
+                (await firstState.ReadAsync()).Streams);
+            Assert.Equal(0, deferred.EnqueuedThrough);
+            Assert.Single(deferred.Queue);
+
+            Assert.Empty(await CodexCaptureClaimer.ClaimCompletedAsync(
+                adapter,
+                transcript,
+                "malformed-runtime",
+                new FileCaptureRuntimeState(stateDirectory),
+                gate));
+            Assert.Equal(
+                activeBytes,
+                await File.ReadAllBytesAsync(transcript));
+
+            await File.AppendAllTextAsync(transcript, "\n", new UTF8Encoding(false));
+            CaptureRuntimeQueueItem readable = Assert.Single(
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    transcript,
+                    "malformed-runtime",
+                    new FileCaptureRuntimeState(stateDirectory),
+                    gate));
+            Assert.Equal(1, readable.SourcePosition);
+            using (JsonDocument queued = JsonDocument.Parse(readable.RedactedSafeCandidate))
+            {
+                JsonElement observation = queued.RootElement;
+                Assert.Equal(
+                    "malformed_json",
+                    observation.GetProperty("source").GetProperty("recordType").GetString());
+                Assert.Equal(
+                    readableMalformed,
+                    observation.GetProperty("sourcePayload")
+                        .GetProperty("opaqueText").GetString());
+                Assert.Equal(
+                    "json_parse_error",
+                    observation.GetProperty("sourcePayload")
+                        .GetProperty("parseError").GetProperty("reason").GetString());
+            }
+            long readableEnd = Encoding.UTF8.GetByteCount(
+                complete + "\n" + readableMalformed + "\n");
+            Assert.Equal(
+                readableEnd,
+                readable.DeterministicLocatorEvidence.PrefixEvidence.ByteLength);
+            Assert.Equal(
+                Encoding.UTF8.GetByteCount(complete + "\n"),
+                readable.DeterministicLocatorEvidence.ByteOffset);
+            Assert.Equal(
+                Encoding.UTF8.GetByteCount(readableMalformed + "\n"),
+                readable.DeterministicLocatorEvidence.ByteLength);
+
+            byte[] invalidTail = [0x7b, 0x22, 0x74, 0x79, 0x70, 0x65, 0x22, 0x3a, 0xff];
+            await using (var append = new FileStream(
+                transcript, FileMode.Append, FileAccess.Write, FileShare.Read))
+            {
+                await append.WriteAsync(invalidTail);
+            }
+            var restarted = new FileCaptureRuntimeState(stateDirectory);
+            Assert.Empty(await CodexCaptureClaimer.ClaimCompletedAsync(
+                adapter, transcript, "malformed-runtime", restarted, gate));
+            CaptureRuntimeStreamState stillDeferred = Assert.Single(
+                (await restarted.ReadAsync()).Streams);
+            Assert.Equal(1, stillDeferred.EnqueuedThrough);
+            Assert.Equal([0L, 1L], stillDeferred.Queue.Select(item => item.SourcePosition));
+
+            CaptureRuntimeQueueItem omitted = Assert.Single(
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    transcript,
+                    "malformed-runtime",
+                    restarted,
+                    gate,
+                    terminalAtEndOfFile: true));
+            Assert.Equal(2, omitted.SourcePosition);
+            using (JsonDocument queued = JsonDocument.Parse(omitted.RedactedSafeCandidate))
+            {
+                string safe = queued.RootElement.GetRawText();
+                Assert.DoesNotContain('\uFFFD', safe);
+                Assert.DoesNotContain("\"typ", safe, StringComparison.Ordinal);
+                JsonElement omission = queued.RootElement.GetProperty("sourcePayload")
+                    .GetProperty("omission");
+                Assert.Equal(
+                    "source_record_uninspectable",
+                    omission.GetProperty("reason").GetString());
+                Assert.Equal(
+                    "invalid_utf8",
+                    omission.GetProperty("contentPolicy").GetString());
+                Assert.Equal(
+                    2,
+                    omission.GetProperty("sourceIdentity")
+                        .GetProperty("sourcePosition").GetInt64());
+            }
+            Assert.Equal(readableEnd, omitted.DeterministicLocatorEvidence.ByteOffset);
+            Assert.Equal(invalidTail.Length, omitted.DeterministicLocatorEvidence.ByteLength);
+            Assert.Equal(
+                readableEnd + invalidTail.Length,
+                omitted.DeterministicLocatorEvidence.PrefixEvidence.ByteLength);
+
+            CaptureRuntimeStreamState advanced = Assert.Single(
+                (await restarted.ReadAsync()).Streams);
+            Assert.Equal(2, advanced.EnqueuedThrough);
+            Assert.Equal([0L, 1L, 2L], advanced.Queue.Select(item => item.SourcePosition));
+            string omissionIdentity = omitted.DeterministicLocatorEvidence.Identity;
+            string omissionCandidate = omitted.RedactedSafeCandidate;
+
+            Assert.Empty(await CodexCaptureClaimer.ClaimCompletedAsync(
+                adapter,
+                transcript,
+                "malformed-runtime",
+                new FileCaptureRuntimeState(stateDirectory),
+                gate,
+                terminalAtEndOfFile: true));
+            CaptureRuntimeQueueItem durableOmission = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync())
+                    .Streams.Single().Queue,
+                item => item.SourcePosition == 2);
+            Assert.Equal(omissionIdentity, durableOmission.DeterministicLocatorEvidence.Identity);
+            Assert.Equal(omissionCandidate, durableOmission.RedactedSafeCandidate);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(
         409,
@@ -219,7 +369,7 @@ public sealed class CaptureRuntimeStateTests
             Path.GetTempPath(), $"capture-runtime-state-{Guid.NewGuid():N}");
         string transcript = Path.Combine(directory, "rollout.jsonl");
         Directory.CreateDirectory(directory);
-        const string seededSyntheticSecret = "AKIAIOSFODNN7EXAMPLE";
+        const string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
         await File.WriteAllTextAsync(
             transcript,
             JsonSerializer.Serialize(new
@@ -1015,6 +1165,26 @@ public sealed class CaptureRuntimeStateTests
         SafetyScanException failure = Assert.Throws<SafetyScanException>(
             deadline.AssertWithinDeadline);
         Assert.Contains("30-second deadline", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MaterializedMalformedEnvelopeIsRecognizedWithoutCopyingOpaqueText()
+    {
+        CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(
+            TerminalMalformedCommand("warm"));
+        string opaqueText = new('x', 4 * 1024 * 1024);
+        CaptureObservationCommand command = TerminalMalformedCommand(opaqueText);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        bool recognized =
+            CaptureFidelityPolicy.IsAdapterOwnedTerminalMalformedRepresentation(command);
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(recognized);
+        Assert.True(
+            allocated < 512L * 1024,
+            $"Malformed-envelope recognition allocated {allocated:N0} bytes for an " +
+            "already-materialized 4 MiB opaque string.");
     }
 
     [Fact]
@@ -3201,6 +3371,57 @@ public sealed class CaptureRuntimeStateTests
                     [])
             ],
             SourceIdentity: new CaptureSourceIdentity(identity));
+
+    private static CaptureObservationCommand TerminalMalformedCommand(string opaqueText)
+    {
+        const string externalSessionId = "resource-bound-malformed-session";
+        JsonElement sourcePayload = JsonSerializer.SerializeToElement(new
+        {
+            opaqueText,
+            parseError = new
+            {
+                reason = CaptureFidelityPolicy.MalformedJsonReason,
+                policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                sourceIdentity = new
+                {
+                    externalSessionId,
+                    childId = (string?)null,
+                    sourcePosition = 0,
+                    locatorKind = "byte_range"
+                }
+            }
+        });
+        JsonElement eventPayload = JsonSerializer.SerializeToElement(new
+        {
+            recordType = "malformed_json",
+            payloadType = (string?)null,
+            source = sourcePayload
+        });
+        return new CaptureObservationCommand(
+            1,
+            new CaptureSourceIdentity(externalSessionId),
+            0,
+            new CaptureSourceLocator.ByteRange(0, 1, new string('0', 64)),
+            null,
+            new CaptureSource(
+                "codex",
+                null,
+                "malformed_json",
+                MaterialKind: "persisted_record"),
+            new CaptureAdapter("codex-synthetic-jsonl", "10"),
+            sourcePayload,
+            [
+                new CaptureEvent(
+                    "record:opaque",
+                    0,
+                    "opaque",
+                    "unknown",
+                    eventPayload,
+                    null,
+                    [])
+            ],
+            null);
+    }
 
     private sealed class StatefulEventList(
         params CaptureEvent[] enumerations) : IReadOnlyList<CaptureEvent>

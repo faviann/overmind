@@ -97,13 +97,18 @@ Every such omission repeats the trusted observation's external session,
 optional child, source position, and locator kind. Optional block-local path
 and identity evidence remains separately replayable. Source-stated capture
 provenance remains only in its governed rewritten sibling and is never copied
-through an opaque path into the omission. The policy's
-`ContainsUnsupportedBinaryOmission` outcome is the only compatibility
-recognizer: it accepts the exact base field or the lowest occupied numeric
-suffix with the complete current policy shape, including current
+through an opaque path into the omission. The policy owns the compatibility
+recognizers for its exact fidelity representations.
+`ContainsUnsupportedBinaryOmission` accepts the exact base field or the lowest
+occupied numeric suffix with the complete current policy shape, including current
 reason/category/count/version and source identity matching the supplied
 command's external session, optional child, source position, and locator kind;
 never a broad name prefix or a source-owned incomplete/mismatched lookalike.
+`IsAdapterOwnedTerminalMalformedRepresentation` likewise requires the complete
+v10 parse-error or uninspectable-record payload, matching trusted byte-range
+provenance, and the adapter's exact redundant opaque-event projection. A
+source-owned structured record that merely uses either terminal discriminator
+does not suppress unchanged prior-version compatibility.
 Only direct `signature` and `encrypted_content` children reached from the root
 Codex `response_item` reasoning payload or the root adapter-owned opaque event
 envelope remain ordinary opaque evidence. The traversal context is closed and
@@ -239,10 +244,17 @@ snapshot followed by an atomic rename, under a process-shared lock file.
 against one immutable transcript byte snapshot, parses and adapts records from
 that same snapshot, defers an unterminated final JSONL record,
 and accepts that record only after newline completion or an explicit terminal
-flag from configured discovery. It adapts a terminal record, runs the local
-safety boundary, and only then calls the durable claim transaction. Its locator
-identity binds transcript identity, source position, byte range and record
-digest, plus the new verified-prefix evidence.
+flag from configured discovery. This deferral applies equally to partial valid
+JSON, readable malformed JSON, and invalid encoding: none enters
+`enqueuedThrough` while the final record can still grow. Once terminal,
+strictly readable malformed JSON is a scanned opaque parse-error event, while
+invalid UTF-8 is a content-free explicit omission carrying fixed source and
+fidelity-policy provenance. Both deterministic fidelity outcomes advance;
+scanner or serialization failures remain operational failures and claim
+nothing. It adapts the terminal representation, runs the local safety boundary,
+and only then calls the durable claim transaction. Its locator identity binds
+transcript identity, source position, byte range and record digest, plus the
+new verified-prefix evidence.
 
 **`CodexTranscriptDiscovery`, `CodexTranscriptScanCycle`,
 `CaptureRescanConfiguration`, and `CaptureRescanScheduler`** — enumerate every

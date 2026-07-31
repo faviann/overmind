@@ -100,9 +100,11 @@ Adapters are versioned tolerant tagged unions:
   numeric suffix) with the exact array length, category, policy version, the
   trusted external session, optional child, source position and locator kind,
   plus available source-stated media type, local path, local identity, and
-  capture provenance.
+  no duplicated capture provenance. Source-stated capture provenance remains
+  ordinary replayable sibling evidence after the same governed recursive
+  rewrite, so nested valid `binary_content` cannot bypass the policy.
   Safe sibling metadata, a source-stated `omission`, and model-visible `text`
-  remain ordinary replayable evidence. Untagged values and malformed byte
+  likewise remain ordinary replayable evidence. Untagged values and malformed byte
   representations are not classified by this union. Only direct `signature`
   and `encrypted_content` children reached from the root known Codex reasoning
   payload or the root adapter-owned opaque envelope remain ordinary metadata;

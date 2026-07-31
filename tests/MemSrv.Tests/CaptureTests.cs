@@ -121,7 +121,17 @@ public sealed class CaptureTests : HttpSeamTestBase
                             media_type = "image/png",
                             source_path = "/workspace/screenshot.png",
                             source_identity = "image-api-1",
-                            capture_provenance = new { origin = "authenticated-api" },
+                            capture_provenance = new
+                            {
+                                origin = "authenticated-api",
+                                nested = new
+                                {
+                                    type = "binary_content",
+                                    category = "attachment",
+                                    text = "Safe nested provenance text.",
+                                    byte_payload = new[] { 201, 202 }
+                                }
+                            },
                             text = "Visible image alt text.",
                             byte_payload = bytes
                         }
@@ -177,6 +187,19 @@ public sealed class CaptureTests : HttpSeamTestBase
             "native_id",
             omissionIdentity.GetProperty("locatorKind").GetString());
         Assert.Equal("Visible image alt text.", safeBlock.GetProperty("text").GetString());
+        JsonElement safeNestedProvenance = safeBlock.GetProperty("capture_provenance")
+            .GetProperty("nested");
+        Assert.False(safeNestedProvenance.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            "Safe nested provenance text.",
+            safeNestedProvenance.GetProperty("text").GetString());
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            safeNestedProvenance.GetProperty("capture_fidelity_omission")
+                .GetProperty("reason").GetString());
+        Assert.False(
+            safeBlock.GetProperty("capture_fidelity_omission")
+                .TryGetProperty("captureProvenance", out _));
         Assert.Contains(
             $"omission:{CaptureFidelityPolicy.UnsupportedBinaryReason}",
             receipt.GetProperty("observation").GetProperty("scan").GetProperty("ruleIds")
@@ -203,6 +226,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             receipt.GetProperty("observationUuid").GetGuid().ToString());
         Assert.DoesNotContain("\"byte_payload\"", shown, StringComparison.Ordinal);
         Assert.DoesNotContain("[137,80,78,71]", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("[201,202]", shown, StringComparison.Ordinal);
         JsonElement envelope = JsonDocument.Parse(
             shown.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0])
             .RootElement;
@@ -215,6 +239,15 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(
             "authenticated-api",
             replayed.GetProperty("capture_provenance").GetProperty("origin").GetString());
+        JsonElement replayedNestedProvenance = replayed.GetProperty("capture_provenance")
+            .GetProperty("nested");
+        Assert.False(replayedNestedProvenance.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            "Safe nested provenance text.",
+            replayedNestedProvenance.GetProperty("text").GetString());
+        Assert.False(
+            replayed.GetProperty("capture_fidelity_omission")
+                .TryGetProperty("captureProvenance", out _));
         Assert.Equal("Visible image alt text.", replayed.GetProperty("text").GetString());
         JsonElement replayedIdentity = replayed
             .GetProperty("capture_fidelity_omission")
@@ -372,6 +405,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "[77,90]",
                     "[137,80,78,71]",
                     "[82,73,70,70,1]",
+                    "[201,202]",
                     "[61,62]"
                 })
             {
@@ -1613,6 +1647,46 @@ public sealed class CaptureTests : HttpSeamTestBase
                 "9",
                 "0.144.synthetic",
                 "unchanged source record"));
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        JsonElement retryReceipt =
+            await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Fact]
+    public async Task VersionNineSourceOwnedBinaryOmissionLookalikeStillConvergesFromVersionEight()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-v9-source-lookalike-{Guid.NewGuid():N}";
+        await EnrollAsync(
+            $"codex-adapter-v9-source-lookalike-{Guid.NewGuid():N}",
+            captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SourceOwnedBinaryOmissionLookalikeObservation(
+                externalSessionId,
+                childId,
+                locator,
+                adapterVersion: "8"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        JsonElement acceptedReceipt =
+            await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SourceOwnedBinaryOmissionLookalikeObservation(
+                externalSessionId,
+                childId,
+                locator,
+                adapterVersion: "9"));
 
         Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
         JsonElement retryReceipt =
@@ -6247,6 +6321,55 @@ public sealed class CaptureTests : HttpSeamTestBase
                     kind = "opaque",
                     actor = "user",
                     payload = new { text = "Visible image alt text." }
+                }
+            }
+        };
+
+    private static object SourceOwnedBinaryOmissionLookalikeObservation(
+        string externalSessionId,
+        string childId,
+        string nativeId,
+        string adapterVersion) => new
+        {
+            contractVersion = 1,
+            sourceSessionId = externalSessionId,
+            sourceIdentity = new { externalSessionId, childId },
+            sourcePosition = 0,
+            locator = new { kind = "native_id", nativeId },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.144.synthetic",
+                recordType = "session_meta",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload = new
+            {
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = childId,
+                    thread_source = "subagent",
+                    capture_fidelity_omission = new
+                    {
+                        reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+                        category = "image",
+                        originalByteCount = 2,
+                        policyVersion = CaptureFidelityPolicy.CurrentVersion
+                    }
+                }
+            },
+            events = new[]
+            {
+                new
+                {
+                    partKey = "metadata/0",
+                    partOrder = 0,
+                    kind = "lifecycle",
+                    actor = "harness",
+                    payload = new { message = "unchanged source-owned lookalike" }
                 }
             }
         };

@@ -73,10 +73,15 @@ and every other safe sibling remain unchanged. Operator replay therefore
 distinguishes source evidence from the policy-owned omission explicitly.
 Every such omission repeats the trusted observation's external session,
 optional child, source position, and locator kind. Optional block-local path
-and identity evidence remains separately replayable. The policy's
+and identity evidence remains separately replayable. Source-stated capture
+provenance remains only in its governed rewritten sibling and is never copied
+through an opaque path into the omission. The policy's
 `ContainsUnsupportedBinaryOmission` outcome is the only compatibility
 recognizer: it accepts the exact base field or the lowest occupied numeric
-suffix with the complete current policy shape, never a broad name prefix.
+suffix with the complete current policy shape, including current
+reason/category/count/version and source identity matching the supplied
+command's external session, optional child, source position, and locator kind;
+never a broad name prefix or a source-owned incomplete/mismatched lookalike.
 Only direct `signature` and `encrypted_content` children reached from the root
 Codex `response_item` reasoning payload or the root adapter-owned opaque event
 envelope remain ordinary opaque evidence; nested source objects cannot mint

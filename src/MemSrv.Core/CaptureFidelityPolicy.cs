@@ -9,7 +9,7 @@ namespace MemSrv.Core;
 /// </summary>
 public static class CaptureFidelityPolicy
 {
-    public const string CurrentVersion = "capture-fidelity/2026-07-31.7";
+    public const string CurrentVersion = "capture-fidelity/2026-07-31.8";
     public const int ProductionTransportBytes = 1_000_000;
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
@@ -133,9 +133,9 @@ public static class CaptureFidelityPolicy
     /// </summary>
     public static bool ContainsUnsupportedBinaryOmission(
         CaptureObservationCommand observation) =>
-        ContainsUnsupportedBinaryOmission(observation.SourcePayload)
+        ContainsUnsupportedBinaryOmission(observation.SourcePayload, observation)
         || observation.Events.Any(
-            item => ContainsUnsupportedBinaryOmission(item.Payload));
+            item => ContainsUnsupportedBinaryOmission(item.Payload, observation));
 
     public static BoundedCaptureRepresentation<CaptureObservationRequest>
         SerializeForTransport(
@@ -543,7 +543,6 @@ public static class CaptureFidelityPolicy
             WriteBinaryOmission(
                 value,
                 writer,
-                state.Stream,
                 category!,
                 originalByteCount,
                 state.SourceIdentity,
@@ -589,7 +588,6 @@ public static class CaptureFidelityPolicy
     private static void WriteBinaryOmission(
         JsonElement source,
         Utf8JsonWriter writer,
-        GovernedSerializationStream stream,
         string category,
         long originalByteCount,
         CaptureSourceIdentity sourceIdentity,
@@ -619,14 +617,6 @@ public static class CaptureFidelityPolicy
         CopySafeProvenance(source, writer, "media_type", "mediaType");
         CopySafeProvenance(source, writer, "source_path", "sourcePath");
         CopySafeProvenance(source, writer, "source_identity", "localSourceIdentity");
-        if (source.TryGetProperty(
-                "capture_provenance",
-                out JsonElement captureProvenance)
-            && captureProvenance.ValueKind == JsonValueKind.Object)
-        {
-            writer.WritePropertyName("captureProvenance");
-            WriteOpaque(captureProvenance, writer, stream);
-        }
         writer.WriteEndObject();
     }
 
@@ -655,7 +645,9 @@ public static class CaptureFidelityPolicy
         return candidate;
     }
 
-    private static bool ContainsUnsupportedBinaryOmission(JsonElement value)
+    private static bool ContainsUnsupportedBinaryOmission(
+        JsonElement value,
+        CaptureObservationCommand observation)
     {
         switch (value.ValueKind)
         {
@@ -665,8 +657,11 @@ public static class CaptureFidelityPolicy
                     if (IsPolicyOwnedBinaryOmissionField(
                             value,
                             property.Name,
-                            property.Value)
-                        || ContainsUnsupportedBinaryOmission(property.Value))
+                            property.Value,
+                            observation)
+                        || ContainsUnsupportedBinaryOmission(
+                            property.Value,
+                            observation))
                     {
                         return true;
                     }
@@ -675,7 +670,7 @@ public static class CaptureFidelityPolicy
             case JsonValueKind.Array:
                 foreach (JsonElement item in value.EnumerateArray())
                 {
-                    if (ContainsUnsupportedBinaryOmission(item))
+                    if (ContainsUnsupportedBinaryOmission(item, observation))
                     {
                         return true;
                     }
@@ -689,9 +684,10 @@ public static class CaptureFidelityPolicy
     private static bool IsPolicyOwnedBinaryOmissionField(
         JsonElement parent,
         string name,
-        JsonElement value)
+        JsonElement value,
+        CaptureObservationCommand observation)
     {
-        if (!IsUnsupportedBinaryOmission(value))
+        if (!IsUnsupportedBinaryOmission(value, observation))
         {
             return false;
         }
@@ -729,17 +725,103 @@ public static class CaptureFidelityPolicy
         return true;
     }
 
-    private static bool IsUnsupportedBinaryOmission(JsonElement value) =>
-        value.ValueKind == JsonValueKind.Object
-        && HasString(value, "reason", UnsupportedBinaryReason)
-        && value.TryGetProperty("category", out JsonElement category)
-        && category.ValueKind == JsonValueKind.String
-        && category.GetString() is { } categoryName
-        && UnsupportedBinaryCategories.Contains(categoryName)
-        && value.TryGetProperty("originalByteCount", out JsonElement byteCount)
-        && byteCount.TryGetInt64(out long count)
-        && count >= 0
-        && HasString(value, "policyVersion", CurrentVersion);
+    private static bool IsUnsupportedBinaryOmission(
+        JsonElement value,
+        CaptureObservationCommand observation)
+    {
+        if (value.ValueKind != JsonValueKind.Object
+            || !HasOnlyBinaryOmissionProperties(value)
+            || !HasString(value, "reason", UnsupportedBinaryReason)
+            || !value.TryGetProperty("category", out JsonElement category)
+            || category.ValueKind != JsonValueKind.String
+            || category.GetString() is not { } categoryName
+            || !UnsupportedBinaryCategories.Contains(categoryName)
+            || !value.TryGetProperty("originalByteCount", out JsonElement byteCount)
+            || !byteCount.TryGetInt64(out long count)
+            || count < 0
+            || !HasString(value, "policyVersion", CurrentVersion)
+            || !value.TryGetProperty("sourceIdentity", out JsonElement sourceIdentity)
+            || sourceIdentity.ValueKind != JsonValueKind.Object
+            || !HasTrustedSourceIdentity(sourceIdentity, observation))
+        {
+            return false;
+        }
+
+        return HasOptionalNonBlankString(value, "mediaType")
+            && HasOptionalNonBlankString(value, "sourcePath")
+            && HasOptionalNonBlankString(value, "localSourceIdentity");
+    }
+
+    private static bool HasOnlyBinaryOmissionProperties(JsonElement value)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (JsonProperty property in value.EnumerateObject())
+        {
+            if (!seen.Add(property.Name)
+                || property.Name is not (
+                    "reason"
+                    or "category"
+                    or "originalByteCount"
+                    or "policyVersion"
+                    or "sourceIdentity"
+                    or "mediaType"
+                    or "sourcePath"
+                    or "localSourceIdentity"))
+            {
+                return false;
+            }
+        }
+        return seen.Contains("reason")
+            && seen.Contains("category")
+            && seen.Contains("originalByteCount")
+            && seen.Contains("policyVersion")
+            && seen.Contains("sourceIdentity");
+    }
+
+    private static bool HasTrustedSourceIdentity(
+        JsonElement value,
+        CaptureObservationCommand observation)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (JsonProperty property in value.EnumerateObject())
+        {
+            if (!seen.Add(property.Name)
+                || property.Name is not (
+                    "externalSessionId"
+                    or "childId"
+                    or "sourcePosition"
+                    or "locatorKind"))
+            {
+                return false;
+            }
+        }
+
+        bool childMatches = observation.SourceIdentity.ChildId is null
+            ? !value.TryGetProperty("childId", out _)
+            : value.TryGetProperty("childId", out JsonElement child)
+                && child.ValueKind == JsonValueKind.String
+                && string.Equals(
+                    child.GetString(),
+                    observation.SourceIdentity.ChildId,
+                    StringComparison.Ordinal);
+        return seen.Count == (observation.SourceIdentity.ChildId is null ? 3 : 4)
+            && HasString(
+                value,
+                "externalSessionId",
+                observation.SourceIdentity.ExternalSessionId)
+            && childMatches
+            && value.TryGetProperty("sourcePosition", out JsonElement position)
+            && position.TryGetInt64(out long sourcePosition)
+            && sourcePosition == observation.SourcePosition
+            && HasString(value, "locatorKind", observation.Locator.Kind);
+    }
+
+    private static bool HasOptionalNonBlankString(
+        JsonElement value,
+        string propertyName) =>
+        !value.TryGetProperty(propertyName, out JsonElement property)
+        || (property.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(property.GetString()));
 
     private static bool HasString(
         JsonElement value,

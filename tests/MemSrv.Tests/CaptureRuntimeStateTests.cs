@@ -419,38 +419,74 @@ public sealed class CaptureRuntimeStateTests
             CaptureRuntimeStreamState durable = Assert.Single(
                 (await state.ReadAsync()).Streams);
             Assert.Equal(11, durable.Queue.Count);
-            using JsonDocument queued = JsonDocument.Parse(
+            string[] categories = ["attachment", "archive", "executable", "image", "audio"];
+            long[] byteCounts = [4, 3, 2, 4, 5];
+            for (int index = 0; index < categories.Length; index++)
+            {
+                using JsonDocument queued = JsonDocument.Parse(
+                    durable.Queue[index].RedactedSafeCandidate);
+                JsonElement block = queued.RootElement.GetProperty("sourcePayload")
+                    .GetProperty("payload").GetProperty("content")[0];
+                Assert.False(block.TryGetProperty("byte_payload", out _));
+                JsonElement omission = block.GetProperty("capture_fidelity_omission");
+                Assert.Equal(
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    omission.GetProperty("reason").GetString());
+                Assert.Equal(
+                    categories[index],
+                    omission.GetProperty("category").GetString());
+                Assert.Equal(
+                    byteCounts[index],
+                    omission.GetProperty("originalByteCount").GetInt64());
+                JsonElement sourceIdentity = omission.GetProperty("sourceIdentity");
+                Assert.Equal(
+                    "binary-media-runtime",
+                    sourceIdentity.GetProperty("externalSessionId").GetString());
+                Assert.Equal(
+                    index,
+                    sourceIdentity.GetProperty("sourcePosition").GetInt64());
+                Assert.Equal(
+                    "byte_range",
+                    sourceIdentity.GetProperty("locatorKind").GetString());
+            }
+
+            using JsonDocument firstQueued = JsonDocument.Parse(
                 durable.Queue[0].RedactedSafeCandidate);
-            JsonElement block = queued.RootElement.GetProperty("sourcePayload")
+            JsonElement firstBlock = firstQueued.RootElement.GetProperty("sourcePayload")
                 .GetProperty("payload").GetProperty("content")[0];
-            Assert.False(block.TryGetProperty("byte_payload", out _));
             Assert.Equal(
-                CaptureFidelityPolicy.UnsupportedBinaryReason,
-                block.GetProperty("capture_fidelity_omission")
-                    .GetProperty("reason").GetString());
-            Assert.Equal(4, block.GetProperty("capture_fidelity_omission")
-                .GetProperty("originalByteCount").GetInt64());
-            JsonElement sourceIdentity = block
-                .GetProperty("capture_fidelity_omission")
-                .GetProperty("sourceIdentity");
+                "Visible attachment caption.",
+                firstBlock.GetProperty("text").GetString());
+            JsonElement nestedProvenance = firstBlock.GetProperty("capture_provenance")
+                .GetProperty("nested");
+            Assert.False(nestedProvenance.TryGetProperty("byte_payload", out _));
             Assert.Equal(
-                "binary-media-runtime",
-                sourceIdentity.GetProperty("externalSessionId").GetString());
-            Assert.Equal(0, sourceIdentity.GetProperty("sourcePosition").GetInt64());
-            Assert.Equal(
-                "byte_range",
-                sourceIdentity.GetProperty("locatorKind").GetString());
-            Assert.Equal("Visible attachment caption.", block.GetProperty("text").GetString());
+                "Safe nested provenance text.",
+                nestedProvenance.GetProperty("text").GetString());
+            Assert.False(
+                firstBlock.GetProperty("capture_fidelity_omission")
+                    .TryGetProperty("captureProvenance", out _));
 
             string durableJson = await File.ReadAllTextAsync(
                 Path.Combine(directory, "state", "capture-state.json"));
-            Assert.DoesNotContain("\"byte_payload\":[1,2,3,4]", durableJson);
+            foreach (string rawBytes in new[]
+                {
+                    "[1,2,3,4]",
+                    "[5,6,7]",
+                    "[77,90]",
+                    "[137,80,78,71]",
+                    "[82,73,70,70,1]",
+                    "[201,202]"
+                })
+            {
+                Assert.DoesNotContain(rawBytes, durableJson, StringComparison.Ordinal);
+            }
             Assert.DoesNotContain(
                 "\"digest\"",
-                block.GetProperty("capture_fidelity_omission").GetRawText());
+                firstBlock.GetProperty("capture_fidelity_omission").GetRawText());
             Assert.DoesNotContain(
                 "\"excerpt\"",
-                block.GetProperty("capture_fidelity_omission").GetRawText());
+                firstBlock.GetProperty("capture_fidelity_omission").GetRawText());
         }
         finally
         {
@@ -781,12 +817,12 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
-    public void BinaryOmissionRecognitionAcceptsOnlyPolicyOwnedFieldNames()
+    public void BinaryOmissionRecognitionRequiresTheCompleteTrustedPolicyShape()
     {
         CaptureObservationCommand Command(JsonElement payload) => new(
             1,
-            new CaptureSourceIdentity("recognition-session"),
-            0,
+            new CaptureSourceIdentity("recognition-session", "recognition-child"),
+            7,
             new CaptureSourceLocator.NativeId("recognition-record"),
             null,
             new CaptureSource("codex", "0.146.synthetic", "response_item"),
@@ -804,18 +840,59 @@ public sealed class CaptureRuntimeStateTests
             ],
             null);
 
-        object omission = new
+        object Omission(
+            string externalSessionId,
+            string childId,
+            long sourcePosition,
+            string locatorKind) => new
+        {
+            reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+            category = "image",
+            originalByteCount = 2,
+            policyVersion = CaptureFidelityPolicy.CurrentVersion,
+            sourceIdentity = new
+            {
+                externalSessionId,
+                childId,
+                sourcePosition,
+                locatorKind
+            }
+        };
+        object omission = Omission(
+            "recognition-session",
+            "recognition-child",
+            7,
+            "native_id");
+        object incomplete = new
         {
             reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
             category = "image",
             originalByteCount = 2,
             policyVersion = CaptureFidelityPolicy.CurrentVersion
         };
+        object[] mismatched =
+        {
+            Omission("source-owned-lookalike", "recognition-child", 7, "native_id"),
+            Omission("recognition-session", "source-owned-child", 7, "native_id"),
+            Omission("recognition-session", "recognition-child", 8, "native_id"),
+            Omission("recognition-session", "recognition-child", 7, "byte_range")
+        };
         Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
             Command(JsonSerializer.SerializeToElement(new
             {
                 capture_fidelity_omission_note = omission
             }))));
+        Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission = incomplete
+            }))));
+        Assert.All(mismatched, lookalike =>
+            Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+                Command(JsonSerializer.SerializeToElement(new
+                {
+                    capture_fidelity_omission = lookalike
+                })))));
         Assert.True(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
             Command(JsonSerializer.SerializeToElement(new
             {

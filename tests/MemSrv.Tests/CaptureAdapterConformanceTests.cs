@@ -830,6 +830,19 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             Assert.Equal(
                 provenanceOrigins[index],
                 block.GetProperty("capture_provenance").GetProperty("origin").GetString());
+            if (index == 0)
+            {
+                JsonElement nestedProvenance = block.GetProperty("capture_provenance")
+                    .GetProperty("nested");
+                Assert.False(nestedProvenance.TryGetProperty("byte_payload", out _));
+                Assert.Equal(
+                    "Safe nested provenance text.",
+                    nestedProvenance.GetProperty("text").GetString());
+                Assert.Equal(
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    nestedProvenance.GetProperty("capture_fidelity_omission")
+                        .GetProperty("reason").GetString());
+            }
             JsonElement omission = block.GetProperty("capture_fidelity_omission");
             Assert.Equal(
                 CaptureFidelityPolicy.UnsupportedBinaryReason,

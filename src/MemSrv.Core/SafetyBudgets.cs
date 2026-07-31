@@ -115,7 +115,7 @@ public class SafetyScanException : InvalidOperationException
         [
             CaptureOutcomeAggregation.SafetyFailure(
                 harness,
-                CaptureOutcomeAggregation.Classify(this),
+                OutcomeReason,
                 inspectedByteCount)
         ]);
 }

@@ -15,6 +15,10 @@ public static class CaptureOutcomeReason
     public const string ScanBudgetExhausted = "scan_budget_exhausted";
     public const string ScannerInternalFailure = "scanner_internal_failure";
     public const string ScannerPolicyUnavailable = "scanner_policy_unavailable";
+    public const string LeafExceedsLimit = "leaf_exceeds_limit";
+    public const string SensitiveFieldScalar = "sensitive_field_scalar";
+    public const string SensitiveFieldSubtree = "sensitive_field_subtree";
+    public const string RedactedNameCollision = "redacted_name_collision";
 
     internal static bool IsFidelity(string reason) =>
         reason is CaptureFidelityPolicy.TransportLimitReason
@@ -22,7 +26,11 @@ public static class CaptureOutcomeReason
             or CaptureFidelityPolicy.UnsupportedBinaryReason
             or CaptureFidelityPolicy.MalformedJsonReason
             or CaptureFidelityPolicy.UninspectableSourceRecordReason
-            or InvalidEncoding;
+            or InvalidEncoding
+            or LeafExceedsLimit
+            or SensitiveFieldScalar
+            or SensitiveFieldSubtree
+            or RedactedNameCollision;
 
     internal static bool IsSafetyFailure(string reason) =>
         reason is MatcherTimeout
@@ -30,6 +38,13 @@ public static class CaptureOutcomeReason
             or ScanBudgetExhausted
             or ScannerInternalFailure
             or ScannerPolicyUnavailable;
+
+    internal static bool IsAdapterFidelity(string reason) =>
+        reason is CaptureFidelityPolicy.TransportLimitReason
+            or CaptureFidelityPolicy.UnsupportedBinaryReason
+            or CaptureFidelityPolicy.MalformedJsonReason
+            or CaptureFidelityPolicy.UninspectableSourceRecordReason
+            or InvalidEncoding;
 }
 
 /// <summary>
@@ -125,6 +140,19 @@ public sealed class CaptureOutcomeSummary
             throw new ArgumentException(
                 "Capture outcome counters must be valid.", nameof(counters));
         }
+        for (int index = 1; index < materialized.Length; index++)
+        {
+            int comparison = CaptureOutcomeContract.CompareDimensions(
+                materialized[index - 1], materialized[index]);
+            if (comparison >= 0)
+            {
+                throw new ArgumentException(
+                    comparison == 0
+                        ? "Capture outcome counters contain a duplicate dimension tuple."
+                        : "Capture outcome counters are not in canonical order.",
+                    nameof(counters));
+            }
+        }
         string expectedHealth = materialized.Any(
             counter => counter.Class == CaptureOutcomeAggregation.SafetyFailureClass)
                 ? "blocked"
@@ -157,6 +185,20 @@ public sealed class CaptureOutcomeSummary
 
 internal static class CaptureOutcomeContract
 {
+    internal static int CompareDimensions(
+        CaptureOutcomeCounter left,
+        CaptureOutcomeCounter right)
+    {
+        int comparison = string.CompareOrdinal(left.Harness, right.Harness);
+        if (comparison != 0) return comparison;
+        comparison = string.CompareOrdinal(left.Class, right.Class);
+        if (comparison != 0) return comparison;
+        comparison = string.CompareOrdinal(left.Reason, right.Reason);
+        return comparison != 0
+            ? comparison
+            : string.CompareOrdinal(left.SizeBand, right.SizeBand);
+    }
+
     internal static void ValidateDimensions(
         string harness,
         string @class,
@@ -274,78 +316,38 @@ public static class CaptureOutcomeAggregation
 
     public static CaptureOutcomeSummary Empty { get; } = Summarize([]);
 
-    public static CaptureOutcomeSummary FromCanonical(
-        CaptureObservationReceipt observation,
-        IEnumerable<JsonElement>? eventPayloads = null)
+    public static CaptureOutcomeSummary Merge(
+        CaptureOutcomeSummary summary,
+        params CaptureOutcomeRecord[] outcomes)
     {
-        ArgumentNullException.ThrowIfNull(observation);
-        var reasons = observation.Scan.RuleIds
-            .Where(ruleId => ruleId.StartsWith("omission:", StringComparison.Ordinal))
-            .Select(ruleId => ruleId["omission:".Length..])
-            .Where(CaptureOutcomeReason.IsFidelity)
-            .ToHashSet(StringComparer.Ordinal);
-
-        CaptureDeterministicFidelity? wholeObservation =
-            CaptureFidelityPolicy.ClassifyCanonicalWholeObservationOmission(
-                observation);
-        var outcomes = reasons
-            .Where(reason => reason != CaptureFidelityPolicy.UnsupportedBinaryReason)
-            .Select(reason => FidelityOmission(
-                observation.Source.Harness,
-                reason,
-                wholeObservation?.Reason == reason
-                    ? wholeObservation.OriginalByteCount
-                    : reason is CaptureFidelityPolicy.TransportLimitReason
-                        or CaptureFidelityPolicy.ContentLimitReason
-                            ? null
-                            : observation.Locator is CaptureSourceLocator.ByteRange range
-                                ? range.Length
-                                : null))
-            .ToList();
-        if (reasons.Contains(CaptureFidelityPolicy.UnsupportedBinaryReason))
+        ArgumentNullException.ThrowIfNull(summary);
+        ArgumentNullException.ThrowIfNull(outcomes);
+        var counts = summary.Counters.ToDictionary(
+            counter => (counter.Harness, counter.Class, counter.Reason, counter.SizeBand),
+            counter => counter.Count);
+        foreach (CaptureOutcomeRecord outcome in outcomes)
         {
-            long? wholeCount = wholeObservation?.Reason
-                == CaptureFidelityPolicy.UnsupportedBinaryReason
-                    ? wholeObservation.OriginalByteCount
-                    : null;
-            if (wholeCount is not null)
-            {
-                outcomes.Add(FidelityOmission(
-                    observation.Source.Harness,
-                    CaptureFidelityPolicy.UnsupportedBinaryReason,
-                    wholeCount));
-            }
-            else
-            {
-                IReadOnlyList<long> counts =
-                    CaptureFidelityPolicy.UnsupportedBinaryOmissionByteCounts(
-                        observation,
-                        eventPayloads ?? []);
-                if (counts.Count == 0)
-                {
-                    outcomes.Add(FidelityOmission(
-                        observation.Source.Harness,
-                        CaptureFidelityPolicy.UnsupportedBinaryReason,
-                        observation.Locator is CaptureSourceLocator.ByteRange range
-                            ? range.Length
-                            : null));
-                }
-                else
-                {
-                    outcomes.AddRange(counts.Select(count => FidelityOmission(
-                        observation.Source.Harness,
-                        CaptureFidelityPolicy.UnsupportedBinaryReason,
-                        count)));
-                }
-            }
+            var key = (outcome.Harness, outcome.Class, outcome.Reason, outcome.SizeBand);
+            counts[key] = checked(counts.GetValueOrDefault(key) + 1);
         }
-        return Summarize(outcomes);
-    }
-
-    public static string Classify(SafetyScanException failure)
-    {
-        ArgumentNullException.ThrowIfNull(failure);
-        return failure.OutcomeReason;
+        CaptureOutcomeCounter[] counters = counts.Select(item => new CaptureOutcomeCounter(
+                item.Key.Harness,
+                item.Key.Class,
+                item.Key.Reason,
+                item.Key.SizeBand,
+                item.Value))
+            .OrderBy(counter => counter.Harness, StringComparer.Ordinal)
+            .ThenBy(counter => counter.Class, StringComparer.Ordinal)
+            .ThenBy(counter => counter.Reason, StringComparer.Ordinal)
+            .ThenBy(counter => counter.SizeBand, StringComparer.Ordinal)
+            .ToArray();
+        return new(
+            1,
+            counters.Any(counter => counter.Class == SafetyFailureClass)
+                ? "blocked" : "healthy",
+            counters.Any(counter => counter.Class == FidelityOmissionClass)
+                ? "degraded" : "complete",
+            counters);
     }
 
     private static string NormalizeHarness(string harness) =>

@@ -73,9 +73,9 @@ public static class CaptureFidelityPolicy
                 locatorKind,
                 effectiveBound,
                 deadline);
-            return new(omitted, OmissionCount: 1);
+            return new(omitted, [originalByteCount]);
         }
-        return new(rewritten.Value, rewritten.OmissionCount);
+        return new(rewritten.Value, rewritten.OriginalByteCounts);
     }
 
     /// <summary>
@@ -122,7 +122,7 @@ public static class CaptureFidelityPolicy
         }
 
         long remaining = effectiveBound - rewrittenSource.SerializedBytes;
-        int omissionCount = rewrittenSource.OmissionCount;
+        var omissionByteCounts = new List<long>(rewrittenSource.OriginalByteCounts);
         var events = new CaptureEvent[observation.Events.Count];
         for (int index = 0; index < observation.Events.Count; index++)
         {
@@ -155,13 +155,13 @@ public static class CaptureFidelityPolicy
                     deadline);
             }
             remaining -= rewrittenPayload.SerializedBytes;
-            omissionCount += rewrittenPayload.OmissionCount;
+            omissionByteCounts.AddRange(rewrittenPayload.OriginalByteCounts);
             events[index] = item with { Payload = rewrittenPayload.Value };
         }
 
-        if (omissionCount == 0)
+        if (omissionByteCounts.Count == 0)
         {
-            return new(observation, 0);
+            return new(observation, []);
         }
 
         CaptureObservationRequest selected = observation with
@@ -178,7 +178,7 @@ public static class CaptureFidelityPolicy
                 deadline);
         }
         deadline.AssertWithinDeadline();
-        return new(selected, omissionCount);
+        return new(selected, omissionByteCounts);
     }
 
     public static BinaryFidelitySelection<CaptureObservationCommand>
@@ -216,7 +216,7 @@ public static class CaptureFidelityPolicy
                 deadline);
         }
         remaining -= rewrittenSource.SerializedBytes;
-        int omissionCount = rewrittenSource.OmissionCount;
+        var omissionByteCounts = new List<long>(rewrittenSource.OriginalByteCounts);
         var events = new CaptureEvent[observation.Events.Count];
         for (int index = 0; index < observation.Events.Count; index++)
         {
@@ -247,13 +247,13 @@ public static class CaptureFidelityPolicy
                     deadline);
             }
             remaining -= rewrittenPayload.SerializedBytes;
-            omissionCount += rewrittenPayload.OmissionCount;
+            omissionByteCounts.AddRange(rewrittenPayload.OriginalByteCounts);
             events[index] = item with { Payload = rewrittenPayload.Value };
         }
 
-        if (omissionCount == 0)
+        if (omissionByteCounts.Count == 0)
         {
-            return new(observation, 0);
+            return new(observation, []);
         }
 
         CaptureObservationCommand selected = observation with
@@ -269,7 +269,7 @@ public static class CaptureFidelityPolicy
                 deadline);
         }
         deadline.AssertWithinDeadline();
-        return new(selected, omissionCount);
+        return new(selected, omissionByteCounts);
     }
 
     /// <summary>
@@ -556,6 +556,25 @@ public static class CaptureFidelityPolicy
                 CaptureLedger.JsonOptions)
             ?? throw new InvalidOperationException(
                 "The bounded transport representation could not be reconstructed.");
+        if (bounded.WasOmitted)
+        {
+            CaptureOutcomeSummary outcome = CaptureOutcomeAggregation.Merge(
+                observation.AdapterOutcome ?? CaptureOutcomeAggregation.Empty,
+                CaptureOutcomeAggregation.FidelityOmission(
+                    observation.Source.Harness,
+                    TransportLimitReason,
+                    bounded.OriginalByteCount));
+            CaptureObservationRequest enriched = snapshot with { AdapterOutcome = outcome };
+            string enrichedJson = JsonSerializer.Serialize(enriched, CaptureLedger.JsonOptions);
+            if (Encoding.UTF8.GetByteCount(enrichedJson) <= effectiveBound)
+            {
+                return bounded with
+                {
+                    Observation = enriched,
+                    Serialized = enrichedJson
+                };
+            }
+        }
         return bounded with { Observation = snapshot };
     }
 
@@ -615,7 +634,8 @@ public static class CaptureFidelityPolicy
             Adapter = CompactAdapter(),
             SourcePayload = provenance,
             Events = [OmissionEvent()],
-            RouteEvidence = null
+            RouteEvidence = null,
+            AdapterOutcome = null
         };
     }
 
@@ -724,7 +744,7 @@ public static class CaptureFidelityPolicy
                 "the required unsupported-binary omission cannot fit within " +
                 $"the observation budget of {effectiveBound} bytes");
         }
-        return new(omitted, OmissionCount: 1);
+        return new(omitted, [originalByteCount]);
     }
 
     private static BinaryFidelitySelection<CaptureObservationRequest>
@@ -755,7 +775,7 @@ public static class CaptureFidelityPolicy
                 $"within the {effectiveBound}-byte transport limit.");
         }
         deadline.AssertWithinDeadline();
-        return new(omitted, OmissionCount: 1);
+        return new(omitted, [originalByteCount]);
     }
 
     private static JsonElement MaterializeUnsupportedBinaryProvenance(
@@ -860,7 +880,7 @@ public static class CaptureFidelityPolicy
             {
                 return new(
                     source,
-                    OmissionCount: 0,
+                    OriginalByteCounts: [],
                     SerializedBytes: 0,
                     ExceededBound: false);
             }
@@ -888,7 +908,7 @@ public static class CaptureFidelityPolicy
                 deadline.AssertWithinDeadline();
                 return new(
                     materialized,
-                    state.OmissionCount,
+                    state.OriginalByteCounts,
                     stream.BytesWritten,
                     ExceededBound: false);
             }
@@ -899,7 +919,7 @@ public static class CaptureFidelityPolicy
             // deterministic whole-observation omission for this case.
             return new(
                 source,
-                OmissionCount: 0,
+                OriginalByteCounts: [],
                 SerializedBytes: maxBytes,
                 ExceededBound: true);
         }
@@ -1075,7 +1095,7 @@ public static class CaptureFidelityPolicy
                 state.SourceIdentity,
                 state.SourcePosition,
                 state.LocatorKind);
-            state.OmissionCount++;
+            state.OriginalByteCounts.Add(originalByteCount);
         }
         writer.WriteEndObject();
     }
@@ -1570,7 +1590,7 @@ public static class CaptureFidelityPolicy
         public TrustedTraversalRootContext RootContext { get; } = rootContext;
         public int Depth { get; set; }
         public bool InCodexResponsePayload { get; set; }
-        public int OmissionCount { get; set; }
+        public List<long> OriginalByteCounts { get; } = [];
     }
 
     private enum TrustedTraversalRootContext
@@ -1582,7 +1602,7 @@ public static class CaptureFidelityPolicy
 
     private sealed record RewrittenJson(
         JsonElement Value,
-        int OmissionCount,
+        IReadOnlyList<long> OriginalByteCounts,
         long SerializedBytes,
         bool ExceededBound);
 
@@ -1637,10 +1657,28 @@ public sealed record BoundedCaptureRepresentation<T>(
     long OriginalByteCount,
     bool WasOmitted);
 
-public sealed record BinaryFidelitySelection<T>(
-    T Observation,
-    int OmissionCount)
+public sealed record BinaryFidelitySelection<T>
 {
+    public BinaryFidelitySelection(
+        T observation,
+        IReadOnlyList<long> originalByteCounts)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        ArgumentNullException.ThrowIfNull(originalByteCounts);
+        long[] materialized = originalByteCounts.ToArray();
+        if (materialized.Any(count => count < 0))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(originalByteCounts),
+                "Binary omission byte counts cannot be negative.");
+        }
+        Observation = observation;
+        OriginalByteCounts = Array.AsReadOnly(materialized);
+    }
+
+    public T Observation { get; }
+    public IReadOnlyList<long> OriginalByteCounts { get; }
+    public int OmissionCount => OriginalByteCounts.Count;
     public bool WasOmitted => OmissionCount > 0;
 }
 

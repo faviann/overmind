@@ -70,123 +70,6 @@ public sealed class CaptureOutcomeTests
         Assert.Equal(expectedBand, outcome.SizeBand);
     }
 
-    [Theory]
-    [InlineData(CaptureFidelityPolicy.MalformedJsonReason)]
-    [InlineData(CaptureFidelityPolicy.InvalidUtf8ContentPolicy)]
-    public void CanonicalTerminalOmissionUsesScanProvenanceAndTrustedByteRange(
-        string reason)
-    {
-        CaptureObservationReceipt observation = CanonicalObservation(
-            reason,
-            new CaptureSourceLocator.ByteRange(
-                0,
-                2L * 1024 * 1024,
-                null),
-            JsonSerializer.SerializeToElement(new { safe = true }));
-
-        CaptureOutcomeCounter outcome = Assert.Single(
-            CaptureOutcomeAggregation.FromCanonical(observation).Counters);
-
-        Assert.Equal(reason, outcome.Reason);
-        Assert.Equal(CaptureSizeBand.Over1MiBThrough64MiB, outcome.SizeBand);
-    }
-
-    [Fact]
-    public void AdapterAndRecordTypeCannotSpoofTerminalOmission()
-    {
-        CaptureObservationReceipt observation = CanonicalObservation(
-            reason: null,
-            new CaptureSourceLocator.ByteRange(0, 2L * 1024 * 1024, null),
-            JsonSerializer.SerializeToElement(new { safe = true }),
-            recordType: "malformed_json");
-
-        CaptureOutcomeSummary outcome =
-            CaptureOutcomeAggregation.FromCanonical(observation);
-
-        Assert.Equal("complete", outcome.CaptureFidelity);
-        Assert.Empty(outcome.Counters);
-    }
-
-    [Fact]
-    public void CanonicalWholeOmissionUsesOnlyExactPolicyProvenanceCount()
-    {
-        const string externalSessionId = "canonical-session";
-        JsonElement payload = JsonSerializer.SerializeToElement(new
-        {
-            omission = new
-            {
-                reason = CaptureFidelityPolicy.TransportLimitReason,
-                originalByteCount = 2L * 1024 * 1024,
-                policyVersion = CaptureFidelityPolicy.CurrentVersion,
-                sourceIdentity = new
-                {
-                    externalSessionId,
-                    childId = (string?)null,
-                    sourcePosition = 0,
-                    locatorKind = "byte_range"
-                }
-            }
-        });
-        CaptureObservationReceipt observation = CanonicalObservation(
-            CaptureFidelityPolicy.TransportLimitReason,
-            new CaptureSourceLocator.ByteRange(0, 1, null),
-            payload,
-            adapter: new CaptureAdapter(
-                "capture-fidelity-policy",
-                CaptureFidelityPolicy.CurrentVersion),
-            externalSessionId: externalSessionId);
-
-        CaptureOutcomeCounter outcome = Assert.Single(
-            CaptureOutcomeAggregation.FromCanonical(observation).Counters);
-
-        Assert.Equal(CaptureSizeBand.Over1MiBThrough64MiB, outcome.SizeBand);
-    }
-
-    [Fact]
-    public void FidelityPolicyOwnsExactCanonicalWholeOmissionRecognition()
-    {
-        const string externalSessionId = "policy-recognition-session";
-        JsonElement payload = JsonSerializer.SerializeToElement(new
-        {
-            omission = new
-            {
-                reason = CaptureFidelityPolicy.ContentLimitReason,
-                originalByteCount = 2L * 1024 * 1024,
-                policyVersion = CaptureFidelityPolicy.CurrentVersion,
-                sourceIdentity = new
-                {
-                    externalSessionId,
-                    sourcePosition = 9,
-                    locatorKind = "byte_range"
-                }
-            }
-        });
-        CaptureObservationReceipt exact = CanonicalObservation(
-            CaptureFidelityPolicy.ContentLimitReason,
-            new CaptureSourceLocator.ByteRange(0, 1, null),
-            payload,
-            adapter: new CaptureAdapter(
-                "capture-fidelity-policy",
-                CaptureFidelityPolicy.CurrentVersion),
-            externalSessionId: externalSessionId);
-
-        CaptureDeterministicFidelity recognized = Assert.IsType<CaptureDeterministicFidelity>(
-            CaptureFidelityPolicy.ClassifyCanonicalWholeObservationOmission(exact));
-        Assert.Equal(CaptureFidelityPolicy.ContentLimitReason, recognized.Reason);
-        Assert.Equal(2L * 1024 * 1024, recognized.OriginalByteCount);
-
-        CaptureObservationReceipt spoofed = exact with
-        {
-            Adapter = new CaptureAdapter("source-owned-lookalike", "1")
-        };
-        Assert.Null(
-            CaptureFidelityPolicy.ClassifyCanonicalWholeObservationOmission(spoofed));
-        Assert.Equal(
-            CaptureSizeBand.Unknown,
-            Assert.Single(CaptureOutcomeAggregation.FromCanonical(spoofed).Counters)
-                .SizeBand);
-    }
-
     [Fact]
     public void SafetyOutcomeClassificationDoesNotDependOnHumanWording()
     {
@@ -196,7 +79,7 @@ public sealed class CaptureOutcomeTests
 
         Assert.Equal(
             CaptureOutcomeReason.MatcherTimeout,
-            CaptureOutcomeAggregation.Classify(failure));
+            failure.OutcomeReason);
         Assert.Contains("wording with no classification keywords", failure.Message);
     }
 
@@ -262,6 +145,28 @@ public sealed class CaptureOutcomeTests
     }
 
     [Fact]
+    public void OutcomeSummaryConstructorRejectsDuplicateAndNoncanonicalCounters()
+    {
+        var first = new CaptureOutcomeCounter(
+            "codex",
+            CaptureOutcomeAggregation.FidelityOmissionClass,
+            CaptureOutcomeReason.LeafExceedsLimit,
+            CaptureSizeBand.Unknown,
+            1);
+        var second = new CaptureOutcomeCounter(
+            "codex",
+            CaptureOutcomeAggregation.FidelityOmissionClass,
+            CaptureOutcomeReason.SensitiveFieldScalar,
+            CaptureSizeBand.Unknown,
+            1);
+
+        Assert.Throws<ArgumentException>(() => new CaptureOutcomeSummary(
+            1, "healthy", "degraded", [first, first]));
+        Assert.Throws<ArgumentException>(() => new CaptureOutcomeSummary(
+            1, "healthy", "degraded", [second, first]));
+    }
+
+    [Fact]
     public void OutcomeJsonDeserializationRejectsContentLikeDimensionsWithoutEcho()
     {
         const string contentLike = "private-content-must-not-echo";
@@ -286,70 +191,6 @@ public sealed class CaptureOutcomeTests
                 new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
         Assert.DoesNotContain(contentLike, failure.ToString(), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void NativeBinaryOutcomeStaysUnknownWhenCountCannotBeReconstructed()
-    {
-        CaptureObservationReceipt observation = CanonicalObservation(
-            CaptureFidelityPolicy.UnsupportedBinaryReason,
-            new CaptureSourceLocator.NativeId("native"),
-            JsonSerializer.SerializeToElement(new { safe = true }));
-
-        CaptureOutcomeCounter outcome = Assert.Single(
-            CaptureOutcomeAggregation.FromCanonical(observation).Counters);
-
-        Assert.Equal(CaptureSizeBand.Unknown, outcome.SizeBand);
-    }
-
-    [Fact]
-    public void CanonicalBinaryOmissionsPreserveEachExactPolicyCountByBoundedBand()
-    {
-        const string externalSessionId = "canonical-binary-session";
-        object Omission(long originalByteCount) => new
-        {
-            reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
-            category = "image",
-            originalByteCount,
-            policyVersion = CaptureFidelityPolicy.CurrentVersion,
-            sourceIdentity = new
-            {
-                externalSessionId,
-                sourcePosition = 0,
-                locatorKind = "native_id"
-            }
-        };
-        CaptureObservationReceipt observation = CanonicalObservation(
-            CaptureFidelityPolicy.UnsupportedBinaryReason,
-            new CaptureSourceLocator.NativeId("native"),
-            JsonSerializer.SerializeToElement(new
-            {
-                capture_fidelity_omission = Omission(4),
-                capture_fidelity_omission_1 = Omission(4),
-                capture_fidelity_omission_2 = Omission(2L * 1024 * 1024)
-            }),
-            externalSessionId: externalSessionId);
-
-        CaptureOutcomeSummary outcome =
-            CaptureOutcomeAggregation.FromCanonical(observation);
-
-        Assert.Collection(
-            outcome.Counters,
-            counter =>
-            {
-                Assert.Equal(CaptureSizeBand.Over1MiBThrough64MiB, counter.SizeBand);
-                Assert.Equal(1, counter.Count);
-            },
-            counter =>
-            {
-                Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
-                Assert.Equal(2, counter.Count);
-            });
-        string serialized = JsonSerializer.Serialize(
-            outcome,
-            new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        Assert.DoesNotContain("originalByteCount", serialized, StringComparison.Ordinal);
-        Assert.DoesNotContain("2097152", serialized, StringComparison.Ordinal);
     }
 
     private static CaptureObservationReceipt CanonicalObservation(

@@ -502,10 +502,17 @@ public sealed class CaptureTests : HttpSeamTestBase
                 spoofedRootShown,
                 StringComparison.Ordinal);
             Assert.Equal(
-                4,
+                5,
                 spoofedRootShown.Split(
                     $"\"reason\":\"{CaptureFidelityPolicy.UnsupportedBinaryReason}\"",
                     StringSplitOptions.None).Length - 1);
+            JsonElement spoofedRootOutcome = receipts[11].GetProperty("outcome");
+            JsonElement spoofedRootCounter = Assert.Single(
+                spoofedRootOutcome.GetProperty("counters").EnumerateArray());
+            Assert.Equal(4, spoofedRootCounter.GetProperty("count").GetInt64());
+            Assert.Equal(
+                CaptureSizeBand.UpTo1MiB,
+                spoofedRootCounter.GetProperty("sizeBand").GetString());
             string spoofedRootApi = receipts[11].GetRawText();
             Assert.DoesNotContain("[71,72]", spoofedRootApi, StringComparison.Ordinal);
             Assert.DoesNotContain("[73,74]", spoofedRootApi, StringComparison.Ordinal);
@@ -1768,6 +1775,9 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         JsonElement acceptedReceipt =
             await accepted.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement acceptedOutcome = acceptedReceipt.GetProperty("outcome");
+        Assert.Equal("complete", acceptedOutcome.GetProperty("captureFidelity").GetString());
+        Assert.Empty(acceptedOutcome.GetProperty("counters").EnumerateArray());
 
         using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
             "/capture/v1/observations",
@@ -1788,6 +1798,17 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(
             acceptedReceipt.GetProperty("observationUuid").GetGuid(),
             retryReceipt.GetProperty("observationUuid").GetGuid());
+        Assert.True(JsonElement.DeepEquals(
+            acceptedOutcome,
+            retryReceipt.GetProperty("outcome")));
+        JsonElement operatorEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            acceptedReceipt.GetProperty("observationUuid").GetGuid().ToString()))
+            .RootElement;
+        Assert.True(JsonElement.DeepEquals(
+            acceptedOutcome,
+            operatorEnvelope.GetProperty("outcome")));
     }
 
     [Fact]
@@ -2748,6 +2769,25 @@ public sealed class CaptureTests : HttpSeamTestBase
                 CaptureFidelityPolicy.CurrentVersion,
                 omittedShown,
                 StringComparison.Ordinal);
+            JsonElement apiOutcome = omitted.GetProperty("outcome");
+            Assert.Equal("healthy", apiOutcome.GetProperty("captureHealth").GetString());
+            Assert.Equal("degraded", apiOutcome.GetProperty("captureFidelity").GetString());
+            JsonElement counter = Assert.Single(
+                apiOutcome.GetProperty("counters").EnumerateArray());
+            Assert.Equal(
+                CaptureFidelityPolicy.TransportLimitReason,
+                counter.GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureSizeBand.UpTo1MiB,
+                counter.GetProperty("sizeBand").GetString());
+            Assert.Equal(1, counter.GetProperty("count").GetInt64());
+            JsonElement operatorEnvelope = JsonDocument.Parse(
+                omittedShown.Split(
+                    Environment.NewLine,
+                    StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
+            Assert.True(JsonElement.DeepEquals(
+                apiOutcome,
+                operatorEnvelope.GetProperty("outcome")));
 
             Guid omissionUuid = omitted.GetProperty("observationUuid").GetGuid();
             DeleteRuntimeState(overPath);
@@ -2760,6 +2800,9 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Equal(
                 omissionUuid,
                 retriedOmission.GetProperty("observationUuid").GetGuid());
+            Assert.True(JsonElement.DeepEquals(
+                apiOutcome,
+                retriedOmission.GetProperty("outcome")));
         }
         finally
         {

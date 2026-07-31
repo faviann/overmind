@@ -570,6 +570,8 @@ public sealed class SafetyGateTests : IDisposable
         Assert.Equal(JsonValueKind.Null, root.GetProperty("absent").ValueKind);
         Assert.Contains("sensitive_field_scalar", result.OmissionReasons);
         Assert.Contains("sensitive_field_subtree", result.OmissionReasons);
+        Assert.Equal(3, result.Omissions.Count);
+        Assert.All(result.Omissions, omission => Assert.Null(omission.OriginalByteCount));
     }
 
     [Fact]
@@ -678,6 +680,8 @@ public sealed class SafetyGateTests : IDisposable
         Assert.Equal(
             "[OMITTED:leaf_exceeds_limit]", document.RootElement.GetProperty("big").GetString());
         Assert.Equal(["leaf_exceeds_limit"], result.OmissionReasons);
+        CaptureScanOmission omission = Assert.Single(result.Omissions);
+        Assert.Equal(64, omission.OriginalByteCount);
     }
 
     [Fact]

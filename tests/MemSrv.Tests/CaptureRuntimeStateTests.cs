@@ -1174,6 +1174,7 @@ public sealed class CaptureRuntimeStateTests
         clock.Stop();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.True(selected.WasOmitted);
+        Assert.Equal([8L * 1024 * 1024], selected.OriginalByteCounts);
         Assert.True(
             allocated < 4L * 1024 * 1024,
             $"Bounded binary rewriting allocated {allocated:N0} bytes.");
@@ -1230,6 +1231,9 @@ public sealed class CaptureRuntimeStateTests
         Assert.Equal(
             CaptureFidelityPolicy.UnsupportedBinaryReason,
             omission.GetProperty("reason").GetString());
+        Assert.Equal(
+            omission.GetProperty("originalByteCount").GetInt64(),
+            Assert.Single(selected.OriginalByteCounts));
         Assert.Equal(
             "expansion-session",
             omission.GetProperty("sourceIdentity")
@@ -1309,19 +1313,19 @@ public sealed class CaptureRuntimeStateTests
             string childId,
             long sourcePosition,
             string locatorKind) => new
-        {
-            reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
-            category = "image",
-            originalByteCount = 2,
-            policyVersion = CaptureFidelityPolicy.CurrentVersion,
-            sourceIdentity = new
             {
-                externalSessionId,
-                childId,
-                sourcePosition,
-                locatorKind
-            }
-        };
+                reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+                category = "image",
+                originalByteCount = 2,
+                policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                sourceIdentity = new
+                {
+                    externalSessionId,
+                    childId,
+                    sourcePosition,
+                    locatorKind
+                }
+            };
         object omission = Omission(
             "recognition-session",
             "recognition-child",
@@ -3356,6 +3360,89 @@ public sealed class CaptureRuntimeStateTests
             CancellationToken cancellationToken = default) =>
             inner.DeliverAuthorizedAsync(
                 sourceStream, queued, deliverAsync, cancellationToken);
+    }
+
+    [Fact]
+    public async Task ClaimerQueuesEveryScannerOmissionAndAdvancesEnqueuedThrough()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-omissions-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            "{\"type\":\"synthetic\"}\n",
+            new UTF8Encoding(false));
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            CaptureRuntimeQueueItem claim = Assert.Single(
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new ScannerOmissionAdapter(),
+                    transcript,
+                    "scanner-omission-stream",
+                    state,
+                    new NeverStoreGate(new SelectiveOmissionScanner())));
+
+            CaptureOutcomeCounter counter = Assert.Single(claim.Outcome.Counters);
+            Assert.Equal(CaptureOutcomeReason.LeafExceedsLimit, counter.Reason);
+            Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+            Assert.Equal(2, counter.Count);
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await state.ReadAsync()).Streams);
+            Assert.Equal(0, stream.EnqueuedThrough);
+            Assert.Single(stream.Queue);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private sealed class ScannerOmissionAdapter : ICaptureSourceAdapter
+    {
+        public string Harness => "codex";
+        public CaptureAdapter Identity { get; } = new("scanner-omission-test", "1");
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var locator = Assert.IsType<CaptureSourceLocator.ByteRange>(source.Locator);
+            JsonElement payload = JsonSerializer.SerializeToElement(new { value = "omit-me" });
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    source.SourceIdentity.ExternalSessionId,
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        locator.Kind,
+                        null,
+                        locator.Offset,
+                        locator.Length,
+                        locator.SourceContentSha256),
+                    null,
+                    new CaptureSource(Harness, null, "synthetic"),
+                    Identity,
+                    payload,
+                    [new CaptureEvent(
+                        "event/0", 0, "opaque", "harness", payload, null, [])],
+                    SourceIdentity: source.SourceIdentity));
+        }
+    }
+
+    private sealed class SelectiveOmissionScanner : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            value == "omit-me"
+                ? LeafOutcome.Omitted(
+                    CaptureOutcomeReason.LeafExceedsLimit,
+                    Encoding.UTF8.GetByteCount(value))
+                : LeafOutcome.Scanned(value, [], [], 0, null);
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) => false;
     }
 
     private sealed class RetainedMetadataAdapter(string rawSentinel) : ICaptureSourceAdapter

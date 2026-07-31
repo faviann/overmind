@@ -29,9 +29,8 @@ public sealed class OperatorCaptureReads(string connectionString)
             ?? throw new InvalidOperationException(
                 $"Capture observation '{observationUuid}' was not found.");
         var events = await CaptureLedger.LoadEventsAsync(connection, observationUuid);
-        CaptureOutcomeSummary outcome = CaptureOutcomeAggregation.FromCanonical(
-            observation,
-            events.Select(item => item.Event.Payload));
+        CaptureOutcomeSummary outcome = await CaptureLedger.LoadOutcomeAsync(
+            connection, observationUuid);
         return events
             .Select(item => new CapturedEventEnvelope(
                 ContractVersion, observation, item.Event, item.Relationships, outcome))
@@ -62,6 +61,8 @@ public sealed class OperatorCaptureReads(string connectionString)
         {
             var events = await CaptureLedger.LoadEventsAsync(
                 connection, item.Observation.ObservationUuid);
+            CaptureOutcomeSummary outcome = await CaptureLedger.LoadOutcomeAsync(
+                connection, item.Observation.ObservationUuid);
             replayedEvents.AddRange(events.Select(captured => new CapturedEventReplay(
                 item.SourcePosition,
                 new CapturedEventEnvelope(
@@ -69,9 +70,7 @@ public sealed class OperatorCaptureReads(string connectionString)
                     item.Observation,
                     captured.Event,
                     captured.Relationships,
-                    CaptureOutcomeAggregation.FromCanonical(
-                        item.Observation,
-                        events.Select(value => value.Event.Payload))))));
+                    outcome))));
         }
 
         return new CapturedSourceStreamReplay(

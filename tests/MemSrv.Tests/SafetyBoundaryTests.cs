@@ -70,6 +70,9 @@ public sealed class SafetyBoundaryTests : HttpSeamTestBase
             "[OMITTED:leaf_exceeds_limit]",
             document.RootElement.GetProperty("oversized").GetString());
         Assert.Equal(["leaf_exceeds_limit"], result.OmissionReasons);
+        Assert.Equal(
+            LeafLimitBytes + 1,
+            Assert.Single(result.Omissions).OriginalByteCount);
 
         // A required identity value that large cannot be inspected at all.
         Assert.Throws<SafetyScanException>(() => gate.AssertAllowed(oversized));
@@ -140,6 +143,10 @@ public sealed class SafetyBoundaryTests : HttpSeamTestBase
         Assert.Contains(
             "omission:leaf_exceeds_limit",
             accepted.Observation.Scan.RuleIds);
+        CaptureOutcomeCounter leafOutcome = Assert.Single(accepted.Outcome.Counters);
+        Assert.Equal(CaptureOutcomeReason.LeafExceedsLimit, leafOutcome.Reason);
+        Assert.Equal(CaptureSizeBand.Over64MiBThrough128MiB, leafOutcome.SizeBand);
+        Assert.Equal(1, leafOutcome.Count);
         emptyAtLimit = null!;
         atLimit = null!;
         ReleaseLargeValues();

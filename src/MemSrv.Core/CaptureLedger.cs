@@ -98,6 +98,23 @@ internal static class CaptureLedger
             row.CapturedAt);
     }
 
+    internal static async Task<CaptureOutcomeSummary> LoadOutcomeAsync(
+        NpgsqlConnection connection,
+        Guid observationUuid,
+        NpgsqlTransaction? transaction = null)
+    {
+        string json = await connection.QuerySingleAsync<string>(
+            """
+            SELECT capture_outcome::text
+            FROM capture_observations
+            WHERE observation_uuid = @observationUuid
+            """,
+            new { observationUuid }, transaction);
+        return JsonSerializer.Deserialize<CaptureOutcomeSummary>(json, JsonOptions)
+            ?? throw new InvalidOperationException(
+                "Stored capture outcome is unavailable.");
+    }
+
     internal static async Task<IReadOnlyList<CapturedEventReceipt>> LoadEventsAsync(
         NpgsqlConnection connection,
         Guid observationUuid,

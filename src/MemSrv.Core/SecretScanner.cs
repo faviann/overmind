@@ -37,20 +37,20 @@ internal static class SafetyMarkers
 internal static class OmissionReasons
 {
     /// <summary>The leaf is larger than the versioned per-leaf byte budget.</summary>
-    public const string LeafExceedsLimit = "leaf_exceeds_limit";
+    public const string LeafExceedsLimit = CaptureOutcomeReason.LeafExceedsLimit;
 
     /// <summary>A sensitive property name carried a non-string scalar; there is no span to map.</summary>
-    public const string SensitiveFieldScalar = "sensitive_field_scalar";
+    public const string SensitiveFieldScalar = CaptureOutcomeReason.SensitiveFieldScalar;
 
     /// <summary>A sensitive property name carried an object or array; a subtree has no exact span.</summary>
-    public const string SensitiveFieldSubtree = "sensitive_field_subtree";
+    public const string SensitiveFieldSubtree = CaptureOutcomeReason.SensitiveFieldSubtree;
 
     /// <summary>
     /// Two sibling property names became the same text after redaction. Writing
     /// both would emit a duplicate JSON key and silently lose one value on
     /// re-parse, so the whole object is dropped instead.
     /// </summary>
-    public const string RedactedNameCollision = "redacted_name_collision";
+    public const string RedactedNameCollision = CaptureOutcomeReason.RedactedNameCollision;
 }
 
 /// <summary>
@@ -145,9 +145,10 @@ internal sealed class SecretScanner : ISafetyScanner
     public LeafOutcome ScanLeaf(string value, string? propertyName, ScanBudgetState state)
     {
         state.CheckDeadline();
-        if (Encoding.UTF8.GetByteCount(value) > _budgets.MaxLeafBytes)
+        long byteCount = Encoding.UTF8.GetByteCount(value);
+        if (byteCount > _budgets.MaxLeafBytes)
         {
-            return LeafOutcome.Omitted(OmissionReasons.LeafExceedsLimit);
+            return LeafOutcome.Omitted(OmissionReasons.LeafExceedsLimit, byteCount);
         }
 
         var matches = new List<SpanMatch>();
@@ -617,6 +618,7 @@ internal sealed class SecretScanner : ISafetyScanner
 internal sealed record LeafOutcome(
     string? Value,
     string? OmissionReason,
+    long? OmittedByteCount,
     IReadOnlyCollection<string> RuleIds,
     IReadOnlyCollection<string> Categories,
     int RedactionCount,
@@ -629,9 +631,10 @@ internal sealed record LeafOutcome(
         IReadOnlyCollection<string> ruleIds,
         IReadOnlyCollection<string> categories,
         int redactionCount,
-        PrimaryMatch? primary) => new(value, null, ruleIds, categories, redactionCount, primary);
+        PrimaryMatch? primary) => new(value, null, null, ruleIds, categories, redactionCount, primary);
 
-    public static LeafOutcome Omitted(string reason) => new(null, reason, [], [], 0, null);
+    public static LeafOutcome Omitted(string reason, long? originalByteCount = null) =>
+        new(null, reason, originalByteCount, [], [], 0, null);
 }
 
 /// <summary>

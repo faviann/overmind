@@ -40,9 +40,13 @@ checkpoint paths. Operational scanner failures set health to `blocked`, leave
 fidelity independent, and occur before claim or append. Counters group only by
 closed harness, reason, and size-band vocabularies; they contain no byte count,
 locator, digest, request, credential, excerpt, or source identity. The
-projection creates no datastore: canonical operator receipts rebuild it from
-safe scan provenance, while runtime state carries it beside an already-safe
-queue item.
+aggregation creates no datastore. Ingestion persists its validated canonical
+JSON as immutable server-authored `capture_observations.capture_outcome` in the
+same transaction as the observation, events, and checkpoint; retries and
+operator reads load that exact value. Existing rows receive the healthy,
+complete default. Source/event payload markers are replay evidence only and are
+never re-read to reconstruct outcome counters. Runtime state carries the same
+validated projection beside an already-safe queue item.
 
 **`CaptureFidelityPolicy`** — owns the complete deterministic serialization
 boundary: stream the original serialization through a byte-counting discard
@@ -383,8 +387,12 @@ past its byte limit, a sensitive property name carrying a subtree, or a
 redaction-caused name collision is a recorded fidelity outcome that the server
 persists *as* an omission, not an unscanned tail, so the runtime still sends
 those observations. Apart from the deterministic whole-observation transport
-omission, the runtime discards the scan result and does **not** rewrite the
-payload it transmits. Replacing an in-limit original payload with its scan
+omission, the runtime retains every scanner omission occurrence in the durable
+queue outcome but does **not** transmit the rewritten payload. Only an
+oversized leaf carries its already-computed UTF-8 byte count; subtree, scalar,
+and name-collision omissions carry unknown size. Ingestion independently
+groups its scanner occurrences into the canonical server outcome. Replacing an
+in-limit original payload with its scan
 result would make the server scan already-sanitized bytes and record
 `scan_status = "clean"` with no rule ids for content that was in fact redacted.
 Imported content supplies evidence only and cannot assert its own canonical
@@ -417,7 +425,10 @@ because the digest is signed but never stored.
 
 `CaptureSourceLocator` also owns both directions of its persistence projection —
 `ToColumns()` and `FromColumns()` — so the four `capture_observations` locator
-columns cannot be written one way and read back another.
+columns cannot be written one way and read back another. The adjacent
+`capture_outcome` JSONB value is validated through `CaptureOutcomeSummary`
+before insert and after load; grouped dimension tuples must be unique and in
+canonical ordinal order.
 
 ## One set of canonical facts
 

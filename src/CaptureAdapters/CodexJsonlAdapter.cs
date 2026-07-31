@@ -94,9 +94,40 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 "A native_id Codex record with unsupported binary content fails closed: " +
                 CaptureFidelityPolicy.UnsupportedBinaryReason + ".");
         }
+        var outcomeRecords = fidelity.OriginalByteCounts.Select(count =>
+            CaptureOutcomeAggregation.FidelityOmission(
+                Harness,
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                count)).ToList();
+        string? terminalReason = source.RecordInterpretation switch
+        {
+            CaptureSourceRecordInterpretation.MalformedReadableText =>
+                CaptureFidelityPolicy.MalformedJsonReason,
+            CaptureSourceRecordInterpretation.Uninspectable =>
+                CaptureOutcomeReason.InvalidEncoding,
+            _ => null
+        };
+        if (terminalReason is not null)
+        {
+            outcomeRecords.Add(CaptureOutcomeAggregation.FidelityOmission(
+                Harness,
+                terminalReason,
+                source.Locator is CaptureSourceLocator.ByteRange byteRange
+                    ? byteRange.Length
+                    : null));
+        }
+        CaptureOutcomeSummary adapterOutcome =
+            CaptureOutcomeAggregation.Summarize(outcomeRecords);
+        CaptureObservationRequest selected = fidelity.Observation with
+        {
+            AdapterOutcome = adapterOutcome.Counters.Count == 0
+                ? null
+                : adapterOutcome
+        };
         return new CaptureSourcePositionOutcome.Terminal(
             source.SourcePosition,
-            fidelity.Observation);
+            selected,
+            adapterOutcome);
     }
 
     private static IReadOnlyList<CaptureEvent> Interpret(

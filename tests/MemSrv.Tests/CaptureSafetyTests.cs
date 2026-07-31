@@ -1562,6 +1562,66 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             }
         };
 
+    [Fact]
+    public async Task InjectedScannerOmissionsAppendAdvanceAndCountEveryOccurrence()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"scanner-omissions-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        CaptureObservationCommand Command(long position, string locator, JsonElement payload) =>
+            CaptureObservationCommand.FromRequest(new CaptureObservationRequest(
+                1,
+                sourceSessionId,
+                position,
+                new CaptureLocator("native_id", locator, null, null, null),
+                null,
+                new CaptureSource("codex", null, "synthetic"),
+                new CaptureAdapter("test", "1"),
+                payload,
+                [new CaptureEvent(
+                    "event/0", 0, "opaque", "harness", payload, null, [])]));
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(new SelectiveOmissionScanner()));
+        JsonElement omittedPayload = JsonSerializer.SerializeToElement(
+            new { first = "omit-me", second = "omit-me" });
+
+        CaptureImportReceipt omitted = await ingestion.ImportAsync(
+            binding,
+            Command(0, $"scanner-omitted-{Guid.NewGuid():N}", omittedPayload));
+
+        Assert.Equal("new", omitted.Status);
+        CaptureOutcomeCounter counter = Assert.Single(omitted.Outcome.Counters);
+        Assert.Equal(CaptureOutcomeReason.LeafExceedsLimit, counter.Reason);
+        Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+        Assert.Equal(4, counter.Count);
+        CaptureImportReceipt advanced = await ingestion.ImportAsync(
+            binding,
+            Command(
+                1,
+                $"scanner-safe-{Guid.NewGuid():N}",
+                JsonSerializer.SerializeToElement(new { safe = "kept" })));
+        Assert.Equal("new", advanced.Status);
+        Assert.Equal(1, advanced.SourcePosition);
+    }
+
+    private sealed class SelectiveOmissionScanner : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            value == "omit-me"
+                ? LeafOutcome.Omitted(
+                    CaptureOutcomeReason.LeafExceedsLimit,
+                    Encoding.UTF8.GetByteCount(value))
+                : LeafOutcome.Scanned(value, [], [], 0, null);
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) => false;
+    }
+
     private sealed class ThrowingSafetyScanner : ISafetyScanner
     {
         public LeafOutcome ScanLeaf(

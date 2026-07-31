@@ -647,10 +647,12 @@ public static class CodexCaptureClaimer
                     maxTransportBytes);
             string boundedJson = bounded.Serialized;
             string candidateJson;
+            NeverStoreScan candidateScan;
             try
             {
                 safetyGate.AssertObservationWithinBudget(boundedJson);
-                candidateJson = safetyGate.ScanJson(boundedJson).Redacted;
+                candidateScan = safetyGate.ScanJson(boundedJson);
+                candidateJson = candidateScan.Redacted;
             }
             catch (SafetyConfigurationException failure)
             {
@@ -677,10 +679,13 @@ public static class CodexCaptureClaimer
                 sourceStream,
                 locatorEvidence,
                 candidateJson,
-                RuntimeOutcome(
-                    terminal.Observation.Source.Harness,
-                    bounded,
-                    byteRange.Length));
+                CaptureOutcomeAggregation.Merge(
+                    RuntimeOutcome(bounded),
+                    [.. candidateScan.Omissions.Select(omission =>
+                        CaptureOutcomeAggregation.FidelityOmission(
+                            terminal.Observation.Source.Harness,
+                            omission.Reason,
+                            omission.OriginalByteCount))]));
             if (await state.ClaimAsync(
                     claim,
                     expectedPrefix,
@@ -734,44 +739,20 @@ public static class CodexCaptureClaimer
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     private static CaptureOutcomeSummary RuntimeOutcome(
-        string harness,
-        BoundedCaptureRepresentation<CaptureObservationRequest> bounded,
-        long sourceByteCount)
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded)
     {
-        if (bounded.WasOmitted)
-        {
-            return CaptureOutcomeAggregation.Summarize(
-            [
-                CaptureOutcomeAggregation.FidelityOmission(
-                    harness,
-                    CaptureFidelityPolicy.TransportLimitReason,
-                    bounded.OriginalByteCount)
-            ]);
-        }
-
-        CaptureObservationCommand command =
-            CaptureObservationCommand.FromRequest(bounded.Observation);
-        IReadOnlyList<long> binaryByteCounts =
-            CaptureFidelityPolicy.UnsupportedBinaryOmissionByteCounts(command);
-        if (binaryByteCounts.Count > 0)
-        {
-            return CaptureOutcomeAggregation.Summarize(
-                binaryByteCounts.Select(count =>
+        CaptureOutcomeSummary outcome =
+            bounded.Observation.AdapterOutcome ?? CaptureOutcomeAggregation.Empty;
+        return bounded.WasOmitted
+            && !outcome.Counters.Any(counter =>
+                counter.Reason == CaptureFidelityPolicy.TransportLimitReason)
+                ? CaptureOutcomeAggregation.Merge(
+                    outcome,
                     CaptureOutcomeAggregation.FidelityOmission(
-                        harness,
-                        CaptureFidelityPolicy.UnsupportedBinaryReason,
-                        count)));
-        }
-        return CaptureFidelityPolicy.ClassifyDeterministicFidelity(command)
-            is { } fidelity
-            ? CaptureOutcomeAggregation.Summarize(
-            [
-                CaptureOutcomeAggregation.FidelityOmission(
-                    harness,
-                    fidelity.Reason,
-                    sourceByteCount)
-            ])
-            : CaptureOutcomeAggregation.Empty;
+                        bounded.Observation.Source.Harness,
+                        CaptureFidelityPolicy.TransportLimitReason,
+                        bounded.OriginalByteCount))
+                : outcome;
     }
 }
 

@@ -91,3 +91,35 @@ internal sealed class HashingSerializationStream(
     protected override void WriteToSink(ReadOnlySpan<byte> buffer) =>
         hash.AppendData(buffer);
 }
+
+internal sealed class BoundedBufferSerializationStream(
+    long maximumBytes,
+    TimeSpan deadline) : GovernedSerializationStream(deadline)
+{
+    private readonly MemoryStream _buffer = new();
+
+    public ReadOnlyMemory<byte> WrittenMemory =>
+        _buffer.GetBuffer().AsMemory(0, checked((int)_buffer.Length));
+
+    protected override void WriteToSink(ReadOnlySpan<byte> buffer)
+    {
+        if (BytesWritten > maximumBytes - buffer.Length)
+        {
+            throw new CaptureRepresentationLimitException(
+                $"the governed capture representation exceeded {maximumBytes} bytes");
+        }
+        _buffer.Write(buffer);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _buffer.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}
+
+internal sealed class CaptureRepresentationLimitException(string message)
+    : Exception(message);

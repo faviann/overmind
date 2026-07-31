@@ -76,7 +76,10 @@ adapter/source provenance without changing the immutable source record; the
 server recognizes prior Codex adapter signatures narrowly where the record's
 derived events are unchanged and only adapter/signature identity moved. A
 record whose derived tool events changed in v7, whose relationship facts
-changed in v8, a changed locator, or changed source content remains a conflict.
+changed in v8, whose binary safe representation changed in v9, a changed
+locator, or changed source content remains a conflict. Unchanged pre-v9 records
+may converge under v9 compatibility; a command carrying the v9 binary-fidelity
+representation is never offered a prior-adapter compatibility signature.
 
 ## Tolerant parsing
 
@@ -87,6 +90,22 @@ Adapters are versioned tolerant tagged unions:
 - unsupported record or content variants become `opaque` events and retain
   their complete scanned source representation, including discriminators,
   additive fields, and safety-redacted sensitive evidence after ingestion;
+- the adapter-owned unsupported-byte tagged union is an object with exact
+  `type: "binary_content"`, one closed `category` value (`attachment`,
+  `archive`, `executable`, `image`, or `audio`), and an integer
+  `byte_payload` array whose members are all in the byte range. Before the
+  local durable queue, capture removes only `byte_payload` and adds the
+  content-free `unsupported_binary_content` fidelity omission under the
+  non-colliding policy-owned `capture_fidelity_omission` field (or its lowest
+  numeric suffix) with the exact array length, category, policy version, and
+  available source-stated media type, path, identity, and capture provenance.
+  Safe sibling metadata, a source-stated `omission`, and model-visible `text`
+  remain ordinary replayable evidence. Untagged values and malformed byte
+  representations are not classified by this union. Only direct `signature`
+  and `encrypted_content` children of the known Codex reasoning payload and
+  its adapter-owned opaque envelope remain ordinary metadata; the same names
+  in arbitrary objects do not exempt a nested valid `binary_content`;
+  there is no extension, entropy, or generic string classifier;
 - Codex response items explicitly tagged `reasoning` preserve explicitly tagged
   `summary_text` and `reasoning_text` blocks as canonical `reasoning`; encrypted
   content and signatures remain source evidence and are never interpreted as
@@ -187,6 +206,7 @@ The synthetic, version-labelled families are:
 - `fixtures/adapter-conformance/codex-cli-0.145.opaque.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.annotations.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.tools.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.146.binary-media.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.77.parent-only.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.90.fork-only.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.120.parent-fork.synthetic.jsonl`
@@ -215,7 +235,9 @@ boundary view paired with canonical `compacted` summary/history evidence. The
 0.145 tool family covers function, custom, and specialized call/result records,
 parallel and out-of-order native identities, missing names, string and
 structured values, explicit canonical outcomes, and visible turn abort/error
-records.
+records. The 0.146 binary/media family covers all five closed unsupported-byte
+categories, safe metadata and model-visible text retention, content-free
+original-byte-count omissions, and an opaque signature-shaped negative control.
 
 The five version-labelled relationship families cover parent-only, fork-only,
 combined parent/fork, nested spawn, and no-parent shapes. They assert the

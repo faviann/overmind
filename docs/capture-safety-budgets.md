@@ -58,6 +58,17 @@ materializes only its compact omission, while ingestion streams the original
 retry-signature representation directly into the keyed hash. Counting and
 hashing share one governed write-only serialization/deadline implementation.
 
+The explicit `binary_content` classifier uses the same fixed deadline and the
+applicable effective fidelity ceiling. It walks already-parsed JSON without
+constructing a raw string or mutable JSON tree. A record with no valid binary
+candidate is returned unchanged; a record with a candidate is streamed into a
+byte-capped rewritten representation while its validated byte array is skipped.
+If that rewritten representation crosses the effective ceiling, the ordinary
+transport/content serializer owns the deterministic whole-observation omission.
+Tests exercise a multi-megabyte valid byte array at the documented
+`CaptureFidelityPolicy` seam and assert bounded additional allocation and
+elapsed time without adding a production clock seam.
+
 ### `MaxDecoderCandidateLength` is an accepted residual risk
 
 `MaxDecoderCandidateLength` is deliberately **not** a fail-closed budget, and it

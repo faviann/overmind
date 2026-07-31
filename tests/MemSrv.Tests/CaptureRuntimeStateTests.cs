@@ -381,6 +381,74 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task ExplicitBinaryMediaBytesAreOmittedBeforeDurableClaimAndRetriesConverge()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string fixture = Path.Combine(
+            root,
+            "fixtures/adapter-conformance/codex-cli-0.146.binary-media.synthetic.jsonl");
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-binary-media-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var adapter = new CodexJsonlAdapter();
+
+            IReadOnlyList<CaptureRuntimeQueueItem> first =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    fixture,
+                    "binary-media-runtime",
+                    state,
+                    gate,
+                    terminalAtEndOfFile: true);
+            IReadOnlyList<CaptureRuntimeQueueItem> retry =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    fixture,
+                    "binary-media-runtime",
+                    state,
+                    gate,
+                    terminalAtEndOfFile: true);
+
+            Assert.Equal(10, first.Count);
+            Assert.Empty(retry);
+            CaptureRuntimeStreamState durable = Assert.Single(
+                (await state.ReadAsync()).Streams);
+            Assert.Equal(10, durable.Queue.Count);
+            using JsonDocument queued = JsonDocument.Parse(
+                durable.Queue[0].RedactedSafeCandidate);
+            JsonElement block = queued.RootElement.GetProperty("sourcePayload")
+                .GetProperty("payload").GetProperty("content")[0];
+            Assert.False(block.TryGetProperty("byte_payload", out _));
+            Assert.Equal(
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                block.GetProperty("capture_fidelity_omission")
+                    .GetProperty("reason").GetString());
+            Assert.Equal(4, block.GetProperty("capture_fidelity_omission")
+                .GetProperty("originalByteCount").GetInt64());
+            Assert.Equal("Visible attachment caption.", block.GetProperty("text").GetString());
+
+            string durableJson = await File.ReadAllTextAsync(
+                Path.Combine(directory, "state", "capture-state.json"));
+            Assert.DoesNotContain("\"byte_payload\":[1,2,3,4]", durableJson);
+            Assert.DoesNotContain(
+                "\"digest\"",
+                block.GetProperty("capture_fidelity_omission").GetRawText());
+            Assert.DoesNotContain(
+                "\"excerpt\"",
+                block.GetProperty("capture_fidelity_omission").GetRawText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void NativeRecordBeyondTransportLimitFailsClosedAtTheFidelityPolicy()
     {
         JsonElement payload = JsonSerializer.SerializeToElement(new
@@ -634,6 +702,58 @@ public sealed class CaptureRuntimeStateTests
             clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
             $"Streaming count took {clock.Elapsed}; the published deadline is " +
             $"{SafetyBudgets.Default.MaxScanTime}.");
+    }
+
+    [Fact]
+    public void PathologicalBinaryPayloadIsRewrittenWithinTransportAllocationAndDeadline()
+    {
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            type = "response_item",
+            payload = new
+            {
+                type = "message",
+                content = new[]
+                {
+                    new
+                    {
+                        type = "binary_content",
+                        category = "attachment",
+                        byte_payload = new int[8 * 1024 * 1024]
+                    }
+                }
+            }
+        });
+        CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+            JsonSerializer.SerializeToElement(new { type = "warm" }),
+            "codex",
+            CaptureFidelityPolicy.ProductionTransportBytes);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var clock = Stopwatch.StartNew();
+
+        BinaryFidelitySelection<JsonElement> selected =
+            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+                payload,
+                "codex",
+                CaptureFidelityPolicy.ProductionTransportBytes);
+
+        clock.Stop();
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(selected.WasOmitted);
+        Assert.True(
+            allocated < 4L * 1024 * 1024,
+            $"Bounded binary rewriting allocated {allocated:N0} bytes.");
+        Assert.True(
+            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            $"Binary rewriting took {clock.Elapsed}; the published deadline is " +
+            $"{SafetyBudgets.Default.MaxScanTime}.");
+        JsonElement block = selected.Observation.GetProperty("payload")
+            .GetProperty("content")[0];
+        Assert.False(block.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            8L * 1024 * 1024,
+            block.GetProperty("capture_fidelity_omission")
+                .GetProperty("originalByteCount").GetInt64());
     }
 
     [Fact]

@@ -16,7 +16,7 @@ Source interpretation before this spine is described by the
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
-| `CaptureFidelityPolicy` | `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
+| `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>`; `ReplaySourceStreamAsync(sourceStreamUuid)` → `CapturedSourceStreamReplay`; `NavigateCapturedSessionAsync(sourceStreamUuid, allowedNamespaces)` → `CapturedSessionNavigation` | `memctl capture receipt`; `memctl capture replay`; `memctl capture navigate` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
@@ -55,6 +55,26 @@ canonicalizes into top-level `sourceIdentity` in the omission before the legacy
 field is cleared, and that same identity is repeated in omission provenance.
 Mandatory source identity and locator values are never truncated or
 fingerprinted to make either bound fit.
+The same policy owns the adapter-defined `binary_content` fidelity outcome.
+Only an exact closed category plus a well-formed integer `byte_payload` array
+is eligible. It removes the byte array before durable local claim, retains
+safe sibling metadata and model-visible text, and emits content-free omission
+provenance with the exact array length and no excerpt or digest. Ingestion
+applies the policy independently before canonical append while signing the
+original authenticated command with the binding key, so identical retries
+converge and changed bytes conflict without persisting a reversible
+fingerprint. Binary classification and rewriting stream from the already-parsed
+source element into a deadline-governed buffer capped by the applicable fixed
+1,000,000-byte transport or 128 MiB content ceiling; they never create a
+complete raw JSON string or a second mutable JSON tree. The policy writes its
+replay evidence under `capture_fidelity_omission`, adding the lowest numeric
+suffix when that name is already source-owned, so a source-stated `omission`
+and every other safe sibling remain unchanged. Operator replay therefore
+distinguishes source evidence from the policy-owned omission explicitly.
+Only direct `signature` and `encrypted_content` children of the known Codex
+`response_item` reasoning payload (including its adapter-owned opaque event
+envelope) remain ordinary opaque evidence; the same property names elsewhere
+grant no exemption.
 
 **`NeverStoreGate`** — the single governed policy point every write path
 crosses, and the only type that knows rules exist. It hides the rule-set schema

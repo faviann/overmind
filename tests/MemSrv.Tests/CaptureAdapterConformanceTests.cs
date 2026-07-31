@@ -444,7 +444,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         Assert.Equal("turn_context", turnContext.Source.RecordType);
         Assert.Equal("gpt-5.6-terra", turnContext.Source.Model);
         Assert.Null(turnContext.Source.Provider);
-        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "8"), adapter.Identity);
+        Assert.Equal(new CaptureAdapter("codex-synthetic-jsonl", "9"), adapter.Identity);
     }
 
     [Fact]
@@ -778,6 +778,130 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task CodexExplicitBinaryMediaBytesBecomeFidelityOmissionsWhileSafeEvidenceRemains()
+    {
+        var adapter = new CodexJsonlAdapter();
+        string fixturePath = Path.Combine(
+            _root,
+            "fixtures/adapter-conformance/codex-cli-0.146.binary-media.synthetic.jsonl");
+        var source = await JsonlSourceReader.ReadAsync(
+            fixturePath,
+            "synthetic-codex-binary-media",
+            terminalAtEndOfFile: true);
+
+        var terminal = source.Select(adapter.Adapt)
+            .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
+            .ToArray();
+
+        Assert.Equal(10, terminal.Length);
+        string[] categories = ["attachment", "archive", "executable", "image", "audio"];
+        long[] byteCounts = [4, 3, 2, 4, 5];
+        string[] provenanceOrigins =
+        [
+            "model-visible-input",
+            "tool-result",
+            "tool-result",
+            "model-visible-input",
+            "model-visible-input"
+        ];
+        for (int index = 0; index < categories.Length; index++)
+        {
+            JsonElement block = terminal[index].Observation.SourcePayload
+                .GetProperty("payload").GetProperty("content")[0];
+            Assert.False(block.TryGetProperty("byte_payload", out _));
+            Assert.Equal(
+                $"Visible {categories[index]} " +
+                    (categories[index] switch
+                    {
+                        "attachment" => "caption.",
+                        "archive" => "description.",
+                        "executable" => "warning.",
+                        "image" => "alt text.",
+                        _ => "transcript."
+                    }),
+                block.GetProperty("text").GetString());
+            Assert.Equal(categories[index], block.GetProperty("category").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(
+                block.GetProperty("media_type").GetString()));
+            Assert.False(string.IsNullOrWhiteSpace(
+                block.GetProperty("source_path").GetString()));
+            Assert.False(string.IsNullOrWhiteSpace(
+                block.GetProperty("source_identity").GetString()));
+            Assert.Equal(
+                provenanceOrigins[index],
+                block.GetProperty("capture_provenance").GetProperty("origin").GetString());
+            JsonElement omission = block.GetProperty("capture_fidelity_omission");
+            Assert.Equal(
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                omission.GetProperty("reason").GetString());
+            Assert.Equal(categories[index], omission.GetProperty("category").GetString());
+            Assert.Equal(byteCounts[index], omission.GetProperty("originalByteCount").GetInt64());
+            Assert.Equal(
+                CaptureFidelityPolicy.CurrentVersion,
+                omission.GetProperty("policyVersion").GetString());
+            Assert.False(omission.TryGetProperty("excerpt", out _));
+            Assert.False(omission.TryGetProperty("digest", out _));
+        }
+
+        JsonElement signature = terminal[5].Observation.SourcePayload
+            .GetProperty("payload").GetProperty("signature");
+        Assert.Equal("binary_content", signature.GetProperty("type").GetString());
+        Assert.Equal(
+            [11, 22, 33],
+            signature.GetProperty("byte_payload").EnumerateArray()
+                .Select(item => item.GetInt32()));
+        Assert.Equal("synthetic-signature-only", signature.GetProperty("value").GetString());
+        Assert.False(signature.TryGetProperty("capture_fidelity_omission", out _));
+        JsonElement encryptedContent = terminal[5].Observation.SourcePayload
+            .GetProperty("payload").GetProperty("encrypted_content");
+        Assert.Equal(
+            [44, 55],
+            encryptedContent.GetProperty("byte_payload").EnumerateArray()
+                .Select(item => item.GetInt32()));
+        Assert.False(encryptedContent.TryGetProperty(
+            "capture_fidelity_omission", out _));
+        Assert.DoesNotContain(
+            terminal[5].Observation.Events,
+            item => item.Kind == "reasoning");
+
+        JsonElement unrelatedSignature = terminal[6].Observation.SourcePayload
+            .GetProperty("payload").GetProperty("content")[0]
+            .GetProperty("signature");
+        Assert.False(unrelatedSignature.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            unrelatedSignature.GetProperty("capture_fidelity_omission")
+                .GetProperty("reason").GetString());
+
+        JsonElement untagged = terminal[7].Observation.SourcePayload
+            .GetProperty("payload").GetProperty("content")[0];
+        Assert.Equal(
+            [1, 2, 3],
+            untagged.GetProperty("byte_payload").EnumerateArray()
+                .Select(item => item.GetInt32()));
+        Assert.False(untagged.TryGetProperty("capture_fidelity_omission", out _));
+
+        JsonElement malformed = terminal[8].Observation.SourcePayload
+            .GetProperty("payload").GetProperty("content")[0];
+        Assert.Equal(3, malformed.GetProperty("byte_payload").GetArrayLength());
+        Assert.False(malformed.TryGetProperty("capture_fidelity_omission", out _));
+
+        JsonElement sourceOmission = terminal[9].Observation.SourcePayload
+            .GetProperty("payload").GetProperty("content")[0];
+        Assert.Equal(
+            "retained",
+            sourceOmission.GetProperty("omission").GetProperty("source").GetString());
+        Assert.Equal(
+            "also-retained",
+            sourceOmission.GetProperty("capture_fidelity_omission")
+                .GetProperty("source").GetString());
+        Assert.Equal(
+            2,
+            sourceOmission.GetProperty("capture_fidelity_omission_1")
+                .GetProperty("originalByteCount").GetInt64());
+    }
+
+    [Fact]
     public async Task CodexContextRecordsPreserveScopedValuesInstructionsAndIndependentClocks()
     {
         var adapter = new CodexJsonlAdapter();
@@ -800,7 +924,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         });
         Assert.All(
             terminal,
-            outcome => Assert.Equal("8", outcome.Observation.Adapter.Version));
+            outcome => Assert.Equal("9", outcome.Observation.Adapter.Version));
 
         CaptureObservationRequest session = terminal[0].Observation;
         CaptureEvent sessionContext = Assert.Single(session.Events);
@@ -1218,7 +1342,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .ToArray();
 
         Assert.Equal(6, terminal.Length);
-        Assert.Equal("8", terminal[0].Observation.Adapter.Version);
+        Assert.Equal("9", terminal[0].Observation.Adapter.Version);
         Assert.Equal(
             [2, 1, 1, 1, 2, 1],
             terminal.Select(outcome => outcome.Observation.Events.Count));

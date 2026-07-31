@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "8");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "9");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -20,7 +20,12 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 source.SourcePosition, "source record may still be extended");
         }
 
-        JsonElement record = source.SourcePayload;
+        JsonElement record = CaptureFidelityPolicy
+            .OmitUnsupportedBinaryContent(
+                source.SourcePayload,
+                Harness,
+                CaptureFidelityPolicy.ProductionTransportBytes)
+            .Observation;
         bool isObjectRecord = record.ValueKind == JsonValueKind.Object;
         string? recordType = isObjectRecord
             ? JsonAdapterHelpers.NullableString(record, "type")

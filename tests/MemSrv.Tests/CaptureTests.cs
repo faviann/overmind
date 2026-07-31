@@ -2153,10 +2153,9 @@ public sealed class CaptureTests : HttpSeamTestBase
         var captureKey = CaptureCredential();
         await EnrollAsync("codex-tracer", captureKey);
         string fixtureCallId = $"call_{Guid.NewGuid():N}";
-        string fixturePath = Path.Combine(
-            Path.GetTempPath(), $"codex-synthetic-{Guid.NewGuid():N}.jsonl");
+        string fixturePath = CreateScheduledTranscriptPath("codex-synthetic");
         string fixture = await File.ReadAllTextAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"));
         fixture = fixture.Replace(
             "call_fixture_1", fixtureCallId, StringComparison.Ordinal);
         await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
@@ -2169,16 +2168,8 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Empty(disabled.Stdout);
             Assert.Contains("disabled", disabled.Stderr);
 
-            var enabled = await TestProcessRunner.RunCaptureTracerToExitAsync(
-                new Dictionary<string, string>
-                {
-                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
-                    ["OVERMIND_CAPTURE_URL"] = _baseUrl,
-                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
-                    ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
-                });
-            Assert.Equal(0, enabled.ExitCode);
+            var enabled = await RunEnabledTracerAsync(captureKey, fixturePath);
+            Assert.True(enabled.Succeeded);
             var receipts = enabled.Stdout.Split(
                     Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
                 .Select(line => JsonDocument.Parse(line).RootElement.Clone())
@@ -2320,12 +2311,10 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Equal(
                 receipts[2].GetProperty("observationUuid").GetGuid(),
                 localStream.LastServerReceipt?.ObservationUuid);
-            Assert.Contains("LIMITATION:", enabled.Stderr);
         }
         finally
         {
-            File.Delete(fixturePath);
-            DeleteRuntimeState(fixturePath);
+            DeleteScheduledTranscript(fixturePath);
         }
     }
 
@@ -2673,7 +2662,7 @@ public sealed class CaptureTests : HttpSeamTestBase
     {
         const string retainedTail = "WHOLE-TRANSPORT-BOUNDARY-TAIL";
         string fixtureTemplate = await File.ReadAllTextAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"));
         string[] templateLines = fixtureTemplate.Split(
             '\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(3, templateLines.Length);
@@ -2693,7 +2682,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             byte[] source = Encoding.UTF8.GetBytes(record + "\n");
             var sourceObservation = Assert.Single(JsonlSourceReader.Read(
                 source,
-                "codex-synthetic-rollout-v1",
+                "codex-synthetic-000000000000000000000000",
                 terminalAtEndOfFile: false));
             var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
                 new CodexJsonlAdapter().Adapt(sourceObservation));
@@ -2723,14 +2712,13 @@ public sealed class CaptureTests : HttpSeamTestBase
             await EnrollAsync(
                 $"codex-transport-{bindingSuffix}-{Guid.NewGuid():N}",
                 captureKey);
-            string fixturePath = Path.Combine(
-                Path.GetTempPath(), $"codex-transport-{Guid.NewGuid():N}.jsonl");
+            string fixturePath = CreateScheduledTranscriptPath("codex-transport");
             await File.WriteAllTextAsync(
                 fixturePath,
                 string.Join('\n', [record, templateLines[1], templateLines[2]]) + "\n",
                 new UTF8Encoding(false));
             var result = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(0, result.ExitCode);
+            Assert.True(result.Succeeded);
             JsonElement[] receipts = ParseReceiptLines(result.Stdout);
             Assert.Equal(3, receipts.Length);
             Assert.All(
@@ -2792,7 +2780,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             Guid omissionUuid = omitted.GetProperty("observationUuid").GetGuid();
             DeleteRuntimeState(overPath);
             var retry = await RunEnabledTracerAsync(overCredential, overPath);
-            Assert.Equal(0, retry.ExitCode);
+            Assert.True(retry.Succeeded);
             JsonElement retriedOmission = ParseReceiptLines(retry.Stdout)[0];
             Assert.Equal(
                 "already_accepted",
@@ -2812,8 +2800,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 {
                     continue;
                 }
-                File.Delete(path);
-                DeleteRuntimeState(path);
+                DeleteScheduledTranscript(path);
             }
         }
     }
@@ -4357,7 +4344,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(transcriptRoot);
         string firstRecord = (await File.ReadAllLinesAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl")))[0] + "\n";
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl")))[0] + "\n";
         await File.WriteAllTextAsync(
             Path.Combine(transcriptRoot, "first.jsonl"),
             firstRecord,
@@ -4431,7 +4418,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         string secondTranscript = Path.Combine(transcriptRoot, "second.jsonl");
         Directory.CreateDirectory(transcriptRoot);
         string[] records = await File.ReadAllLinesAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"));
         await File.WriteAllTextAsync(
             firstTranscript, records[0] + "\n", new UTF8Encoding(false));
         await File.WriteAllTextAsync(
@@ -4851,7 +4838,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         string laterTranscript = Path.Combine(transcriptRoot, "later-third.jsonl");
         Directory.CreateDirectory(transcriptRoot);
         string[] records = await File.ReadAllLinesAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"));
         await File.WriteAllTextAsync(
             firstTranscript,
             records[0] + "\n" + records[1],
@@ -5149,7 +5136,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         Directory.CreateDirectory(activeDirectory);
         Directory.CreateDirectory(archiveDirectory);
         string[] records = await File.ReadAllLinesAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"));
         await File.WriteAllTextAsync(
             activePath,
             records[0] + "\n" + records[1],
@@ -5226,7 +5213,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(transcriptRoot);
         File.Copy(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"),
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"),
             Path.Combine(transcriptRoot, "restart.jsonl"));
         int unavailablePort;
         using (var reservation = new TcpListener(IPAddress.Loopback, 0))
@@ -5313,7 +5300,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(transcriptRoot);
         string firstRecord = (await File.ReadAllLinesAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl")))[0] + "\n";
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl")))[0] + "\n";
         await File.WriteAllTextAsync(
             Path.Combine(transcriptRoot, "timeout.jsonl"),
             firstRecord,
@@ -5410,7 +5397,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(transcriptRoot);
         File.Copy(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"),
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"),
             Path.Combine(transcriptRoot, "lost-response.jsonl"));
         int proxyPort;
         using (var reservation = new TcpListener(IPAddress.Loopback, 0))
@@ -5522,9 +5509,8 @@ public sealed class CaptureTests : HttpSeamTestBase
     {
         var captureKey = CaptureCredential();
         await EnrollAsync($"codex-outage-{Guid.NewGuid():N}", captureKey);
-        string fixturePath = Path.Combine(
-            Path.GetTempPath(), $"codex-outage-{Guid.NewGuid():N}.jsonl");
-        File.Copy(Path.Combine(_root, "fixtures/codex-synthetic.jsonl"), fixturePath);
+        string fixturePath = CreateScheduledTranscriptPath("codex-outage");
+        File.Copy(Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"), fixturePath);
         int unavailablePort;
         using (var reservation = new TcpListener(IPAddress.Loopback, 0))
         {
@@ -5534,16 +5520,16 @@ public sealed class CaptureTests : HttpSeamTestBase
 
         try
         {
-            var outage = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var outage = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 new Dictionary<string, string>
                 {
                     ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                     ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{unavailablePort}",
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
                     ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
                 });
-            Assert.Equal(1, outage.ExitCode);
+            Assert.False(outage.Succeeded);
             Assert.Empty(outage.Stdout);
             CaptureRuntimeStreamState retained = Assert.Single(
                 (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
@@ -5552,7 +5538,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Null(retained.LastServerReceipt);
 
             var resumed = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(0, resumed.ExitCode);
+            Assert.True(resumed.Succeeded);
             JsonElement[] receipts = ParseReceiptLines(resumed.Stdout);
             Assert.Equal([0L, 1L, 2L], receipts.Select(
                 receipt => receipt.GetProperty("sourcePosition").GetInt64()));
@@ -5564,8 +5550,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
         finally
         {
-            File.Delete(fixturePath);
-            DeleteRuntimeState(fixturePath);
+            DeleteScheduledTranscript(fixturePath);
         }
     }
 
@@ -5574,9 +5559,8 @@ public sealed class CaptureTests : HttpSeamTestBase
     {
         var captureKey = CaptureCredential();
         await EnrollAsync($"codex-ambiguous-{Guid.NewGuid():N}", captureKey);
-        string fixturePath = Path.Combine(
-            Path.GetTempPath(), $"codex-ambiguous-{Guid.NewGuid():N}.jsonl");
-        File.Copy(Path.Combine(_root, "fixtures/codex-synthetic.jsonl"), fixturePath);
+        string fixturePath = CreateScheduledTranscriptPath("codex-ambiguous");
+        File.Copy(Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"), fixturePath);
         int proxyPort;
         using (var reservation = new TcpListener(IPAddress.Loopback, 0))
         {
@@ -5591,19 +5575,19 @@ public sealed class CaptureTests : HttpSeamTestBase
         {
             Task<JsonElement[]> committed = CommitToolResultAndLoseResponseAsync(
                 proxy, captureKey);
-            var ambiguous = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var ambiguous = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 new Dictionary<string, string>
                 {
                     ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                     ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{proxyPort}",
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
                     ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
                 });
             JsonElement[] committedReceipts = await committed;
             JsonElement committedResult = committedReceipts[2];
 
-            Assert.NotEqual(0, ambiguous.ExitCode);
+            Assert.False(ambiguous.Succeeded);
             JsonElement[] deliveredBeforeLoss = ParseReceiptLines(ambiguous.Stdout);
             Assert.Equal([0L, 1L], deliveredBeforeLoss.Select(
                 receipt => receipt.GetProperty("sourcePosition").GetInt64()));
@@ -5628,7 +5612,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Equal(new CaptureLedgerMechanics(3, 3, 1, 2), beforeRetry);
 
             var retry = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(0, retry.ExitCode);
+            Assert.True(retry.Succeeded);
             JsonElement retryReceipt = Assert.Single(ParseReceiptLines(retry.Stdout));
             Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
             Assert.Equal(2, retryReceipt.GetProperty("sourcePosition").GetInt64());
@@ -5649,8 +5633,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         finally
         {
             proxy.Stop();
-            File.Delete(fixturePath);
-            DeleteRuntimeState(fixturePath);
+            DeleteScheduledTranscript(fixturePath);
         }
     }
 
@@ -5660,10 +5643,9 @@ public sealed class CaptureTests : HttpSeamTestBase
         var captureKey = CaptureCredential();
         await EnrollAsync($"codex-byte-identity-{Guid.NewGuid():N}", captureKey);
         string fixtureCallId = $"call_{Guid.NewGuid():N}";
-        string fixturePath = Path.Combine(
-            Path.GetTempPath(), $"codex-byte-identity-{Guid.NewGuid():N}.jsonl");
+        string fixturePath = CreateScheduledTranscriptPath("codex-byte-identity");
         string fixture = await File.ReadAllTextAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"));
         fixture = fixture.Replace(
             "call_fixture_1", fixtureCallId, StringComparison.Ordinal);
         string firstBytes = fixture.Replace(
@@ -5691,17 +5673,17 @@ public sealed class CaptureTests : HttpSeamTestBase
         {
             await File.WriteAllTextAsync(fixturePath, firstBytes, new UTF8Encoding(false));
             Task forwardFirst = ForwardFirstThenFailSecondAsync(proxy, captureKey);
-            var first = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var first = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 new Dictionary<string, string>
                 {
                     ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                     ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{proxyPort}",
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
                     ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
                 });
             await forwardFirst;
-            Assert.Equal(1, first.ExitCode);
+            Assert.False(first.Succeeded);
             JsonElement firstReceipt = Assert.Single(ParseReceiptLines(first.Stdout));
             Guid observationUuid = firstReceipt.GetProperty("observationUuid").GetGuid();
             Guid sourceStreamUuid = firstReceipt.GetProperty("observation")
@@ -5728,7 +5710,7 @@ public sealed class CaptureTests : HttpSeamTestBase
 
             await File.WriteAllTextAsync(fixturePath, changedBytes, new UTF8Encoding(false));
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(4, conflict.ExitCode);
+            Assert.False(conflict.Succeeded);
             Assert.Empty(conflict.Stdout);
             Assert.Contains("verified_prefix_changed", conflict.Stderr);
 
@@ -5752,7 +5734,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 await ReadCaptureLedgerMechanicsAsync(sourceStreamUuid));
 
             var repeated = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(4, repeated.ExitCode);
+            Assert.False(repeated.Succeeded);
             Assert.Empty(repeated.Stdout);
             Assert.Contains("verified_prefix_changed", repeated.Stderr);
             Assert.Equal(
@@ -5769,8 +5751,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         finally
         {
             proxy.Stop();
-            File.Delete(fixturePath);
-            DeleteRuntimeState(fixturePath);
+            DeleteScheduledTranscript(fixturePath);
         }
     }
 
@@ -5779,10 +5760,9 @@ public sealed class CaptureTests : HttpSeamTestBase
     {
         var captureKey = CaptureCredential();
         await EnrollAsync($"codex-separator-identity-{Guid.NewGuid():N}", captureKey);
-        string fixturePath = Path.Combine(
-            Path.GetTempPath(), $"codex-separator-identity-{Guid.NewGuid():N}.jsonl");
+        string fixturePath = CreateScheduledTranscriptPath("codex-separator-identity");
         string fixture = await File.ReadAllTextAsync(
-            Path.Combine(_root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"));
         fixture = fixture.Replace(
             "call_fixture_1", $"call_{Guid.NewGuid():N}", StringComparison.Ordinal);
 
@@ -5790,7 +5770,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         {
             await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
             var first = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(0, first.ExitCode);
+            Assert.True(first.Succeeded);
             var firstReceipt = JsonDocument.Parse(first.Stdout.Split(
                 Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
             Guid observationUuid = firstReceipt.GetProperty("observationUuid").GetGuid();
@@ -5800,7 +5780,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             string crlfFixture = fixture.Replace("\n", "\r\n", StringComparison.Ordinal);
             await File.WriteAllTextAsync(fixturePath, crlfFixture, new UTF8Encoding(false));
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(4, conflict.ExitCode);
+            Assert.False(conflict.Succeeded);
             Assert.Empty(conflict.Stdout);
             Assert.Contains("verified_prefix_changed", conflict.Stderr);
             CaptureRuntimeStreamState stopped = Assert.Single(
@@ -5820,8 +5800,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
         finally
         {
-            File.Delete(fixturePath);
-            DeleteRuntimeState(fixturePath);
+            DeleteScheduledTranscript(fixturePath);
         }
     }
 
@@ -5830,10 +5809,9 @@ public sealed class CaptureTests : HttpSeamTestBase
     {
         var captureKey = CaptureCredential();
         await EnrollAsync($"codex-runtime-gap-{Guid.NewGuid():N}", captureKey);
-        string fixturePath = Path.Combine(
-            Path.GetTempPath(), $"codex-runtime-gap-{Guid.NewGuid():N}.jsonl");
+        string fixturePath = CreateScheduledTranscriptPath("codex-runtime-gap");
         string stateDirectory = RuntimeStateDirectory(fixturePath);
-        File.Copy(Path.Combine(_root, "fixtures/codex-synthetic.jsonl"), fixturePath);
+        File.Copy(Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl"), fixturePath);
 
         try
         {
@@ -5842,7 +5820,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 await CodexCaptureClaimer.ClaimCompletedAsync(
                     new CodexJsonlAdapter(),
                     fixturePath,
-                    "codex-synthetic-rollout-v1",
+                    CodexTranscriptDiscovery.Enumerate(fixturePath).Single().SourceStream,
                     state,
                     new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
             Assert.Equal([0L, 1L, 2L], claims.Select(item => item.SourcePosition));
@@ -5857,7 +5835,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     Guid.NewGuid()));
 
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(4, conflict.ExitCode);
+            Assert.False(conflict.Succeeded);
             Assert.Empty(conflict.Stdout);
             Assert.Contains("blocked_by_earlier_gap", conflict.Stderr);
             Assert.DoesNotContain(
@@ -5877,7 +5855,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Equal(0, stoppedStream.LastServerReceipt?.SourcePosition);
 
             var repeated = await RunEnabledTracerAsync(captureKey, fixturePath);
-            Assert.Equal(4, repeated.ExitCode);
+            Assert.False(repeated.Succeeded);
             Assert.Empty(repeated.Stdout);
             Assert.Contains("blocked_by_earlier_gap", repeated.Stderr);
             Assert.Equal(
@@ -5886,8 +5864,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
         finally
         {
-            File.Delete(fixturePath);
-            DeleteRuntimeState(fixturePath);
+            DeleteScheduledTranscript(fixturePath);
         }
     }
 
@@ -6575,16 +6552,16 @@ public sealed class CaptureTests : HttpSeamTestBase
         }
     }
 
-    private Task<(int ExitCode, string Stdout, string Stderr)> RunEnabledTracerAsync(
+    private Task<(bool Succeeded, string Stdout, string Stderr)> RunEnabledTracerAsync(
         string captureKey,
         string fixturePath) =>
-        TestProcessRunner.RunCaptureTracerToExitAsync(
+        TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
             new Dictionary<string, string>
             {
                 ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                 ["OVERMIND_CAPTURE_URL"] = _baseUrl,
                 ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                ["OVERMIND_CODEX_FIXTURE"] = fixturePath,
+                ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
                 ["OVERMIND_CAPTURE_STATE_DIR"] = RuntimeStateDirectory(fixturePath)
             });
 
@@ -6810,6 +6787,23 @@ public sealed class CaptureTests : HttpSeamTestBase
 
     private static string RuntimeStateDirectory(string fixturePath) =>
         fixturePath + ".overmind-state";
+
+    private static string CreateScheduledTranscriptPath(string prefix)
+    {
+        string transcriptRoot = Path.Combine(
+            Path.GetTempPath(), $"{prefix}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(transcriptRoot);
+        return Path.Combine(transcriptRoot, "rollout.jsonl");
+    }
+
+    private static void DeleteScheduledTranscript(string fixturePath)
+    {
+        string transcriptRoot = Path.GetDirectoryName(fixturePath)!;
+        if (Directory.Exists(transcriptRoot))
+        {
+            Directory.Delete(transcriptRoot, recursive: true);
+        }
+    }
 
     private static void DeleteRuntimeState(string fixturePath)
     {

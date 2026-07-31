@@ -64,12 +64,8 @@ docker run --rm \
   overmind-codex-capture-fixture
 ```
 
-It defaults to the baked synthetic three-record JSONL fixture.
-`OVERMIND_CODEX_FIXTURE` may explicitly select another synthetic fixture for
-non-production tests. The exact-value enable gate and strict three-record
-rollout-schema validation still apply to that one-shot compatibility mode.
-
-For scheduled synthetic testing, `OVERMIND_CODEX_TRANSCRIPT_ROOT` selects a
+It defaults to a transcript directory containing the baked synthetic JSONL
+fixture. `OVERMIND_CODEX_TRANSCRIPT_ROOT` selects a
 directory tree whose `*.jsonl` files are enumerated immediately at startup and
 again after every complete scan cycle. `OVERMIND_CAPTURE_SCAN_INTERVAL_MS`
 configures the positive base delay (default `1000`) and
@@ -113,8 +109,7 @@ The fixture uses representative persisted Codex rollout records shaped as
 `{timestamp,type,payload}`: a nested `message`/`input_text`, a
 `function_call` with JSON-string arguments, and a `function_call_output`.
 Rollout records do not invent a per-record session ID; this disabled adapter
-uses one stable synthetic source session in one-shot mode and a stable
-logical-path-derived source stream per scheduled file, while capture bindings
+uses a stable logical-path-derived source stream per file, while capture bindings
 isolate installations. It sends ordered observations to
 `POST /capture/v1/observations`.
 

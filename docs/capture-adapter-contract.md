@@ -297,7 +297,7 @@ including local redaction and content-free invalid-UTF-8 omission without
 storing a replacement-decoded prefix.
 The built `CodexCaptureTracer` consumes this family through scheduled transcript
 discovery, authenticated capture, deterministic retry, and `memctl` operator
-receipt reads; the legacy three-record compatibility fixture remains unchanged.
+receipt reads. The three-record synthetic transcript remains reusable test data.
 
 The five version-labelled relationship families cover parent-only, fork-only,
 combined parent/fork, nested spawn, and no-parent shapes. They assert the

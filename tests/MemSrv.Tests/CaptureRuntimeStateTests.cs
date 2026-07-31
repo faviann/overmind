@@ -1894,7 +1894,7 @@ public sealed class CaptureRuntimeStateTests
         string transcript = Path.Combine(directory, "rollout.jsonl");
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
-        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -1903,7 +1903,7 @@ public sealed class CaptureRuntimeStateTests
             ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
             ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}",
             ["OVERMIND_CAPTURE_CREDENTIAL"] = $"mcap_{Guid.NewGuid():N}",
-            ["OVERMIND_CODEX_FIXTURE"] = transcript,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(transcript)!,
             ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory
         };
 
@@ -1934,8 +1934,8 @@ public sealed class CaptureRuntimeStateTests
             Assert.Null(failedStream.LastServerReceipt);
 
             listener.Stop();
-            var restarted = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
-            Assert.NotEqual(0, restarted.ExitCode);
+            var restarted = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(environment);
+            Assert.False(restarted.Succeeded);
             Assert.Empty(restarted.Stdout);
             CaptureRuntimeSnapshot afterRestart = await state.ReadAsync();
             Assert.Equal(
@@ -2308,7 +2308,7 @@ public sealed class CaptureRuntimeStateTests
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
         string original = await File.ReadAllTextAsync(
-            Path.Combine(root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"));
         string firstBytes = original.Replace(
             "\"type\":\"response_item\"",
             "\"type\": \"response_item\"",
@@ -2389,7 +2389,7 @@ public sealed class CaptureRuntimeStateTests
         string transcript = Path.Combine(directory, "rollout.jsonl");
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
-        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
 
         try
         {
@@ -2441,7 +2441,7 @@ public sealed class CaptureRuntimeStateTests
         string transcript = Path.Combine(directory, "rollout.jsonl");
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
-        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
 
         try
         {
@@ -2526,7 +2526,7 @@ public sealed class CaptureRuntimeStateTests
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(stateDirectory);
         string fixture = await File.ReadAllTextAsync(
-            Path.Combine(root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"));
         fixture = fixture.Replace(
             "Show the working directory.",
             new string('x', 700_000),
@@ -2730,7 +2730,7 @@ public sealed class CaptureRuntimeStateTests
     public async Task TransportSerializationFailureReportsBlockedHealthAndSendsNothing()
     {
         string root = TestProcessRunner.RepoRoot;
-        string fixture = Path.Combine(root, "fixtures/codex-synthetic.jsonl");
+        string fixture = Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl");
         string directory = Path.Combine(
             Path.GetTempPath(), $"capture-delivery-transport-fidelity-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
@@ -2796,7 +2796,7 @@ public sealed class CaptureRuntimeStateTests
     public async Task DeliveryScannerInternalFailureSendsNothingAndPersistsNoReceipt()
     {
         string root = TestProcessRunner.RepoRoot;
-        string fixture = Path.Combine(root, "fixtures/codex-synthetic.jsonl");
+        string fixture = Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl");
         string directory = Path.Combine(
             Path.GetTempPath(), $"capture-delivery-scanner-internal-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
@@ -2848,6 +2848,24 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task PackagedTracerRequiresTranscriptRootWhenEnabled()
+    {
+        var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            new Dictionary<string, string>
+            {
+                ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+                ["OVERMIND_CAPTURE_URL"] = "http://127.0.0.1:1",
+                ["OVERMIND_CAPTURE_CREDENTIAL"] = $"mcap_{Guid.NewGuid():N}",
+                ["OVERMIND_CAPTURE_STATE_DIR"] =
+                    Path.Combine(Path.GetTempPath(), $"capture-root-required-{Guid.NewGuid():N}")
+            });
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Empty(result.Stdout);
+        Assert.Contains("OVERMIND_CODEX_TRANSCRIPT_ROOT is required", result.Stderr);
+    }
+
+    [Fact]
     public async Task PackagedTracerDoesNotDeliverAnUnterminatedFinalRecord()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -2857,7 +2875,7 @@ public sealed class CaptureRuntimeStateTests
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
         string fixture = await File.ReadAllTextAsync(
-            Path.Combine(root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"));
         await File.WriteAllTextAsync(
             transcript,
             fixture.TrimEnd('\n'),
@@ -2877,11 +2895,11 @@ public sealed class CaptureRuntimeStateTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 TracerEnvironment(transcript, stateDirectory, port));
             await serverCancellation.CancelAsync();
 
-            Assert.Equal(0, result.ExitCode);
+            Assert.True(result.Succeeded);
             Assert.Equal(2, await server);
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
@@ -2905,7 +2923,7 @@ public sealed class CaptureRuntimeStateTests
         string transcript = Path.Combine(directory, "rollout.jsonl");
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
-        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -2921,10 +2939,10 @@ public sealed class CaptureRuntimeStateTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 TracerEnvironment(transcript, stateDirectory, port));
 
-            Assert.Equal(1, result.ExitCode);
+            Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
@@ -2951,7 +2969,7 @@ public sealed class CaptureRuntimeStateTests
         string transcript = Path.Combine(directory, "rollout.jsonl");
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
-        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -2967,10 +2985,10 @@ public sealed class CaptureRuntimeStateTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 TracerEnvironment(transcript, stateDirectory, port));
 
-            Assert.Equal(1, result.ExitCode);
+            Assert.False(result.Succeeded);
             Assert.Equal(1, await server);
             Assert.Empty(result.Stdout);
             CaptureRuntimeStreamState stream = Assert.Single(
@@ -2998,7 +3016,7 @@ public sealed class CaptureRuntimeStateTests
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
         string original = await File.ReadAllTextAsync(
-            Path.Combine(root, "fixtures/codex-synthetic.jsonl"));
+            Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"));
         string changed = original.Replace(
             "\"output\":\"/workspace\"",
             "\"output\":\"/workspacf\"",
@@ -3028,10 +3046,10 @@ public sealed class CaptureRuntimeStateTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 TracerEnvironment(transcript, stateDirectory, port));
 
-            Assert.Equal(4, result.ExitCode);
+            Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
             Assert.Equal(
                 [0L, 1L],
@@ -3055,9 +3073,9 @@ public sealed class CaptureRuntimeStateTests
             Assert.Equal(1, stream.LastServerReceipt?.SourcePosition);
             Assert.Equal(2, stream.EnqueuedThrough);
 
-            var repeated = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var repeated = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 TracerEnvironment(transcript, stateDirectory, port));
-            Assert.Equal(4, repeated.ExitCode);
+            Assert.False(repeated.Succeeded);
             Assert.Empty(repeated.Stdout);
             Assert.Equal(
                 JsonSerializer.Serialize(stopped),
@@ -3080,7 +3098,7 @@ public sealed class CaptureRuntimeStateTests
         string transcript = Path.Combine(directory, "rollout.jsonl");
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
-        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -3096,10 +3114,10 @@ public sealed class CaptureRuntimeStateTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 TracerEnvironment(transcript, stateDirectory, port));
 
-            Assert.NotEqual(0, result.ExitCode);
+            Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
             Assert.Contains(
                 "does not match queued sourcePosition 1",
@@ -3135,7 +3153,7 @@ public sealed class CaptureRuntimeStateTests
         string transcript = Path.Combine(directory, "rollout.jsonl");
         string stateDirectory = Path.Combine(directory, "state");
         Directory.CreateDirectory(directory);
-        File.Copy(Path.Combine(root, "fixtures/codex-synthetic.jsonl"), transcript);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -3152,11 +3170,11 @@ public sealed class CaptureRuntimeStateTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 TracerEnvironment(transcript, stateDirectory, port));
             await serverCancellation.CancelAsync();
 
-            Assert.NotEqual(0, result.ExitCode);
+            Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
@@ -3184,7 +3202,7 @@ public sealed class CaptureRuntimeStateTests
             ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
             ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}",
             ["OVERMIND_CAPTURE_CREDENTIAL"] = $"mcap_{Guid.NewGuid():N}",
-            ["OVERMIND_CODEX_FIXTURE"] = transcript,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(transcript)!,
             ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory
         };
 

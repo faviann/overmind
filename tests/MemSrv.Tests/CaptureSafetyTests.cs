@@ -106,17 +106,17 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             }
 
             // 3. The disabled tracer refuses to run at all.
-            var tracer = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var tracer = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 new Dictionary<string, string>
                 {
                     ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                     ["OVERMIND_CAPTURE_URL"] = _baseUrl,
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_FIXTURE"] =
-                        Path.Combine(_root, "fixtures/codex-synthetic.jsonl"),
+                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] =
+                        Path.Combine(_root, "fixtures/transcripts"),
                     ["MEMSRV_NEVER_STORE_PATH"] = rulesPath
                 });
-            Assert.NotEqual(0, tracer.ExitCode);
+            Assert.False(tracer.Succeeded);
             Assert.Empty(tracer.Stdout);
             Assert.Contains("refuses to run", tracer.Stderr);
             Assert.Contains(expectedReason, tracer.Stderr, StringComparison.OrdinalIgnoreCase);
@@ -1192,10 +1192,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     {
         string captureKey = CaptureCredential();
         await EnrollAsync($"codex-runtime-{Guid.NewGuid():N}", captureKey);
-        string fixturePath = Path.Combine(
-            Path.GetTempPath(), $"codex-runtime-safety-{Guid.NewGuid():N}.jsonl");
+        string fixturePath = CreateScheduledTranscriptPath("codex-runtime-safety");
         string fixture = (await File.ReadAllTextAsync(
-                Path.Combine(_root, "fixtures/codex-synthetic.jsonl")))
+                Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl")))
             .Replace("call_fixture_1", $"call_{Guid.NewGuid():N}", StringComparison.Ordinal)
             .Replace(
                 "Show the working directory.",
@@ -1205,15 +1204,16 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
         try
         {
-            var tracer = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var tracer = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 new Dictionary<string, string>
                 {
                     ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                     ["OVERMIND_CAPTURE_URL"] = _baseUrl,
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath
+                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
+                    ["OVERMIND_CAPTURE_STATE_DIR"] = fixturePath + ".overmind-state"
                 });
-            Assert.Equal(0, tracer.ExitCode);
+            Assert.True(tracer.Succeeded);
 
             // The runtime crossed the gate before the observation left the
             // process, but it did not rewrite what it sent: the receipt it
@@ -1232,7 +1232,6 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
             // Runtime diagnostics stay on stderr and carry no candidate value,
             // no captured content, no credential, and no import request.
-            Assert.Contains("LIMITATION:", tracer.Stderr);
             Assert.DoesNotContain(SeededFakeSecret, tracer.Stderr, StringComparison.Ordinal);
             Assert.DoesNotContain(captureKey, tracer.Stderr, StringComparison.Ordinal);
             Assert.DoesNotContain("working directory", tracer.Stderr, StringComparison.Ordinal);
@@ -1249,7 +1248,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         }
         finally
         {
-            File.Delete(fixturePath);
+            DeleteScheduledTranscript(fixturePath);
         }
     }
 
@@ -1257,14 +1256,13 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     public async Task DisabledRuntimeRefusesToSendWhenItsOwnScanFailsClosed()
     {
         string captureKey = CaptureCredential();
-        string fixturePath = Path.Combine(
-            Path.GetTempPath(), $"codex-failclosed-{Guid.NewGuid():N}.jsonl");
+        string fixturePath = CreateScheduledTranscriptPath("codex-failclosed");
         // Past the 10,000-match budget: the runtime's own scan fails closed
         // before anything is transmitted.
         string flood = string.Join(
             ' ', Enumerable.Range(0, 10_001).Select(index => $"AKIA{index:D16}"));
         string fixture = (await File.ReadAllTextAsync(
-                Path.Combine(_root, "fixtures/codex-synthetic.jsonl")))
+                Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl")))
             .Replace("call_fixture_1", $"call_{Guid.NewGuid():N}", StringComparison.Ordinal)
             .Replace("Show the working directory.", flood, StringComparison.Ordinal);
         await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
@@ -1298,16 +1296,17 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
         try
         {
-            var tracer = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var tracer = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
                 new Dictionary<string, string>
                 {
                     ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
                     ["OVERMIND_CAPTURE_URL"] = probeEndpoint.ToString(),
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_FIXTURE"] = fixturePath
+                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
+                    ["OVERMIND_CAPTURE_STATE_DIR"] = fixturePath + ".overmind-state"
                 });
 
-            Assert.NotEqual(0, tracer.ExitCode);
+            Assert.False(tracer.Succeeded);
             // Nothing was emitted: the independent HTTP probe saw no request.
             Assert.Empty(tracer.Stdout);
             Assert.Equal(0, Volatile.Read(ref requestCount));
@@ -1334,7 +1333,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             await probeCancellation.CancelAsync();
             listener.Stop();
             await responder;
-            File.Delete(fixturePath);
+            DeleteScheduledTranscript(fixturePath);
         }
     }
 
@@ -1456,6 +1455,23 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
     private static string CaptureCredential() => $"mcap_{Guid.NewGuid():N}";
     private static string UniqueSession() => $"safety-session-{Guid.NewGuid():N}";
+
+    private static string CreateScheduledTranscriptPath(string prefix)
+    {
+        string transcriptRoot = Path.Combine(
+            Path.GetTempPath(), $"{prefix}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(transcriptRoot);
+        return Path.Combine(transcriptRoot, "rollout.jsonl");
+    }
+
+    private static void DeleteScheduledTranscript(string fixturePath)
+    {
+        string transcriptRoot = Path.GetDirectoryName(fixturePath)!;
+        if (Directory.Exists(transcriptRoot))
+        {
+            Directory.Delete(transcriptRoot, recursive: true);
+        }
+    }
 
     private HttpClient CaptureClient(string key) => Client(_baseUrl, key);
 

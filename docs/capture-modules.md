@@ -380,9 +380,9 @@ The two sides do different things with the result. The runtime calls exactly two
 gate methods — `AssertObservationWithinBudget` and `ScanJson` — and **refuses on
 operational scan failure**: a budget exhausted while scanning the bounded
 representation, a matcher timeout, an internal scanner error, or an unusable
-rule set throws, so it emits nothing and says why on stderr. The one-shot
-compatibility mode exits non-zero; the scheduled synthetic mode retains
-responsibility and retries a later cycle. An omission is not a refusal — a leaf
+rule set throws, so it emits nothing and says why on stderr. The scheduled
+synthetic mode retains responsibility and retries a later cycle. An omission is
+not a refusal — a leaf
 past its byte limit, a sensitive property name carrying a subtree, or a
 redaction-caused name collision is a recorded fidelity outcome that the server
 persists *as* an omission, not an unscanned tail, so the runtime still sends

@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text;
+using CaptureAdapters;
 
 namespace MemSrv.Tests;
 
@@ -106,6 +108,103 @@ internal static class TestProcessRunner
             CreateStartInfo(CaptureTracerPath, [], environment),
             TimeSpan.FromSeconds(60),
             "CodexCaptureTracer");
+
+    public static async Task<(bool Succeeded, string Stdout, string Stderr)>
+        RunSingleStreamCaptureAttemptAsync(IReadOnlyDictionary<string, string> environment)
+    {
+        // Tests own the packaged scheduled runtime's lifetime: wait for one
+        // stream's durable success or failure evidence, then stop this child.
+        var scheduledEnvironment = new Dictionary<string, string>(environment)
+        {
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+        using var process = StartCaptureTracer(scheduledEnvironment);
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+        int stdoutLines = 0;
+        int stderrLines = 0;
+        process.OutputDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                lock (stdout)
+                {
+                    stdout.AppendLine(args.Data);
+                }
+                Interlocked.Increment(ref stdoutLines);
+            }
+        };
+        process.ErrorDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                lock (stderr)
+                {
+                    stderr.AppendLine(args.Data);
+                }
+                Interlocked.Increment(ref stderrLines);
+            }
+        };
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        string? stateDirectory = environment.GetValueOrDefault("OVERMIND_CAPTURE_STATE_DIR");
+        int inferredExitCode = 1;
+        bool exitedNaturally = false;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (!process.HasExited)
+            {
+                if (stateDirectory is not null)
+                {
+                    CaptureRuntimeSnapshot snapshot =
+                        await new FileCaptureRuntimeState(stateDirectory)
+                            .ReadAsync(timeout.Token);
+                    CaptureRuntimeStreamState? stream = snapshot.Streams.SingleOrDefault();
+                    if (stream?.Stop is not null)
+                    {
+                        inferredExitCode = 4;
+                        if (Volatile.Read(ref stderrLines) > 0)
+                        {
+                            break;
+                        }
+                    }
+                    else if (stream is not null && stream.EnqueuedThrough >= 0
+                        && stream.Queue.Count == 0)
+                    {
+                        if (Volatile.Read(ref stdoutLines) > 0)
+                        {
+                            inferredExitCode = 0;
+                            break;
+                        }
+                    }
+                }
+
+                if (Volatile.Read(ref stderrLines) > 0 && inferredExitCode != 4)
+                {
+                    break;
+                }
+                await Task.Delay(50, timeout.Token);
+            }
+            exitedNaturally = process.HasExited;
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            process.WaitForExit();
+        }
+
+        return (exitedNaturally
+                ? process.ExitCode == 0
+                : inferredExitCode == 0,
+            stdout.ToString(),
+            stderr.ToString());
+    }
 
     public static Process StartCaptureTracer(
         IReadOnlyDictionary<string, string> environment) =>

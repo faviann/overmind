@@ -3,7 +3,6 @@ using MemSrv.Core;
 using System.Text.Json;
 
 const string EnableValue = "synthetic-non-production";
-const string SingleFixtureSessionId = "codex-synthetic-rollout-v1";
 if (!string.Equals(
         Environment.GetEnvironmentVariable("OVERMIND_CODEX_CAPTURE_ENABLE"),
         EnableValue,
@@ -17,15 +16,10 @@ if (!string.Equals(
 
 string endpoint = Required("OVERMIND_CAPTURE_URL").TrimEnd('/');
 string credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
-string? scheduledLocation =
-    Environment.GetEnvironmentVariable("OVERMIND_CODEX_TRANSCRIPT_ROOT");
-bool scheduled = !string.IsNullOrWhiteSpace(scheduledLocation);
-string fixturePath = scheduled
-    ? Path.GetFullPath(scheduledLocation!)
-    : Required("OVERMIND_CODEX_FIXTURE");
+string transcriptRoot = Path.GetFullPath(Required("OVERMIND_CODEX_TRANSCRIPT_ROOT"));
 string stateDirectory =
     Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_STATE_DIR")
-    ?? fixturePath + ".overmind-state";
+    ?? transcriptRoot + ".overmind-state";
 
 // Fail closed before any source material is read: a tracer whose rule set is
 // missing, empty, invalid, duplicated, unsupported, or un-loadable refuses to
@@ -46,11 +40,6 @@ if (!safetyGate.IsConfigured)
         "Capture is unhealthy until the never-store rule set loads.");
     WriteOutcome(outcome);
     return 3;
-}
-
-if (!scheduled)
-{
-    await ValidateLegacySyntheticFixtureAsync(fixturePath);
 }
 
 var runtimeState = new FileCaptureRuntimeState(stateDirectory);
@@ -120,94 +109,51 @@ async Task ScanAndDeliverAsync(
     }
 }
 
-if (scheduled)
+CaptureRescanSchedule schedule = CaptureRescanConfiguration.Load();
+using var stopping = new CancellationTokenSource();
+Console.CancelKeyPress += (_, eventArgs) =>
 {
-    CaptureRescanSchedule schedule = CaptureRescanConfiguration.Load();
-    using var stopping = new CancellationTokenSource();
-    Console.CancelKeyPress += (_, eventArgs) =>
-    {
-        eventArgs.Cancel = true;
-        stopping.Cancel();
-    };
-
-    try
-    {
-        await CaptureRescanScheduler.RunAsync(
-            async cancellationToken =>
-            {
-                await CodexTranscriptScanCycle.RunAsync(
-                    CodexTranscriptDiscovery.Enumerate(fixturePath),
-                    async (transcript, token) =>
-                    {
-                        try
-                        {
-                            await ScanAndDeliverAsync(transcript, token);
-                        }
-                        catch (Exception ex) when (
-                            ex is CaptureDeliveryException
-                            or HttpRequestException
-                            or CapturePrefixChangedException
-                            or CaptureStreamStoppedException
-                            or CaptureRuntimeConcurrencyException
-                            or InvalidDataException
-                            or JsonException
-                            or SafetyScanException
-                            or SafetyConfigurationException)
-                        {
-                            // One source stream or endpoint outage cannot cancel
-                            // responsibility for later cycles/streams.
-                            WriteFailure(ex);
-                        }
-                    },
-                    WriteFailure,
-                    cancellationToken);
-            },
-            schedule,
-            cancellationToken: stopping.Token);
-    }
-    catch (OperationCanceledException) when (stopping.IsCancellationRequested)
-    {
-    }
-
-    WriteLimitation();
-    return 0;
-}
+    eventArgs.Cancel = true;
+    stopping.Cancel();
+};
 
 try
 {
-    await ScanAndDeliverAsync(
-        new CodexTranscriptStream(fixturePath, SingleFixtureSessionId),
-        CancellationToken.None);
+    await CaptureRescanScheduler.RunAsync(
+        async cancellationToken =>
+        {
+            await CodexTranscriptScanCycle.RunAsync(
+                CodexTranscriptDiscovery.Enumerate(transcriptRoot),
+                async (transcript, token) =>
+                {
+                    try
+                    {
+                        await ScanAndDeliverAsync(transcript, token);
+                    }
+                    catch (Exception ex) when (
+                        ex is CaptureDeliveryException
+                        or HttpRequestException
+                        or CapturePrefixChangedException
+                        or CaptureStreamStoppedException
+                        or CaptureRuntimeConcurrencyException
+                        or InvalidDataException
+                        or JsonException
+                        or SafetyScanException
+                        or SafetyConfigurationException)
+                    {
+                        // One source stream or endpoint outage cannot cancel
+                        // responsibility for later cycles/streams.
+                        WriteFailure(ex);
+                    }
+                },
+                WriteFailure,
+                cancellationToken);
+        },
+        schedule,
+        cancellationToken: stopping.Token);
 }
-catch (CaptureDeliveryException ex)
+catch (OperationCanceledException) when (stopping.IsCancellationRequested)
 {
-    Console.Error.WriteLine(ex.Message);
-    return 1;
-}
-catch (SafetyScanException ex)
-{
-    WriteFailure(ex);
-    return 3;
-}
-catch (SafetyConfigurationException ex)
-{
-    WriteFailure(ex);
-    return 3;
-}
-catch (CapturePrefixChangedException ex)
-{
-    Console.Error.WriteLine(ex.Message);
-    return 4;
-}
-catch (CaptureStreamStoppedException ex)
-{
-    Console.Error.WriteLine(ex.Message);
-    return 4;
-}
-catch (HttpRequestException ex)
-{
-    Console.Error.WriteLine($"Capture delivery failed: {ex.Message}");
-    return 1;
 }
 
 WriteLimitation();
@@ -266,52 +212,6 @@ static CaptureServerReceiptState ValidateReceipt(
         statusElement.GetString()!,
         observationUuid,
         sourceStreamUuid);
-}
-
-static async Task ValidateLegacySyntheticFixtureAsync(string fixturePath)
-{
-    var sourceRecords = await JsonlSourceReader.ReadAsync(
-        fixturePath, SingleFixtureSessionId, terminalAtEndOfFile: true);
-    if (sourceRecords.Count != 3)
-    {
-        throw new InvalidOperationException(
-            "Synthetic Codex fixture must contain exactly three JSONL records.");
-    }
-    if (sourceRecords.Any(record =>
-            record.SourcePayload.GetProperty("type").GetString() != "response_item"
-            || record.SourcePayload.GetProperty("timestamp").ValueKind != JsonValueKind.String))
-    {
-        throw new InvalidOperationException(
-            "Every synthetic Codex record must be a timestamped response_item rollout record.");
-    }
-
-    var message = sourceRecords[0].SourcePayload.GetProperty("payload");
-    var call = sourceRecords[1].SourcePayload.GetProperty("payload");
-    var result = sourceRecords[2].SourcePayload.GetProperty("payload");
-    if (message.GetProperty("type").GetString() != "message"
-        || message.GetProperty("role").GetString() != "user"
-        || message.GetProperty("content").ValueKind != JsonValueKind.Array
-        || message.GetProperty("content").GetArrayLength() != 1
-        || message.GetProperty("content")[0].GetProperty("type").GetString() != "input_text"
-        || call.GetProperty("type").GetString() != "function_call"
-        || call.GetProperty("arguments").ValueKind != JsonValueKind.String
-        || result.GetProperty("type").GetString() != "function_call_output")
-    {
-        throw new InvalidOperationException(
-            "Synthetic Codex fixture must contain message, function_call, and " +
-            "function_call_output response_item payloads in order.");
-    }
-
-    string callId = call.GetProperty("call_id").GetString()
-        ?? throw new InvalidOperationException("Synthetic function_call call_id is required.");
-    if (!string.Equals(
-            callId,
-            result.GetProperty("call_id").GetString(),
-            StringComparison.Ordinal))
-    {
-        throw new InvalidOperationException(
-            "Synthetic tool result must match the function_call call_id.");
-    }
 }
 
 static void WriteLimitation() =>

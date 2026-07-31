@@ -63,10 +63,20 @@ provenance with the exact array length and no excerpt or digest. Ingestion
 applies the policy independently before canonical append while signing the
 original authenticated command with the binding key, so identical retries
 converge and changed bytes conflict without persisting a reversible
-fingerprint. Binary classification and rewriting stream from the already-parsed
-source element into a deadline-governed buffer capped by the applicable fixed
-1,000,000-byte transport or 128 MiB content ceiling; they never create a
-complete raw JSON string or a second mutable JSON tree. The policy writes its
+fingerprint. A local adapter cannot provide that keyed original-byte identity:
+when it selects binary omission for a `native_id` source, it fails closed before
+durable claim or queue with a content-free reason. A verified `byte_range`
+continues because its source digest is binding-keyed downstream. Direct
+authenticated API ingestion of raw `native_id` content remains valid because
+ingestion signs the original command before canonical omission. Binary
+classification and rewriting stream from the already-parsed source element
+into a buffer capped by the applicable fixed 1,000,000-byte transport or 128
+MiB content ceiling. Candidate classification, bounded rewriting,
+`JsonDocument` parsing, and root cloning/materialization share one absolute
+`MaxScanTime` deadline for the entire public fidelity operation; no phase or
+event receives a fresh clock, and the deadline is asserted after
+materialization. They never create a complete raw JSON string or a second
+mutable JSON tree. The policy writes its
 replay evidence under `capture_fidelity_omission`, adding the lowest numeric
 suffix when that name is already source-owned, so a source-stated `omission`
 and every other safe sibling remain unchanged. Operator replay therefore

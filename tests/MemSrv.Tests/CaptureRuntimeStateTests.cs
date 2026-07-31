@@ -514,6 +514,68 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task NativeBinaryMediaFailsBeforeClaimAndPersistsNoRawContent()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-native-binary-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        const string rawSentinel = "NATIVE-BINARY-RAW-MUST-NOT-PERSIST";
+        var source = new TrustedSourceObservation(
+            new CaptureSourceIdentity("native-binary-runtime"),
+            0,
+            new CaptureSourceLocator.NativeId("native-binary-record"),
+            CaptureSourceMaterialKind.HookFact,
+            JsonSerializer.SerializeToElement(new
+            {
+                type = "response_item",
+                payload = new
+                {
+                    type = "message",
+                    role = "user",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "binary_content",
+                            category = "attachment",
+                            byte_payload = new[] { 78, 65, 84, 73, 86, 69 },
+                            text = rawSentinel
+                        }
+                    }
+                }
+            }),
+            IsTerminal: true);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            InvalidDataException failure = Assert.Throws<InvalidDataException>(
+                () => new CodexJsonlAdapter().Adapt(source));
+
+            Assert.Contains("native_id", failure.Message, StringComparison.Ordinal);
+            Assert.Contains(
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                failure.Message,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(rawSentinel, failure.ToString(), StringComparison.Ordinal);
+            Assert.Empty((await state.ReadAsync()).Streams);
+            string statePath = Path.Combine(directory, "state", "capture-state.json");
+            if (File.Exists(statePath))
+            {
+                Assert.DoesNotContain(
+                    rawSentinel,
+                    await File.ReadAllTextAsync(statePath),
+                    StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void NativeRecordBeyondTransportLimitFailsClosedAtTheFidelityPolicy()
     {
         JsonElement payload = JsonSerializer.SerializeToElement(new
@@ -833,6 +895,25 @@ public sealed class CaptureRuntimeStateTests
         Assert.Equal("child-1", sourceIdentity.GetProperty("childId").GetString());
         Assert.Equal(17, sourceIdentity.GetProperty("sourcePosition").GetInt64());
         Assert.Equal("byte_range", sourceIdentity.GetProperty("locatorKind").GetString());
+    }
+
+    [Fact]
+    public void GovernedDeadlineDoesNotResetBetweenBinaryFidelityPhases()
+    {
+        var time = new ManualTimeProvider();
+        var deadline = new GovernedDeadline(TimeSpan.FromSeconds(30), time);
+        using var candidatePass = new CountingSerializationStream(deadline);
+        candidatePass.WriteByte(1);
+        time.Advance(TimeSpan.FromSeconds(20));
+        candidatePass.AssertWithinDeadline();
+
+        using var rewritePass = new BoundedBufferSerializationStream(16, deadline);
+        rewritePass.WriteByte(2);
+        time.Advance(TimeSpan.FromSeconds(11));
+
+        SafetyScanException failure = Assert.Throws<SafetyScanException>(
+            deadline.AssertWithinDeadline);
+        Assert.Contains("30-second deadline", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -3040,5 +3121,16 @@ public sealed class CaptureRuntimeStateTests
 
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
             GetEnumerator();
+    }
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private long _timestamp;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => _timestamp;
+
+        public void Advance(TimeSpan elapsed) =>
+            _timestamp = checked(_timestamp + elapsed.Ticks);
     }
 }

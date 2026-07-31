@@ -116,6 +116,13 @@ Adapters are versioned tolerant tagged unions:
   adapter-event context, nested objects cannot self-assert either wrapper, and
   the same names in arbitrary objects do not exempt a nested valid
   `binary_content`;
+  a local adapter that selects this binary omission for a `native_id` source
+  fails closed before durable claim or queue with a content-free reason. Omitted
+  same-count bytes cannot supply binding-stable change identity without retaining
+  forbidden raw state or a fingerprint. A verified `byte_range` remains
+  admissible because its source digest is binding-keyed downstream. This local
+  rule does not reject direct authenticated API `native_id` commands: ingestion
+  sees and signs their original raw command before applying canonical omission;
   there is no extension, entropy, or generic string classifier;
 - Codex response items explicitly tagged `reasoning` preserve explicitly tagged
   `summary_text` and `reasoning_text` blocks as canonical `reasoning`; encrypted

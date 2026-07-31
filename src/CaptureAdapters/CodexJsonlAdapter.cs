@@ -20,15 +20,22 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
                 source.SourcePosition, "source record may still be extended");
         }
 
-        JsonElement record = CaptureFidelityPolicy
-            .OmitUnsupportedBinaryContent(
+        BinaryFidelitySelection<JsonElement> fidelity =
+            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
                 source.SourcePayload,
                 Harness,
                 source.SourceIdentity,
                 source.SourcePosition,
                 source.Locator.Kind,
-                CaptureFidelityPolicy.ProductionTransportBytes)
-            .Observation;
+                CaptureFidelityPolicy.ProductionTransportBytes);
+        if (fidelity.WasOmitted
+            && source.Locator is CaptureSourceLocator.NativeId)
+        {
+            throw new InvalidDataException(
+                "A native_id Codex record with unsupported binary content fails closed: " +
+                CaptureFidelityPolicy.UnsupportedBinaryReason + ".");
+        }
+        JsonElement record = fidelity.Observation;
         bool isObjectRecord = record.ValueKind == JsonValueKind.Object;
         string? recordType = isObjectRecord
             ? JsonAdapterHelpers.NullableString(record, "type")

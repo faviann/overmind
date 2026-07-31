@@ -50,6 +50,7 @@ public static class CaptureFidelityPolicy
         long effectiveBound = Math.Min(
             maxBytes,
             SafetyBudgets.Default.MaxObservationBytes);
+        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
         RewrittenJson rewritten = RewriteUnsupportedBinaryContent(
             sourcePayload,
             harness,
@@ -57,7 +58,8 @@ public static class CaptureFidelityPolicy
             sourcePosition,
             locatorKind,
             effectiveBound,
-            TrustedTraversalRootContext.RawSource);
+            TrustedTraversalRootContext.RawSource,
+            deadline);
         if (rewritten.ExceededBound)
         {
             return new(sourcePayload, 0);
@@ -81,6 +83,7 @@ public static class CaptureFidelityPolicy
         long remaining = Math.Min(
             maxContentBytes,
             SafetyBudgets.Default.MaxObservationBytes);
+        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
         RewrittenJson rewrittenSource = RewriteUnsupportedBinaryContent(
             observation.SourcePayload,
             observation.Source.Harness,
@@ -88,7 +91,8 @@ public static class CaptureFidelityPolicy
             observation.SourcePosition,
             observation.Locator.Kind,
             remaining,
-            TrustedTraversalRootContext.RawSource);
+            TrustedTraversalRootContext.RawSource,
+            deadline);
         if (rewrittenSource.ExceededBound)
         {
             return new(observation, 0);
@@ -113,7 +117,8 @@ public static class CaptureFidelityPolicy
                 remaining,
                 IsAdapterOwnedCodexReasoningEnvelope(observation, item)
                     ? TrustedTraversalRootContext.AdapterEvent
-                    : TrustedTraversalRootContext.None);
+                    : TrustedTraversalRootContext.None,
+                deadline);
             if (rewrittenPayload.ExceededBound)
             {
                 return new(observation, 0);
@@ -121,6 +126,11 @@ public static class CaptureFidelityPolicy
             remaining -= rewrittenPayload.SerializedBytes;
             omissionCount += rewrittenPayload.OmissionCount;
             events[index] = item with { Payload = rewrittenPayload.Value };
+        }
+
+        if (omissionCount == 0)
+        {
+            return new(observation, 0);
         }
 
         return new(
@@ -343,15 +353,15 @@ public static class CaptureFidelityPolicy
         long sourcePosition,
         string? locatorKind,
         long maxBytes,
-        TrustedTraversalRootContext rootContext)
+        TrustedTraversalRootContext rootContext,
+        GovernedDeadline deadline)
     {
-        using (var deadline = new CountingSerializationStream(
-            SafetyBudgets.Default.MaxScanTime))
+        using (var candidatePass = new CountingSerializationStream(deadline))
         {
             int candidates = CountUnsupportedBinaryContent(
                 source,
                 harness,
-                deadline,
+                candidatePass,
                 inKnownCodexReasoningPayload: false,
                 rootContext);
             deadline.AssertWithinDeadline();
@@ -369,7 +379,7 @@ public static class CaptureFidelityPolicy
         {
             using var stream = new BoundedBufferSerializationStream(
                 maxBytes,
-                SafetyBudgets.Default.MaxScanTime);
+                deadline);
             using (var writer = new Utf8JsonWriter(stream))
             {
                 var state = new BinaryRewriteState(
@@ -381,10 +391,12 @@ public static class CaptureFidelityPolicy
                     rootContext);
                 WriteRewritten(source, writer, state, knownOpaqueMetadata: false);
                 writer.Flush();
-                stream.AssertWithinDeadline();
+                deadline.AssertWithinDeadline();
                 using JsonDocument document = JsonDocument.Parse(stream.WrittenMemory);
+                JsonElement materialized = document.RootElement.Clone();
+                deadline.AssertWithinDeadline();
                 return new(
-                    document.RootElement.Clone(),
+                    materialized,
                     state.OmissionCount,
                     stream.BytesWritten,
                     ExceededBound: false);

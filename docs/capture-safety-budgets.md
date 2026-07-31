@@ -58,6 +58,37 @@ materializes only its compact omission, while ingestion streams the original
 retry-signature representation directly into the keyed hash. Counting and
 hashing share one governed write-only serialization/deadline implementation.
 
+The explicit `binary_content` classifier uses one absolute fixed deadline and
+the applicable effective fidelity ceiling for the entire public operation.
+Candidate prepass, byte-capped rewrite, `JsonDocument` parsing, and root
+cloning/materialization all share that same `MaxScanTime` deadline; processing
+another event or entering another phase never resets the clock, and policy
+asserts the deadline again after materialization. It walks already-parsed JSON
+without constructing a raw string or mutable JSON tree. A record with no valid
+binary candidate is returned unchanged; a record with a candidate is streamed
+into a byte-capped rewritten representation while its validated byte array is skipped.
+If that safe rewrite grows beyond the active ceiling, policy preserves the
+recognized-binary outcome and emits the bounded whole-observation
+`unsupported_binary_content` omission (or fails closed when the mandatory
+identity-bearing omission cannot fit); it never returns the smaller raw
+record.
+The compact record repeats the trusted source identity and position (plus
+locator kind) from the adapter or authenticated ingestion command; it never
+depends on optional block-local identity. Root-only Codex reasoning envelope
+recognition prevents a nested object from exempting its bytes.
+An adapter event receives the corresponding opaque-metadata exemption only
+when its reasoning `source` is structurally identical to the recognized root
+source payload's reasoning `payload`; the redundant event projection therefore
+cannot add byte-bearing evidence beyond what raw-source traversal already
+admitted.
+If that rewritten representation crosses the effective ceiling, the ordinary
+transport/content serializer owns the deterministic whole-observation omission.
+Tests exercise a multi-megabyte valid byte array at the documented
+`CaptureFidelityPolicy` seam and assert bounded additional allocation and
+elapsed time. A mechanical test uses the production absolute-deadline structure
+with a controlled `TimeProvider` to prove separate phases cannot restart the
+budget; the public policy deadline remains fixed and caller-noninjectionable.
+
 ### `MaxDecoderCandidateLength` is an accepted residual risk
 
 `MaxDecoderCandidateLength` is deliberately **not** a fail-closed budget, and it

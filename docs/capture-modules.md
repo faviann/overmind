@@ -16,7 +16,7 @@ Source interpretation before this spine is described by the
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
-| `CaptureFidelityPolicy` | `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
+| `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement + trusted source provenance\|CaptureObservationRequest\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `ContainsUnsupportedBinaryOmission(command)`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>`; `ReplaySourceStreamAsync(sourceStreamUuid)` → `CapturedSourceStreamReplay`; `NavigateCapturedSessionAsync(sourceStreamUuid, allowedNamespaces)` → `CapturedSessionNavigation` | `memctl capture receipt`; `memctl capture replay`; `memctl capture navigate` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
@@ -55,6 +55,65 @@ canonicalizes into top-level `sourceIdentity` in the omission before the legacy
 field is cleared, and that same identity is repeated in omission provenance.
 Mandatory source identity and locator values are never truncated or
 fingerprinted to make either bound fit.
+The same policy owns the adapter-defined `binary_content` fidelity outcome.
+Only an exact closed category plus a well-formed integer `byte_payload` array
+is eligible. It removes the byte array before durable local claim, retains
+safe sibling metadata and model-visible text, and emits content-free omission
+provenance with the exact array length and no excerpt or digest. Ingestion
+applies the policy independently before canonical append while signing the
+original authenticated command with the binding key, so identical retries
+converge and changed bytes conflict without persisting a reversible
+fingerprint. A local adapter cannot provide that keyed original-byte identity:
+when it selects binary omission for a `native_id` source, it fails closed before
+durable claim or queue with a content-free reason. A verified `byte_range`
+continues because its source digest is binding-keyed downstream. Direct
+authenticated API ingestion of raw `native_id` content remains valid because
+ingestion signs the original command before canonical omission. Binary
+classification and rewriting stream from the already-parsed source element
+into a buffer capped by the applicable fixed 1,000,000-byte transport or 128
+MiB content ceiling. Recognizing binary content is irreversible for the
+current operation: if the safe field-level rewrite grows beyond that ceiling,
+policy selects the same content-free whole-observation shape with
+`unsupported_binary_content` as its reason. It never restores the in-limit raw
+observation. The local `native_id` rule still refuses this outcome before
+claim; a verified `byte_range` may queue the bounded whole-observation
+omission, and authenticated ingestion may append it while signing the original
+command. The adapter first builds its request only in memory, then gives source
+payload and derived events to one request-level fidelity selection. Candidate
+classification, bounded rewriting, whole-request sizing, fallback selection,
+`JsonDocument` parsing, and root cloning/materialization share one absolute
+`MaxScanTime` deadline for that public operation; no phase or event receives a
+fresh clock. A recognized JSON-element rewrite that expands beyond its bound
+likewise returns only compact content-free provenance, or fails closed when
+mandatory identity cannot fit; it never returns the raw element with a
+separate overflow flag. The deadline is asserted after materialization. These
+paths never create a complete raw JSON string or a second mutable JSON tree.
+The policy writes its
+replay evidence under `capture_fidelity_omission`, adding the lowest numeric
+suffix when that name is already source-owned, so a source-stated `omission`
+and every other safe sibling remain unchanged. Operator replay therefore
+distinguishes source evidence from the policy-owned omission explicitly.
+Every such omission repeats the trusted observation's external session,
+optional child, source position, and locator kind. Optional block-local path
+and identity evidence remains separately replayable. Source-stated capture
+provenance remains only in its governed rewritten sibling and is never copied
+through an opaque path into the omission. The policy's
+`ContainsUnsupportedBinaryOmission` outcome is the only compatibility
+recognizer: it accepts the exact base field or the lowest occupied numeric
+suffix with the complete current policy shape, including current
+reason/category/count/version and source identity matching the supplied
+command's external session, optional child, source position, and locator kind;
+never a broad name prefix or a source-owned incomplete/mismatched lookalike.
+Only direct `signature` and `encrypted_content` children reached from the root
+Codex `response_item` reasoning payload or the root adapter-owned opaque event
+envelope remain ordinary opaque evidence. The traversal context is closed and
+entrypoint-selected: raw source traversal can recognize only the former, and only
+the exact Codex adapter opaque reasoning event facts select the latter during
+command traversal. The event envelope's `source` must also be structurally
+identical to the recognized root source payload's reasoning `payload`, making
+the event a redundant projection that cannot expand the admitted opaque bytes.
+Raw JSON fields and nested source objects cannot mint either root context for
+themselves.
 
 **`NeverStoreGate`** — the single governed policy point every write path
 crosses, and the only type that knows rules exist. It hides the rule-set schema

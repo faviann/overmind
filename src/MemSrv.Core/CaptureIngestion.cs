@@ -28,16 +28,23 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureLedger.RequireSafetyConfigured(neverStore);
         ValidateMandatory(binding, command);
         CaptureObservationCommand originalCommand = command;
+        BinaryFidelitySelection<CaptureObservationCommand> binaryFidelity =
+            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+                command,
+                neverStore.Budgets.MaxObservationBytes);
+        command = binaryFidelity.Observation;
         BoundedCaptureRepresentation<CaptureObservationCommand> bounded =
             CaptureFidelityPolicy.SerializeForContent(
-                originalCommand,
+                command,
                 neverStore.Budgets.MaxObservationBytes);
         string inputJson = bounded.Serialized;
         long originalByteCount = bounded.OriginalByteCount;
         command = bounded.Observation;
         ValidateSemantic(command);
         CaptureObservationCommand signatureCommand =
-            bounded.WasOmitted ? originalCommand : command;
+            bounded.WasOmitted || binaryFidelity.WasOmitted
+                ? originalCommand
+                : command;
 
         string contentSignature = Sign(
             new CaptureSignatureContent(
@@ -60,6 +67,10 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (observationWasOmitted)
         {
             scan.Omit(CaptureFidelityPolicy.ContentLimitReason);
+        }
+        if (binaryFidelity.WasOmitted)
+        {
+            scan.Omit(CaptureFidelityPolicy.UnsupportedBinaryReason);
         }
         AssertSafe(command.SourceIdentity.ExternalSessionId, scan);
         if (command.SourceIdentity.ChildId is not null)
@@ -230,7 +241,8 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                     && !CompatibleContentSignatures(
                             signatureCommand,
                             stream.SourceSessionId,
-                            binding.ContentSignatureKey)
+                            binding.ContentSignatureKey,
+                            binaryFidelity.WasOmitted)
                         .Contains(locatorMatch.ContentSignature, StringComparer.Ordinal))
                 {
                     await transaction.RollbackAsync(cancellationToken);
@@ -460,20 +472,26 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     private static IReadOnlyList<string> CompatibleContentSignatures(
         CaptureObservationCommand command,
         string legacySourceSessionId,
-        byte[] key)
+        byte[] key,
+        bool binaryFidelityWasOmitted)
     {
         if (!string.Equals(command.Source.Harness, "codex", StringComparison.Ordinal)
             || !string.Equals(
                 command.Adapter.Name, "codex-synthetic-jsonl", StringComparison.Ordinal)
-            || command.Adapter.Version is not ("7" or "8"))
+            || command.Adapter.Version is not ("7" or "8" or "9"))
         {
             return [];
         }
 
-        string[] priorVersions = string.Equals(
-            command.Adapter.Version, "8", StringComparison.Ordinal)
-                ? [.. PreVersion7CodexAdapterVersions, "7"]
-                : PreVersion7CodexAdapterVersions;
+        string[] priorVersions = command.Adapter.Version switch
+        {
+            "7" => PreVersion7CodexAdapterVersions,
+            "8" => [.. PreVersion7CodexAdapterVersions, "7"],
+            "9" when binaryFidelityWasOmitted
+                || CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(command) => [],
+            "9" => [.. PreVersion7CodexAdapterVersions, "7", "8"],
+            _ => []
+        };
         var signatures = new List<string>(priorVersions.Length * 2);
         foreach (string version in priorVersions)
         {

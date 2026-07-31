@@ -76,7 +76,10 @@ adapter/source provenance without changing the immutable source record; the
 server recognizes prior Codex adapter signatures narrowly where the record's
 derived events are unchanged and only adapter/signature identity moved. A
 record whose derived tool events changed in v7, whose relationship facts
-changed in v8, a changed locator, or changed source content remains a conflict.
+changed in v8, whose binary safe representation changed in v9, a changed
+locator, or changed source content remains a conflict. Unchanged pre-v9 records
+may converge under v9 compatibility; a command carrying the v9 binary-fidelity
+representation is never offered a prior-adapter compatibility signature.
 
 ## Tolerant parsing
 
@@ -87,6 +90,47 @@ Adapters are versioned tolerant tagged unions:
 - unsupported record or content variants become `opaque` events and retain
   their complete scanned source representation, including discriminators,
   additive fields, and safety-redacted sensitive evidence after ingestion;
+- the adapter-owned unsupported-byte tagged union is an object with exact
+  `type: "binary_content"`, one closed `category` value (`attachment`,
+  `archive`, `executable`, `image`, or `audio`), and an integer
+  `byte_payload` array whose members are all in the byte range. Before the
+  local durable queue, capture removes only `byte_payload` and adds the
+  content-free `unsupported_binary_content` fidelity omission under the
+  non-colliding policy-owned `capture_fidelity_omission` field (or its lowest
+  numeric suffix) with the exact array length, category, policy version, the
+  trusted external session, optional child, source position and locator kind,
+  plus available source-stated media type, local path, local identity, and
+  no duplicated capture provenance. Source-stated capture provenance remains
+  ordinary replayable sibling evidence after the same governed recursive
+  rewrite, so nested valid `binary_content` cannot bypass the policy.
+  Safe sibling metadata, a source-stated `omission`, and model-visible `text`
+  likewise remain ordinary replayable evidence. If the safe field-level
+  rewrite itself exceeds the active fidelity ceiling, recognition is retained
+  and capture selects a content-free whole-observation
+  `unsupported_binary_content` omission; the smaller raw representation never
+  regains eligibility. Untagged values and malformed byte representations are
+  not classified by this union. Only direct `signature`
+  and `encrypted_content` children reached from the root known Codex reasoning
+  payload or the root adapter-owned opaque envelope remain ordinary metadata.
+  These are separate closed traversal contexts: a raw source record can earn
+  only the root Codex `response_item` → `payload.type=reasoning` exception,
+  while an adapter event can earn only the adapter-produced root
+  `recordType=response_item`, `payloadType=reasoning`,
+  `source.type=reasoning` exception when that `source` is structurally identical
+  to the recognized root source payload's `payload`. This redundant projection
+  lets the event replay only opaque metadata already admitted at the raw-source
+  boundary; it cannot introduce additional bytes. Raw root fields cannot
+  self-assert the adapter-event context, nested objects cannot self-assert
+  either wrapper, and the same names in arbitrary objects do not exempt a
+  nested valid `binary_content`;
+  a local adapter that selects this binary omission for a `native_id` source
+  fails closed before durable claim or queue with a content-free reason. Omitted
+  same-count bytes cannot supply binding-stable change identity without retaining
+  forbidden raw state or a fingerprint. A verified `byte_range` remains
+  admissible because its source digest is binding-keyed downstream. This local
+  rule does not reject direct authenticated API `native_id` commands: ingestion
+  sees and signs their original raw command before applying canonical omission;
+  there is no extension, entropy, or generic string classifier;
 - Codex response items explicitly tagged `reasoning` preserve explicitly tagged
   `summary_text` and `reasoning_text` blocks as canonical `reasoning`; encrypted
   content and signatures remain source evidence and are never interpreted as
@@ -187,6 +231,7 @@ The synthetic, version-labelled families are:
 - `fixtures/adapter-conformance/codex-cli-0.145.opaque.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.annotations.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.145.tools.synthetic.jsonl`
+- `fixtures/adapter-conformance/codex-cli-0.146.binary-media.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.77.parent-only.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.90.fork-only.synthetic.jsonl`
 - `fixtures/adapter-conformance/codex-cli-0.120.parent-fork.synthetic.jsonl`
@@ -215,7 +260,13 @@ boundary view paired with canonical `compacted` summary/history evidence. The
 0.145 tool family covers function, custom, and specialized call/result records,
 parallel and out-of-order native identities, missing names, string and
 structured values, explicit canonical outcomes, and visible turn abort/error
-records.
+records. The 0.146 binary/media family covers all five closed unsupported-byte
+categories, mandatory trusted source identity, safe metadata and model-visible
+text retention, content-free original-byte-count omissions, root opaque
+signature/encrypted negative controls, and a spoofed nested-wrapper regression.
+The built `CodexCaptureTracer` consumes this family through scheduled transcript
+discovery, authenticated capture, deterministic retry, and `memctl` operator
+receipt reads; the legacy three-record compatibility fixture remains unchanged.
 
 The five version-labelled relationship families cover parent-only, fork-only,
 combined parent/fork, nested spawn, and no-parent shapes. They assert the

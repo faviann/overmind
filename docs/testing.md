@@ -87,12 +87,14 @@ is the authorized mechanism seam for proving that pathological over-limit JSON
 is streaming-counted with bounded additional allocation and elapsed time,
 count/materialize mutation cannot return an over-cap representation, and an
 over-limit native locator fails closed. The runtime state seam proves such a
-native record claims nothing and persists no raw content. `CaptureIngestion` is
+native record, and a Codex `native_id` record requiring valid binary omission,
+claims nothing and persists no raw content. `CaptureIngestion` is
 the corresponding seam for proving content compaction, the fixed 128 MiB clamp,
 and keyed-signature streaming before append.
-Because the production deadline is deliberately not caller-injectable and the
-serializer has no honest deterministic clock seam, tests exercise elapsed time
-under the production deadline rather than adding test-only deadline machinery.
+The production deadline is deliberately not caller-injectable. Bounded tests
+exercise elapsed time under that fixed deadline; a mechanical test may supply a
+controlled `TimeProvider` to the production absolute-deadline structure to prove
+that phases share one clock, without adding a test-only fidelity path.
 The injected value
 can only tighten the fixed 1,000,000-byte production bound; a larger request
 must never loosen it. The same positive-only rule applies to injected content

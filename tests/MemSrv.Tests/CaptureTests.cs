@@ -86,6 +86,464 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task CaptureApiAndOperatorReadPersistExplicitBinaryOmissionAndSafeEvidence()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        string locator = $"binary-media-{Guid.NewGuid():N}";
+        await EnrollAsync($"binary-media-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        object BinaryObservation(int[] bytes) => new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourcePosition = 0,
+            locator = new { kind = "native_id", nativeId = locator },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.146.synthetic",
+                recordType = "response_item",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = "9" },
+            sourcePayload = new
+            {
+                payload = new
+                {
+                    type = "message",
+                    content = new object[]
+                    {
+                        new
+                        {
+                            type = "binary_content",
+                            category = "image",
+                            media_type = "image/png",
+                            source_path = "/workspace/screenshot.png",
+                            source_identity = "image-api-1",
+                            capture_provenance = new
+                            {
+                                origin = "authenticated-api",
+                                nested = new
+                                {
+                                    type = "binary_content",
+                                    category = "attachment",
+                                    text = "Safe nested provenance text.",
+                                    byte_payload = new[] { 201, 202 }
+                                }
+                            },
+                            text = "Visible image alt text.",
+                            byte_payload = bytes
+                        }
+                    }
+                }
+            },
+            events = new object[]
+            {
+                new
+                {
+                    partKey = "content/0:opaque",
+                    partOrder = 0,
+                    kind = "opaque",
+                    actor = "user",
+                    payload = new
+                    {
+                        source = new
+                        {
+                            type = "binary_content",
+                            category = "image",
+                            text = "Visible image alt text.",
+                            byte_payload = bytes
+                        }
+                    }
+                }
+            }
+        };
+
+        var accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            BinaryObservation([137, 80, 78, 71]));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        JsonElement receipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("new", receipt.GetProperty("status").GetString());
+        JsonElement safeBlock = receipt.GetProperty("observation")
+            .GetProperty("safeSourcePayload").GetProperty("payload")
+            .GetProperty("content")[0];
+        Assert.False(safeBlock.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            safeBlock.GetProperty("capture_fidelity_omission")
+                .GetProperty("reason").GetString());
+        Assert.Equal(4, safeBlock.GetProperty("capture_fidelity_omission")
+            .GetProperty("originalByteCount").GetInt64());
+        JsonElement omissionIdentity = safeBlock
+            .GetProperty("capture_fidelity_omission")
+            .GetProperty("sourceIdentity");
+        Assert.Equal(
+            sourceSessionId,
+            omissionIdentity.GetProperty("externalSessionId").GetString());
+        Assert.Equal(0, omissionIdentity.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal(
+            "native_id",
+            omissionIdentity.GetProperty("locatorKind").GetString());
+        Assert.Equal("Visible image alt text.", safeBlock.GetProperty("text").GetString());
+        JsonElement safeNestedProvenance = safeBlock.GetProperty("capture_provenance")
+            .GetProperty("nested");
+        Assert.False(safeNestedProvenance.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            "Safe nested provenance text.",
+            safeNestedProvenance.GetProperty("text").GetString());
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            safeNestedProvenance.GetProperty("capture_fidelity_omission")
+                .GetProperty("reason").GetString());
+        Assert.False(
+            safeBlock.GetProperty("capture_fidelity_omission")
+                .TryGetProperty("captureProvenance", out _));
+        Assert.Contains(
+            $"omission:{CaptureFidelityPolicy.UnsupportedBinaryReason}",
+            receipt.GetProperty("observation").GetProperty("scan").GetProperty("ruleIds")
+                .EnumerateArray().Select(item => item.GetString()));
+
+        var retry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            BinaryObservation([137, 80, 78, 71]));
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        JsonElement retryReceipt = await retry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            receipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+
+        var changedBytes = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            BinaryObservation([1, 2, 3, 4]));
+        Assert.Equal(HttpStatusCode.Conflict, changedBytes.StatusCode);
+
+        string shown = await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            receipt.GetProperty("observationUuid").GetGuid().ToString());
+        Assert.DoesNotContain("\"byte_payload\"", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("[137,80,78,71]", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("[201,202]", shown, StringComparison.Ordinal);
+        JsonElement envelope = JsonDocument.Parse(
+            shown.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0])
+            .RootElement;
+        JsonElement replayed = envelope.GetProperty("observation")
+            .GetProperty("safeSourcePayload").GetProperty("payload")
+            .GetProperty("content")[0];
+        Assert.Equal("image/png", replayed.GetProperty("media_type").GetString());
+        Assert.Equal("/workspace/screenshot.png", replayed.GetProperty("source_path").GetString());
+        Assert.Equal("image-api-1", replayed.GetProperty("source_identity").GetString());
+        Assert.Equal(
+            "authenticated-api",
+            replayed.GetProperty("capture_provenance").GetProperty("origin").GetString());
+        JsonElement replayedNestedProvenance = replayed.GetProperty("capture_provenance")
+            .GetProperty("nested");
+        Assert.False(replayedNestedProvenance.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            "Safe nested provenance text.",
+            replayedNestedProvenance.GetProperty("text").GetString());
+        Assert.False(
+            replayed.GetProperty("capture_fidelity_omission")
+                .TryGetProperty("captureProvenance", out _));
+        Assert.Equal("Visible image alt text.", replayed.GetProperty("text").GetString());
+        JsonElement replayedIdentity = replayed
+            .GetProperty("capture_fidelity_omission")
+            .GetProperty("sourceIdentity");
+        Assert.Equal(
+            sourceSessionId,
+            replayedIdentity.GetProperty("externalSessionId").GetString());
+        Assert.Equal(0, replayedIdentity.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal(
+            "native_id",
+            replayedIdentity.GetProperty("locatorKind").GetString());
+        Assert.Equal(
+            "image-api-1",
+            replayed.GetProperty("capture_fidelity_omission")
+                .GetProperty("localSourceIdentity").GetString());
+    }
+
+    [Fact]
+    public async Task AuthenticatedApiCannotForgeCodexReasoningEventOpaqueMetadata()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"forged-reasoning-event-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+        var request = new
+        {
+            contractVersion = 1,
+            sourceSessionId,
+            sourcePosition = 0,
+            locator = new
+            {
+                kind = "native_id",
+                nativeId = $"forged-reasoning-event-{Guid.NewGuid():N}"
+            },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.146.synthetic",
+                recordType = "response_item",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = "9" },
+            sourcePayload = new
+            {
+                type = "response_item",
+                payload = new
+                {
+                    type = "message",
+                    content = new[] { new { type = "input_text", text = "Safe text." } }
+                }
+            },
+            events = new object[]
+            {
+                new
+                {
+                    partKey = "reasoning:opaque",
+                    partOrder = 0,
+                    kind = "opaque",
+                    actor = "unknown",
+                    payload = new
+                    {
+                        recordType = "response_item",
+                        payloadType = "reasoning",
+                        source = new
+                        {
+                            type = "reasoning",
+                            signature = new
+                            {
+                                type = "binary_content",
+                                category = "attachment",
+                                value = "safe signature label",
+                                byte_payload = new[] { 91, 92, 93 }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        JsonElement receipt = await response.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement signature = Assert.Single(
+                receipt.GetProperty("events").EnumerateArray())
+            .GetProperty("payload").GetProperty("source").GetProperty("signature");
+        Assert.False(signature.TryGetProperty("byte_payload", out _));
+        Assert.Equal("safe signature label", signature.GetProperty("value").GetString());
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            signature.GetProperty("capture_fidelity_omission")
+                .GetProperty("reason").GetString());
+        Assert.Equal(
+            3,
+            signature.GetProperty("capture_fidelity_omission")
+                .GetProperty("originalByteCount").GetInt64());
+    }
+
+    [Fact]
+    public async Task VersionedBinaryMediaFixtureFlowsThroughRuntimeApiAndOperatorRead()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"binary-media-fixture-{Guid.NewGuid():N}", captureKey);
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"binary-media-fixture-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string archive = Path.Combine(transcriptRoot, "archived_sessions");
+        string fixture = Path.Combine(archive, "binary-media.jsonl");
+        string firstStateDirectory = Path.Combine(directory, "state-first");
+        string retryStateDirectory = Path.Combine(directory, "state-retry");
+        Directory.CreateDirectory(archive);
+        File.Copy(
+            Path.Combine(
+                _root,
+                "fixtures/adapter-conformance/codex-cli-0.146.binary-media.synthetic.jsonl"),
+            fixture);
+
+        Dictionary<string, string> EnvironmentFor(string stateDirectory) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        async Task<JsonElement[]> CaptureAsync(
+            string stateDirectory,
+            string expectedStatus)
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(stateDirectory));
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            try
+            {
+                var receipts = new JsonElement[12];
+                for (int index = 0; index < receipts.Length; index++)
+                {
+                    receipts[index] = await ReadTracerReceiptAsync(process);
+                }
+                Assert.All(
+                    receipts,
+                    receipt => Assert.Equal(
+                        expectedStatus,
+                        receipt.GetProperty("status").GetString()));
+                return receipts;
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                await stderr;
+            }
+        }
+
+        try
+        {
+            JsonElement[] receipts = await CaptureAsync(
+                firstStateDirectory,
+                "new");
+            for (int index = 0; index < 5; index++)
+            {
+                JsonElement block = receipts[index].GetProperty("observation")
+                    .GetProperty("safeSourcePayload").GetProperty("payload")
+                    .GetProperty("content")[0];
+                Assert.False(block.TryGetProperty("byte_payload", out _));
+                Assert.Equal(
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    block.GetProperty("capture_fidelity_omission")
+                        .GetProperty("reason").GetString());
+                JsonElement sourceIdentity = block
+                    .GetProperty("capture_fidelity_omission")
+                    .GetProperty("sourceIdentity");
+                Assert.False(string.IsNullOrWhiteSpace(
+                    sourceIdentity.GetProperty("externalSessionId").GetString()));
+                Assert.Equal(
+                    index,
+                    sourceIdentity.GetProperty("sourcePosition").GetInt64());
+                Assert.Equal(
+                    "byte_range",
+                    sourceIdentity.GetProperty("locatorKind").GetString());
+                string shown = await RunMemCtlAsync(
+                    "capture",
+                    "receipt",
+                    receipts[index].GetProperty("observationUuid").GetGuid().ToString());
+                Assert.DoesNotContain("\"byte_payload\"", shown, StringComparison.Ordinal);
+                Assert.Contains("\"originalByteCount\"", shown, StringComparison.Ordinal);
+            }
+
+            string signatureShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipts[5].GetProperty("observationUuid").GetGuid().ToString());
+            Assert.Contains("\"signature\"", signatureShown, StringComparison.Ordinal);
+            Assert.Contains("\"byte_payload\":[11,22,33]", signatureShown, StringComparison.Ordinal);
+            Assert.Contains("\"value\":\"synthetic-signature-only\"", signatureShown);
+            Assert.Contains(
+                "\"encrypted_content\"",
+                signatureShown,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "\"byte_payload\":[44,55]",
+                signatureShown,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                $"\"reason\":\"{CaptureFidelityPolicy.UnsupportedBinaryReason}\"",
+                signatureShown,
+                StringComparison.Ordinal);
+
+            string spoofedShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipts[10].GetProperty("observationUuid").GetGuid().ToString());
+            Assert.DoesNotContain("[61,62]", spoofedShown, StringComparison.Ordinal);
+            Assert.Contains(
+                $"\"reason\":\"{CaptureFidelityPolicy.UnsupportedBinaryReason}\"",
+                spoofedShown,
+                StringComparison.Ordinal);
+
+            string spoofedRootShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipts[11].GetProperty("observationUuid").GetGuid().ToString());
+            Assert.DoesNotContain("[71,72]", spoofedRootShown, StringComparison.Ordinal);
+            Assert.DoesNotContain("[73,74]", spoofedRootShown, StringComparison.Ordinal);
+            Assert.Contains(
+                "\"safeSibling\":\"Raw root spoof safe sibling remains.\"",
+                spoofedRootShown,
+                StringComparison.Ordinal);
+            Assert.Equal(
+                4,
+                spoofedRootShown.Split(
+                    $"\"reason\":\"{CaptureFidelityPolicy.UnsupportedBinaryReason}\"",
+                    StringSplitOptions.None).Length - 1);
+            string spoofedRootApi = receipts[11].GetRawText();
+            Assert.DoesNotContain("[71,72]", spoofedRootApi, StringComparison.Ordinal);
+            Assert.DoesNotContain("[73,74]", spoofedRootApi, StringComparison.Ordinal);
+            Assert.Equal(
+                "Raw root spoof safe sibling remains.",
+                receipts[11].GetProperty("observation").GetProperty("safeSourcePayload")
+                    .GetProperty("source").GetProperty("safeSibling").GetString());
+            Assert.Equal(
+                "Raw root spoof safe sibling remains.",
+                Assert.Single(receipts[11].GetProperty("events").EnumerateArray())
+                    .GetProperty("payload").GetProperty("source")
+                    .GetProperty("source").GetProperty("safeSibling").GetString());
+
+            CaptureRuntimeStreamState firstState = Assert.Single(
+                (await new FileCaptureRuntimeState(firstStateDirectory).ReadAsync()).Streams);
+            Assert.Equal(11, firstState.EnqueuedThrough);
+            Assert.Empty(firstState.Queue);
+            Assert.Equal(11, firstState.LastServerReceipt?.SourcePosition);
+            string durableRuntimeState = await File.ReadAllTextAsync(
+                Path.Combine(firstStateDirectory, "capture-state.json"));
+            foreach (string omittedBytes in new[]
+                {
+                    "[1,2,3,4]",
+                    "[5,6,7]",
+                    "[77,90]",
+                    "[137,80,78,71]",
+                    "[82,73,70,70,1]",
+                    "[201,202]",
+                    "[61,62]",
+                    "[71,72]",
+                    "[73,74]"
+                })
+            {
+                Assert.DoesNotContain(
+                    omittedBytes,
+                    durableRuntimeState,
+                    StringComparison.Ordinal);
+            }
+
+            JsonElement[] retried = await CaptureAsync(
+                retryStateDirectory,
+                "already_accepted");
+            Assert.Equal(
+                receipts.Select(item =>
+                    item.GetProperty("observationUuid").GetGuid()),
+                retried.Select(item =>
+                    item.GetProperty("observationUuid").GetGuid()));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task OperatorEnrollsRestrictedCodexCaptureAndReadsFallbackReceipt()
     {
         var captureKey = CaptureCredential();
@@ -1266,6 +1724,119 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(HttpStatusCode.Conflict, changedSource.StatusCode);
     }
 
+    [Fact]
+    public async Task CodexAdapterVersionNineConvergesForAnUnchangedVersionEightRecord()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-v9-upgrade-{Guid.NewGuid():N}";
+        await EnrollAsync($"codex-adapter-v9-upgrade-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "8",
+                "0.144.synthetic",
+                "unchanged source record"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        JsonElement acceptedReceipt =
+            await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            ExplicitIdentityObservation(
+                externalSessionId,
+                externalSessionId,
+                childId,
+                0,
+                locator,
+                "9",
+                "0.144.synthetic",
+                "unchanged source record"));
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        JsonElement retryReceipt =
+            await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Fact]
+    public async Task VersionNineSourceOwnedBinaryOmissionLookalikeStillConvergesFromVersionEight()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string childId = $"child-{Guid.NewGuid():N}";
+        string locator = $"adapter-v9-source-lookalike-{Guid.NewGuid():N}";
+        await EnrollAsync(
+            $"codex-adapter-v9-source-lookalike-{Guid.NewGuid():N}",
+            captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SourceOwnedBinaryOmissionLookalikeObservation(
+                externalSessionId,
+                childId,
+                locator,
+                adapterVersion: "8"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        JsonElement acceptedReceipt =
+            await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SourceOwnedBinaryOmissionLookalikeObservation(
+                externalSessionId,
+                childId,
+                locator,
+                adapterVersion: "9"));
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        JsonElement retryReceipt =
+            await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Fact]
+    public async Task VersionNineRawBinaryContentCannotMasqueradeAsVersionEight()
+    {
+        var captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string locator = $"adapter-v9-binary-{Guid.NewGuid():N}";
+        await EnrollAsync($"codex-adapter-v9-binary-{Guid.NewGuid():N}", captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RawBinaryContentObservation(
+                externalSessionId,
+                locator,
+                adapterVersion: "8"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+
+        using HttpResponseMessage masqueradingRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            RawBinaryContentObservation(
+                externalSessionId,
+                locator,
+                adapterVersion: "9"));
+
+        Assert.Equal(HttpStatusCode.Conflict, masqueradingRetry.StatusCode);
+    }
+
     [Theory]
     [InlineData("3")]
     [InlineData("4")]
@@ -2146,7 +2717,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "8",
+                    "9",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -2174,7 +2745,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     "0.144.synthetic",
                     observation.GetProperty("source").GetProperty("harnessVersion").GetString());
                 Assert.Equal(
-                    "8",
+                    "9",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
             });
 
@@ -2337,7 +2908,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 Assert.Equal("new", receipt.GetProperty("status").GetString());
                 Assert.Equal(
-                    "8",
+                    "9",
                     receipt.GetProperty("observation").GetProperty("adapter")
                         .GetProperty("version").GetString());
             });
@@ -2864,7 +3435,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 {
                     Assert.Equal(expectedStatus, receipt.GetProperty("status").GetString());
                     Assert.Equal(
-                        "8",
+                        "9",
                         receipt.GetProperty("observation").GetProperty("adapter")
                             .GetProperty("version").GetString());
                 });
@@ -3406,7 +3977,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             {
                 JsonElement observation = receipt.GetProperty("observation");
                 Assert.Equal(
-                    "8",
+                    "9",
                     observation.GetProperty("adapter").GetProperty("version").GetString());
                 JsonElement capturedEvent =
                     Assert.Single(receipt.GetProperty("events").EnumerateArray());
@@ -5815,6 +6386,103 @@ public sealed class CaptureTests : HttpSeamTestBase
                     kind = "lifecycle",
                     actor = "harness",
                     payload = new { message }
+                }
+            }
+        };
+
+    private static object RawBinaryContentObservation(
+        string externalSessionId,
+        string nativeId,
+        string adapterVersion) => new
+        {
+            contractVersion = 1,
+            sourceSessionId = externalSessionId,
+            sourcePosition = 0,
+            locator = new { kind = "native_id", nativeId },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.146.synthetic",
+                recordType = "response_item",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload = new
+            {
+                type = "response_item",
+                payload = new
+                {
+                    type = "message",
+                    content = new object[]
+                    {
+                        new
+                        {
+                            type = "binary_content",
+                            category = "image",
+                            text = "Visible image alt text.",
+                            byte_payload = new[] { 137, 80, 78, 71 }
+                        }
+                    }
+                }
+            },
+            events = new object[]
+            {
+                new
+                {
+                    partKey = "content/0:opaque",
+                    partOrder = 0,
+                    kind = "opaque",
+                    actor = "user",
+                    payload = new { text = "Visible image alt text." }
+                }
+            }
+        };
+
+    private static object SourceOwnedBinaryOmissionLookalikeObservation(
+        string externalSessionId,
+        string childId,
+        string nativeId,
+        string adapterVersion) => new
+        {
+            contractVersion = 1,
+            sourceSessionId = externalSessionId,
+            sourceIdentity = new { externalSessionId, childId },
+            sourcePosition = 0,
+            locator = new { kind = "native_id", nativeId },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "0.144.synthetic",
+                recordType = "session_meta",
+                materialKind = "persisted_record"
+            },
+            adapter = new { name = "codex-synthetic-jsonl", version = adapterVersion },
+            sourcePayload = new
+            {
+                type = "session_meta",
+                payload = new
+                {
+                    session_id = externalSessionId,
+                    id = childId,
+                    thread_source = "subagent",
+                    capture_fidelity_omission = new
+                    {
+                        reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+                        category = "image",
+                        originalByteCount = 2,
+                        policyVersion = CaptureFidelityPolicy.CurrentVersion
+                    }
+                }
+            },
+            events = new[]
+            {
+                new
+                {
+                    partKey = "metadata/0",
+                    partOrder = 0,
+                    kind = "lifecycle",
+                    actor = "harness",
+                    payload = new { message = "unchanged source-owned lookalike" }
                 }
             }
         };

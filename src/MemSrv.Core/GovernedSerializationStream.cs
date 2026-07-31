@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Security.Cryptography;
 
 namespace MemSrv.Core;
@@ -8,9 +7,43 @@ namespace MemSrv.Core;
 /// to do with each validated byte span; deadline enforcement and Stream
 /// behavior stay identical for fidelity counting and signature hashing.
 /// </summary>
-internal abstract class GovernedSerializationStream(TimeSpan deadline) : Stream
+internal sealed class GovernedDeadline
 {
-    private readonly Stopwatch _clock = Stopwatch.StartNew();
+    private readonly TimeSpan _budget;
+    private readonly TimeProvider _timeProvider;
+    private readonly long _startedAt;
+
+    public GovernedDeadline(TimeSpan budget, TimeProvider? timeProvider = null)
+    {
+        _budget = budget;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _startedAt = _timeProvider.GetTimestamp();
+    }
+
+    public void AssertWithinDeadline()
+    {
+        if (_timeProvider.GetElapsedTime(_startedAt) > _budget)
+        {
+            throw new SafetyScanException(
+                "capture serialization exceeded the governed " +
+                $"{_budget.TotalSeconds:0}-second deadline");
+        }
+    }
+}
+
+internal abstract class GovernedSerializationStream : Stream
+{
+    private readonly GovernedDeadline _deadline;
+
+    protected GovernedSerializationStream(TimeSpan deadline)
+        : this(new GovernedDeadline(deadline))
+    {
+    }
+
+    protected GovernedSerializationStream(GovernedDeadline deadline)
+    {
+        _deadline = deadline;
+    }
 
     public long BytesWritten { get; private set; }
 
@@ -24,15 +57,7 @@ internal abstract class GovernedSerializationStream(TimeSpan deadline) : Stream
         set => throw new NotSupportedException();
     }
 
-    public void AssertWithinDeadline()
-    {
-        if (_clock.Elapsed > deadline)
-        {
-            throw new SafetyScanException(
-                "capture serialization exceeded the governed " +
-                $"{deadline.TotalSeconds:0}-second deadline");
-        }
-    }
+    public void AssertWithinDeadline() => _deadline.AssertWithinDeadline();
 
     public override void Flush() => AssertWithinDeadline();
 
@@ -76,18 +101,76 @@ internal abstract class GovernedSerializationStream(TimeSpan deadline) : Stream
         throw new NotSupportedException();
 }
 
-internal sealed class CountingSerializationStream(TimeSpan deadline)
-    : GovernedSerializationStream(deadline)
+internal sealed class CountingSerializationStream : GovernedSerializationStream
 {
+    public CountingSerializationStream(TimeSpan deadline) : base(deadline)
+    {
+    }
+
+    public CountingSerializationStream(GovernedDeadline deadline) : base(deadline)
+    {
+    }
+
     protected override void WriteToSink(ReadOnlySpan<byte> buffer)
     {
     }
 }
 
-internal sealed class HashingSerializationStream(
-    IncrementalHash hash,
-    TimeSpan deadline) : GovernedSerializationStream(deadline)
+internal sealed class HashingSerializationStream : GovernedSerializationStream
 {
+    private readonly IncrementalHash _hash;
+
+    public HashingSerializationStream(IncrementalHash hash, TimeSpan deadline)
+        : base(deadline)
+    {
+        _hash = hash;
+    }
+
     protected override void WriteToSink(ReadOnlySpan<byte> buffer) =>
-        hash.AppendData(buffer);
+        _hash.AppendData(buffer);
 }
+
+internal sealed class BoundedBufferSerializationStream : GovernedSerializationStream
+{
+    private readonly long _maximumBytes;
+    private readonly MemoryStream _buffer = new();
+
+    public BoundedBufferSerializationStream(long maximumBytes, TimeSpan deadline)
+        : base(deadline)
+    {
+        _maximumBytes = maximumBytes;
+    }
+
+    public BoundedBufferSerializationStream(
+        long maximumBytes,
+        GovernedDeadline deadline)
+        : base(deadline)
+    {
+        _maximumBytes = maximumBytes;
+    }
+
+    public ReadOnlyMemory<byte> WrittenMemory =>
+        _buffer.GetBuffer().AsMemory(0, checked((int)_buffer.Length));
+
+    protected override void WriteToSink(ReadOnlySpan<byte> buffer)
+    {
+        if (BytesWritten > _maximumBytes - buffer.Length)
+        {
+            throw new CaptureRepresentationLimitException(
+                $"the governed capture representation exceeded {_maximumBytes} bytes");
+        }
+        _buffer.Write(buffer);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _buffer.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}
+
+internal sealed class CaptureRepresentationLimitException(string message)
+    : Exception(message);

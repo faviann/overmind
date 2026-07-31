@@ -10,7 +10,7 @@ namespace CaptureAdapters;
 public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
 {
     public string Harness => "codex";
-    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "8");
+    public CaptureAdapter Identity { get; } = new("codex-synthetic-jsonl", "9");
 
     public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
     {
@@ -75,7 +75,20 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             record.Clone(),
             events,
             SourceIdentity: source.SourceIdentity);
-        return new CaptureSourcePositionOutcome.Terminal(source.SourcePosition, request);
+        BinaryFidelitySelection<CaptureObservationRequest> fidelity =
+            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+                request,
+                CaptureFidelityPolicy.ProductionTransportBytes);
+        if (fidelity.WasOmitted
+            && source.Locator is CaptureSourceLocator.NativeId)
+        {
+            throw new InvalidDataException(
+                "A native_id Codex record with unsupported binary content fails closed: " +
+                CaptureFidelityPolicy.UnsupportedBinaryReason + ".");
+        }
+        return new CaptureSourcePositionOutcome.Terminal(
+            source.SourcePosition,
+            fidelity.Observation);
     }
 
     private static IReadOnlyList<CaptureEvent> Interpret(

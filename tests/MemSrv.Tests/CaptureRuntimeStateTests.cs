@@ -381,6 +381,260 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task ExplicitBinaryMediaBytesAreOmittedBeforeDurableClaimAndRetriesConverge()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string fixture = Path.Combine(
+            root,
+            "fixtures/adapter-conformance/codex-cli-0.146.binary-media.synthetic.jsonl");
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-binary-media-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var adapter = new CodexJsonlAdapter();
+
+            IReadOnlyList<CaptureRuntimeQueueItem> first =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    fixture,
+                    "binary-media-runtime",
+                    state,
+                    gate,
+                    terminalAtEndOfFile: true);
+            IReadOnlyList<CaptureRuntimeQueueItem> retry =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    adapter,
+                    fixture,
+                    "binary-media-runtime",
+                    state,
+                    gate,
+                    terminalAtEndOfFile: true);
+
+            Assert.Equal(12, first.Count);
+            Assert.Empty(retry);
+            CaptureRuntimeStreamState durable = Assert.Single(
+                (await state.ReadAsync()).Streams);
+            Assert.Equal(12, durable.Queue.Count);
+            string[] categories = ["attachment", "archive", "executable", "image", "audio"];
+            long[] byteCounts = [4, 3, 2, 4, 5];
+            for (int index = 0; index < categories.Length; index++)
+            {
+                using JsonDocument queued = JsonDocument.Parse(
+                    durable.Queue[index].RedactedSafeCandidate);
+                JsonElement block = queued.RootElement.GetProperty("sourcePayload")
+                    .GetProperty("payload").GetProperty("content")[0];
+                Assert.False(block.TryGetProperty("byte_payload", out _));
+                JsonElement omission = block.GetProperty("capture_fidelity_omission");
+                Assert.Equal(
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    omission.GetProperty("reason").GetString());
+                Assert.Equal(
+                    categories[index],
+                    omission.GetProperty("category").GetString());
+                Assert.Equal(
+                    byteCounts[index],
+                    omission.GetProperty("originalByteCount").GetInt64());
+                JsonElement sourceIdentity = omission.GetProperty("sourceIdentity");
+                Assert.Equal(
+                    "binary-media-runtime",
+                    sourceIdentity.GetProperty("externalSessionId").GetString());
+                Assert.Equal(
+                    index,
+                    sourceIdentity.GetProperty("sourcePosition").GetInt64());
+                Assert.Equal(
+                    "byte_range",
+                    sourceIdentity.GetProperty("locatorKind").GetString());
+            }
+
+            using JsonDocument firstQueued = JsonDocument.Parse(
+                durable.Queue[0].RedactedSafeCandidate);
+            JsonElement firstBlock = firstQueued.RootElement.GetProperty("sourcePayload")
+                .GetProperty("payload").GetProperty("content")[0];
+            Assert.Equal(
+                "Visible attachment caption.",
+                firstBlock.GetProperty("text").GetString());
+            JsonElement nestedProvenance = firstBlock.GetProperty("capture_provenance")
+                .GetProperty("nested");
+            Assert.False(nestedProvenance.TryGetProperty("byte_payload", out _));
+            Assert.Equal(
+                "Safe nested provenance text.",
+                nestedProvenance.GetProperty("text").GetString());
+            Assert.False(
+                firstBlock.GetProperty("capture_fidelity_omission")
+                    .TryGetProperty("captureProvenance", out _));
+
+            using JsonDocument spoofedRootQueued = JsonDocument.Parse(
+                durable.Queue[11].RedactedSafeCandidate);
+            JsonElement spoofedRootSource = spoofedRootQueued.RootElement
+                .GetProperty("sourcePayload").GetProperty("source");
+            foreach (string propertyName in new[] { "signature", "encrypted_content" })
+            {
+                JsonElement spoofedMetadata = spoofedRootSource.GetProperty(propertyName);
+                Assert.False(spoofedMetadata.TryGetProperty("byte_payload", out _));
+                Assert.Equal(
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    spoofedMetadata.GetProperty("capture_fidelity_omission")
+                        .GetProperty("reason").GetString());
+            }
+            Assert.Equal(
+                "Raw root spoof safe sibling remains.",
+                spoofedRootSource.GetProperty("safeSibling").GetString());
+
+            string durableJson = await File.ReadAllTextAsync(
+                Path.Combine(directory, "state", "capture-state.json"));
+            foreach (string rawBytes in new[]
+                {
+                    "[1,2,3,4]",
+                    "[5,6,7]",
+                    "[77,90]",
+                    "[137,80,78,71]",
+                    "[82,73,70,70,1]",
+                    "[201,202]",
+                    "[71,72]",
+                    "[73,74]"
+                })
+            {
+                Assert.DoesNotContain(rawBytes, durableJson, StringComparison.Ordinal);
+            }
+            Assert.DoesNotContain(
+                "\"digest\"",
+                firstBlock.GetProperty("capture_fidelity_omission").GetRawText());
+            Assert.DoesNotContain(
+                "\"excerpt\"",
+                firstBlock.GetProperty("capture_fidelity_omission").GetRawText());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BinaryRewriteBeyondTransportBoundQueuesOnlyAWholeObservationOmission()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-binary-overflow-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        string rawRecord = JsonSerializer.Serialize(new
+        {
+            type = "synthetic",
+            content = Enumerable.Range(0, 3_400).Select(_ => new
+            {
+                type = "binary_content",
+                category = "attachment",
+                byte_payload = new[] { 91, 92, 93 }
+            })
+        });
+        await File.WriteAllTextAsync(
+            transcript,
+            rawRecord + "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            CaptureRuntimeQueueItem claim = Assert.Single(
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new CodexJsonlAdapter(),
+                    transcript,
+                    "binary-overflow-runtime",
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    terminalAtEndOfFile: true));
+
+            Assert.True(
+                Encoding.UTF8.GetByteCount(claim.RedactedSafeCandidate)
+                <= CaptureFidelityPolicy.ProductionTransportBytes);
+            using JsonDocument queued = JsonDocument.Parse(claim.RedactedSafeCandidate);
+            Assert.Equal(
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                queued.RootElement.GetProperty("sourcePayload")
+                    .GetProperty("omission").GetProperty("reason").GetString());
+            Assert.Equal(
+                "observation/omitted",
+                Assert.Single(queued.RootElement.GetProperty("events").EnumerateArray())
+                    .GetProperty("partKey").GetString());
+            string durableState = await File.ReadAllTextAsync(
+                Path.Combine(directory, "state", "capture-state.json"));
+            Assert.DoesNotContain("\"byte_payload\"", durableState, StringComparison.Ordinal);
+            Assert.DoesNotContain("[91,92,93]", durableState, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task NativeBinaryMediaFailsBeforeClaimAndPersistsNoRawContent()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-native-binary-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        const string rawSentinel = "NATIVE-BINARY-RAW-MUST-NOT-PERSIST";
+        var source = new TrustedSourceObservation(
+            new CaptureSourceIdentity("native-binary-runtime"),
+            0,
+            new CaptureSourceLocator.NativeId("native-binary-record"),
+            CaptureSourceMaterialKind.HookFact,
+            JsonSerializer.SerializeToElement(new
+            {
+                type = "response_item",
+                payload = new
+                {
+                    type = "message",
+                    role = "user",
+                    content = new[]
+                    {
+                        new
+                        {
+                            type = "binary_content",
+                            category = "attachment",
+                            byte_payload = new[] { 78, 65, 84, 73, 86, 69 },
+                            text = rawSentinel
+                        }
+                    }
+                }
+            }),
+            IsTerminal: true);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            InvalidDataException failure = Assert.Throws<InvalidDataException>(
+                () => new CodexJsonlAdapter().Adapt(source));
+
+            Assert.Contains("native_id", failure.Message, StringComparison.Ordinal);
+            Assert.Contains(
+                CaptureFidelityPolicy.UnsupportedBinaryReason,
+                failure.Message,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(rawSentinel, failure.ToString(), StringComparison.Ordinal);
+            Assert.Empty((await state.ReadAsync()).Streams);
+            string statePath = Path.Combine(directory, "state", "capture-state.json");
+            if (File.Exists(statePath))
+            {
+                Assert.DoesNotContain(
+                    rawSentinel,
+                    await File.ReadAllTextAsync(statePath),
+                    StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void NativeRecordBeyondTransportLimitFailsClosedAtTheFidelityPolicy()
     {
         JsonElement payload = JsonSerializer.SerializeToElement(new
@@ -634,6 +888,228 @@ public sealed class CaptureRuntimeStateTests
             clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
             $"Streaming count took {clock.Elapsed}; the published deadline is " +
             $"{SafetyBudgets.Default.MaxScanTime}.");
+    }
+
+    [Fact]
+    public void PathologicalBinaryPayloadIsRewrittenWithinTransportAllocationAndDeadline()
+    {
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            type = "response_item",
+            payload = new
+            {
+                type = "message",
+                content = new[]
+                {
+                    new
+                    {
+                        type = "binary_content",
+                        category = "attachment",
+                        byte_payload = new int[8 * 1024 * 1024]
+                    }
+                }
+            }
+        });
+        CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+            JsonSerializer.SerializeToElement(new { type = "warm" }),
+            "codex",
+            new CaptureSourceIdentity("warm-session"),
+            0,
+            "byte_range",
+            CaptureFidelityPolicy.ProductionTransportBytes);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var clock = Stopwatch.StartNew();
+
+        BinaryFidelitySelection<JsonElement> selected =
+            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+                payload,
+                "codex",
+                new CaptureSourceIdentity("pathological-session", "child-1"),
+                17,
+                "byte_range",
+                CaptureFidelityPolicy.ProductionTransportBytes);
+
+        clock.Stop();
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(selected.WasOmitted);
+        Assert.True(
+            allocated < 4L * 1024 * 1024,
+            $"Bounded binary rewriting allocated {allocated:N0} bytes.");
+        Assert.True(
+            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            $"Binary rewriting took {clock.Elapsed}; the published deadline is " +
+            $"{SafetyBudgets.Default.MaxScanTime}.");
+        JsonElement block = selected.Observation.GetProperty("payload")
+            .GetProperty("content")[0];
+        Assert.False(block.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            8L * 1024 * 1024,
+            block.GetProperty("capture_fidelity_omission")
+                .GetProperty("originalByteCount").GetInt64());
+        JsonElement sourceIdentity = block.GetProperty("capture_fidelity_omission")
+            .GetProperty("sourceIdentity");
+        Assert.Equal(
+            "pathological-session",
+            sourceIdentity.GetProperty("externalSessionId").GetString());
+        Assert.Equal("child-1", sourceIdentity.GetProperty("childId").GetString());
+        Assert.Equal(17, sourceIdentity.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal("byte_range", sourceIdentity.GetProperty("locatorKind").GetString());
+    }
+
+    [Fact]
+    public void BinaryRewriteExpansionNeverReturnsTheRecognizedRawPayload()
+    {
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            type = "synthetic",
+            content = Enumerable.Range(0, 100).Select(_ => new
+            {
+                type = "binary_content",
+                category = "attachment",
+                byte_payload = new[] { 91, 92, 93 }
+            })
+        });
+
+        BinaryFidelitySelection<JsonElement> selected =
+            CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
+                payload,
+                "codex",
+                new CaptureSourceIdentity("expansion-session", "child-1"),
+                17,
+                "byte_range",
+                1_024);
+
+        Assert.True(selected.WasOmitted);
+        Assert.False(
+            selected.Observation.GetRawText().Contains(
+                "\"byte_payload\"",
+                StringComparison.Ordinal));
+        JsonElement omission = selected.Observation.GetProperty("omission");
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            omission.GetProperty("reason").GetString());
+        Assert.Equal(
+            "expansion-session",
+            omission.GetProperty("sourceIdentity")
+                .GetProperty("externalSessionId").GetString());
+        Assert.Equal(
+            "child-1",
+            omission.GetProperty("sourceIdentity")
+                .GetProperty("childId").GetString());
+    }
+
+    [Fact]
+    public void GovernedDeadlineDoesNotResetBetweenBinaryFidelityPhases()
+    {
+        var time = new ManualTimeProvider();
+        var deadline = new GovernedDeadline(TimeSpan.FromSeconds(30), time);
+        using var candidatePass = new CountingSerializationStream(deadline);
+        candidatePass.WriteByte(1);
+        time.Advance(TimeSpan.FromSeconds(20));
+        candidatePass.AssertWithinDeadline();
+
+        using var rewritePass = new BoundedBufferSerializationStream(16, deadline);
+        rewritePass.WriteByte(2);
+        time.Advance(TimeSpan.FromSeconds(11));
+
+        SafetyScanException failure = Assert.Throws<SafetyScanException>(
+            deadline.AssertWithinDeadline);
+        Assert.Contains("30-second deadline", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BinaryOmissionRecognitionRequiresTheCompleteTrustedPolicyShape()
+    {
+        CaptureObservationCommand Command(JsonElement payload) => new(
+            1,
+            new CaptureSourceIdentity("recognition-session", "recognition-child"),
+            7,
+            new CaptureSourceLocator.NativeId("recognition-record"),
+            null,
+            new CaptureSource("codex", "0.146.synthetic", "response_item"),
+            new CaptureAdapter("codex-synthetic-jsonl", "9"),
+            payload,
+            [
+                new CaptureEvent(
+                    "opaque/0",
+                    0,
+                    "opaque",
+                    "unknown",
+                    JsonSerializer.SerializeToElement(new { }),
+                    null,
+                    [])
+            ],
+            null);
+
+        object Omission(
+            string externalSessionId,
+            string childId,
+            long sourcePosition,
+            string locatorKind) => new
+        {
+            reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+            category = "image",
+            originalByteCount = 2,
+            policyVersion = CaptureFidelityPolicy.CurrentVersion,
+            sourceIdentity = new
+            {
+                externalSessionId,
+                childId,
+                sourcePosition,
+                locatorKind
+            }
+        };
+        object omission = Omission(
+            "recognition-session",
+            "recognition-child",
+            7,
+            "native_id");
+        object incomplete = new
+        {
+            reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+            category = "image",
+            originalByteCount = 2,
+            policyVersion = CaptureFidelityPolicy.CurrentVersion
+        };
+        object[] mismatched =
+        {
+            Omission("source-owned-lookalike", "recognition-child", 7, "native_id"),
+            Omission("recognition-session", "source-owned-child", 7, "native_id"),
+            Omission("recognition-session", "recognition-child", 8, "native_id"),
+            Omission("recognition-session", "recognition-child", 7, "byte_range")
+        };
+        Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission_note = omission
+            }))));
+        Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission = incomplete
+            }))));
+        Assert.All(mismatched, lookalike =>
+            Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+                Command(JsonSerializer.SerializeToElement(new
+                {
+                    capture_fidelity_omission = lookalike
+                })))));
+        Assert.True(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission = omission
+            }))));
+        Assert.True(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission = new { source = "collision" },
+                capture_fidelity_omission_1 = omission
+            }))));
+        Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission_2 = omission
+            }))));
     }
 
     [Fact]
@@ -2746,5 +3222,16 @@ public sealed class CaptureRuntimeStateTests
 
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
             GetEnumerator();
+    }
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private long _timestamp;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => _timestamp;
+
+        public void Advance(TimeSpan elapsed) =>
+            _timestamp = checked(_timestamp + elapsed.Ticks);
     }
 }

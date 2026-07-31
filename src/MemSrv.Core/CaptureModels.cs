@@ -396,6 +396,49 @@ public sealed record CapturedSourceStreamReplay(
     CaptureReplayOrderBasis OrderBasis,
     IReadOnlyList<CapturedEventReplay> Events);
 
+/// <summary>
+/// The authorized, captured session identity exposed by relationship
+/// navigation. It contains no event content and is never synthesized from a
+/// relationship target.
+/// </summary>
+public sealed record CapturedSessionReference(
+    Guid SourceStreamUuid,
+    string SessionId,
+    string Namespace,
+    CaptureSourceIdentity SourceIdentity);
+
+/// <summary>
+/// Safe source-stated relationship evidence used by session navigation.
+/// Unavailable targets omit their explicit source-stream UUID.
+/// </summary>
+public sealed record CaptureSessionRelationshipEvidence(
+    string RelationshipType,
+    Guid SourceTraceUuid,
+    Guid SourceStreamUuid,
+    Guid? TargetSourceStreamUuid,
+    string TargetNativeId,
+    string? TargetKind);
+
+/// <summary>
+/// One source-stated session relationship as seen from the requested session.
+/// An unavailable related session is always null, whether it is absent,
+/// ambiguous, or outside the caller's namespace authority.
+/// </summary>
+public sealed record CapturedSessionRelationship(
+    string Direction,
+    string Availability,
+    CaptureSessionRelationshipEvidence Evidence,
+    CapturedSessionReference? Session);
+
+/// <summary>
+/// Authorization-aware read-time navigation over immutable captured session
+/// and source-relationship facts.
+/// </summary>
+public sealed record CapturedSessionNavigation(
+    int ContractVersion,
+    CapturedSessionReference Session,
+    IReadOnlyList<CapturedSessionRelationship> Relationships);
+
 /// <summary>The per-record import outcome returned by the capture endpoint.</summary>
 public sealed record CaptureImportReceipt(
     Guid ObservationUuid,

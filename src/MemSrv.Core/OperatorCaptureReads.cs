@@ -74,4 +74,67 @@ public sealed class OperatorCaptureReads(string connectionString)
             ReplayOrderBasis,
             replayedEvents);
     }
+
+    /// <summary>
+    /// Navigates only source-stated captured-session relationships visible
+    /// through the caller's explicit namespace authority. Missing, ambiguous,
+    /// and unauthorized outgoing targets share one unavailable representation.
+    /// </summary>
+    public async Task<CapturedSessionNavigation> NavigateCapturedSessionAsync(
+        Guid sourceStreamUuid,
+        IReadOnlyCollection<string> allowedNamespaces,
+        CancellationToken cancellationToken = default)
+    {
+        if (allowedNamespaces.Count == 0
+            || allowedNamespaces.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException(
+                "At least one non-blank namespace is required.",
+                nameof(allowedNamespaces));
+        }
+
+        string[] authority = allowedNamespaces
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        var session = await CaptureLedger.LoadAuthorizedSessionAsync(
+            connection, sourceStreamUuid, authority)
+            ?? throw new InvalidOperationException(
+                "Captured source stream is unavailable for the supplied namespace authority.");
+
+        var relationships = new List<CapturedSessionRelationship>();
+        foreach (var outgoing in await CaptureLedger.LoadOutgoingSessionRelationshipsAsync(
+            connection, sourceStreamUuid))
+        {
+            CapturedSessionReference? target =
+                (await CaptureLedger.ResolveAuthorizedRelationshipTargetAsync(
+                    connection, outgoing, authority))?.ToReference();
+            CaptureSessionRelationshipEvidence evidence = outgoing.ToEvidence();
+            if (target is null)
+            {
+                evidence = evidence with { TargetSourceStreamUuid = null };
+            }
+            relationships.Add(new CapturedSessionRelationship(
+                "outgoing",
+                target is null ? "unavailable" : "available",
+                evidence,
+                target));
+        }
+
+        foreach (var incoming in await CaptureLedger.LoadIncomingSessionRelationshipsAsync(
+            connection, session, authority))
+        {
+            relationships.Add(new CapturedSessionRelationship(
+                "incoming",
+                "available",
+                incoming.ToEvidence(),
+                incoming.ToSourceReference()));
+        }
+
+        return new CapturedSessionNavigation(
+            ContractVersion,
+            session.ToReference(),
+            relationships);
+    }
 }

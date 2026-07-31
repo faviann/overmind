@@ -178,9 +178,212 @@ internal static class CaptureLedger
         return observations;
     }
 
+    internal static Task<SessionRow?> LoadAuthorizedSessionAsync(
+        NpgsqlConnection connection,
+        Guid sourceStreamUuid,
+        IReadOnlyCollection<string> allowedNamespaces) =>
+        connection.QuerySingleOrDefaultAsync<SessionRow>(
+            """
+            SELECT stream_uuid AS SourceStreamUuid,
+                   binding_uuid AS BindingUuid,
+                   trace_session_id AS SessionId,
+                   effective_namespace AS Namespace,
+                   external_session_id AS ExternalSessionId,
+                   child_id AS ChildId
+            FROM capture_source_streams
+            WHERE stream_uuid = @sourceStreamUuid
+              AND effective_namespace = ANY(@allowedNamespaces)
+            """,
+            new { sourceStreamUuid, allowedNamespaces = allowedNamespaces.ToArray() });
+
+    internal static async Task<IReadOnlyList<SessionRelationshipRow>>
+        LoadOutgoingSessionRelationshipsAsync(
+            NpgsqlConnection connection,
+            Guid sourceStreamUuid)
+    {
+        return (await connection.QueryAsync<SessionRelationshipRow>(
+            """
+            SELECT r.relationship_type AS RelationshipType,
+                   r.source_trace_uuid AS SourceTraceUuid,
+                   source_stream.stream_uuid AS SourceStreamUuid,
+                   source_stream.binding_uuid AS SourceBindingUuid,
+                   r.target_source_stream_uuid AS TargetSourceStreamUuid,
+                   r.target_native_id AS TargetNativeId,
+                   r.target_kind AS TargetKind
+            FROM captured_event_relationships r
+            JOIN captured_events e ON e.trace_uuid = r.source_trace_uuid
+            JOIN capture_observations o USING (observation_uuid)
+            JOIN capture_source_streams source_stream USING (stream_uuid)
+            WHERE source_stream.stream_uuid = @sourceStreamUuid
+              AND r.relationship_type = ANY(@relationshipTypes)
+              AND r.target_kind = 'session'
+            """,
+            new
+            {
+                sourceStreamUuid,
+                relationshipTypes = SessionRelationshipTypes
+            })).AsList();
+    }
+
+    internal static async Task<IReadOnlyList<SessionRelationshipRow>>
+        LoadIncomingSessionRelationshipsAsync(
+            NpgsqlConnection connection,
+            SessionRow target,
+            IReadOnlyCollection<string> allowedNamespaces)
+    {
+        return (await connection.QueryAsync<SessionRelationshipRow>(
+            """
+            SELECT r.relationship_type AS RelationshipType,
+                   r.source_trace_uuid AS SourceTraceUuid,
+                   source_stream.stream_uuid AS SourceStreamUuid,
+                   source_stream.binding_uuid AS SourceBindingUuid,
+                   r.target_source_stream_uuid AS TargetSourceStreamUuid,
+                   r.target_native_id AS TargetNativeId,
+                   r.target_kind AS TargetKind,
+                   source_stream.trace_session_id AS SourceSessionId,
+                   source_stream.effective_namespace AS SourceNamespace,
+                   source_stream.external_session_id AS SourceExternalSessionId,
+                   source_stream.child_id AS SourceChildId
+            FROM captured_event_relationships r
+            JOIN captured_events e ON e.trace_uuid = r.source_trace_uuid
+            JOIN capture_observations o USING (observation_uuid)
+            JOIN capture_source_streams source_stream USING (stream_uuid)
+            WHERE source_stream.effective_namespace = ANY(@allowedNamespaces)
+              AND r.relationship_type = ANY(@relationshipTypes)
+              AND r.target_kind = 'session'
+              AND (
+                r.target_source_stream_uuid = @targetSourceStreamUuid
+                OR (
+                  r.target_source_stream_uuid IS NULL
+                  AND source_stream.binding_uuid = @targetBindingUuid
+                  AND r.target_native_id = @targetNativeIdentity
+                  AND (
+                    SELECT count(*)
+                    FROM capture_source_streams candidate
+                    WHERE candidate.binding_uuid = source_stream.binding_uuid
+                      AND COALESCE(candidate.child_id, candidate.external_session_id)
+                          = r.target_native_id
+                  ) = 1
+                )
+              )
+            """,
+            new
+            {
+                allowedNamespaces = allowedNamespaces.ToArray(),
+                relationshipTypes = SessionRelationshipTypes,
+                targetSourceStreamUuid = target.SourceStreamUuid,
+                targetBindingUuid = target.BindingUuid,
+                targetNativeIdentity = target.NativeIdentity
+            })).AsList();
+    }
+
+    internal static async Task<SessionRow?> ResolveAuthorizedRelationshipTargetAsync(
+        NpgsqlConnection connection,
+        SessionRelationshipRow relationship,
+        IReadOnlyCollection<string> allowedNamespaces)
+    {
+        if (relationship.TargetSourceStreamUuid is Guid targetSourceStreamUuid)
+        {
+            return await LoadAuthorizedSessionAsync(
+                connection, targetSourceStreamUuid, allowedNamespaces);
+        }
+
+        var rows = (await connection.QueryAsync<SessionCandidateRow>(
+            """
+            WITH candidates AS (
+              SELECT stream_uuid AS SourceStreamUuid,
+                     binding_uuid AS BindingUuid,
+                     trace_session_id AS SessionId,
+                     effective_namespace AS Namespace,
+                     external_session_id AS ExternalSessionId,
+                     child_id AS ChildId
+              FROM capture_source_streams
+              WHERE binding_uuid = @sourceBindingUuid
+                AND COALESCE(child_id, external_session_id) = @targetNativeId
+            )
+            SELECT candidate.*,
+                   (SELECT count(*) FROM candidates) AS MatchCount
+            FROM candidates candidate
+            WHERE candidate.Namespace = ANY(@allowedNamespaces)
+            """,
+            new
+            {
+                relationship.SourceBindingUuid,
+                relationship.TargetNativeId,
+                allowedNamespaces = allowedNamespaces.ToArray()
+            })).AsList();
+        return rows.Count == 1 && rows[0].MatchCount == 1
+            ? rows[0].ToSessionRow()
+            : null;
+    }
+
+    private static readonly string[] SessionRelationshipTypes =
+        ["parent_session", "spawned_by", "forked_from"];
+
     internal sealed record SourceOrderedObservation(
         long SourcePosition,
         CaptureObservationReceipt Observation);
+
+    internal class SessionRow
+    {
+        public Guid SourceStreamUuid { get; set; }
+        public Guid BindingUuid { get; set; }
+        public string SessionId { get; set; } = "";
+        public string Namespace { get; set; } = "";
+        public string ExternalSessionId { get; set; } = "";
+        public string? ChildId { get; set; }
+        public string NativeIdentity => ChildId ?? ExternalSessionId;
+
+        internal CapturedSessionReference ToReference() => new(
+            SourceStreamUuid,
+            SessionId,
+            Namespace,
+            new CaptureSourceIdentity(ExternalSessionId, ChildId));
+    }
+
+    internal sealed class SessionRelationshipRow
+    {
+        public string RelationshipType { get; set; } = "";
+        public Guid SourceTraceUuid { get; set; }
+        public Guid SourceStreamUuid { get; set; }
+        public Guid SourceBindingUuid { get; set; }
+        public Guid? TargetSourceStreamUuid { get; set; }
+        public string TargetNativeId { get; set; } = "";
+        public string? TargetKind { get; set; }
+        public string SourceSessionId { get; set; } = "";
+        public string SourceNamespace { get; set; } = "";
+        public string SourceExternalSessionId { get; set; } = "";
+        public string? SourceChildId { get; set; }
+
+        internal CaptureSessionRelationshipEvidence ToEvidence() => new(
+            RelationshipType,
+            SourceTraceUuid,
+            SourceStreamUuid,
+            TargetSourceStreamUuid,
+            TargetNativeId,
+            TargetKind);
+
+        internal CapturedSessionReference ToSourceReference() => new(
+            SourceStreamUuid,
+            SourceSessionId,
+            SourceNamespace,
+            new CaptureSourceIdentity(SourceExternalSessionId, SourceChildId));
+    }
+
+    private sealed class SessionCandidateRow : SessionRow
+    {
+        public long MatchCount { get; set; }
+
+        internal SessionRow ToSessionRow() => new()
+        {
+            SourceStreamUuid = SourceStreamUuid,
+            BindingUuid = BindingUuid,
+            SessionId = SessionId,
+            Namespace = Namespace,
+            ExternalSessionId = ExternalSessionId,
+            ChildId = ChildId
+        };
+    }
 
     private sealed class ObservationRow
     {

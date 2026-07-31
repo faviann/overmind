@@ -17,7 +17,7 @@ Source interpretation before this spine is described by the
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `CaptureFidelityPolicy` | `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
-| `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>`; `ReplaySourceStreamAsync(sourceStreamUuid)` → `CapturedSourceStreamReplay` | `memctl capture receipt`; `memctl capture replay` |
+| `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>`; `ReplaySourceStreamAsync(sourceStreamUuid)` → `CapturedSourceStreamReplay`; `NavigateCapturedSessionAsync(sourceStreamUuid, allowedNamespaces)` → `CapturedSessionNavigation` | `memctl capture receipt`; `memctl capture replay`; `memctl capture navigate` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
@@ -108,14 +108,26 @@ serialization that passed the effective ceiling. In-limit signatures use that
 same stable original snapshot; over-limit signatures continue to stream the
 original content while scan and persistence use only the bounded omission.
 
-**`OperatorCaptureReads`** — envelope and operator replay assembly. Receipt
+**`OperatorCaptureReads`** — envelope, operator replay, and captured-session
+navigation assembly. Receipt
 reads return complete versioned `CapturedEventEnvelope` values (contract
 version, immutable observation, one canonical event, that event's
 relationships). A one-stream replay wraps those envelopes unchanged, labels
 its order basis as durable `capture_observations.source_position` followed by
 source-stated `captured_events.part_order`, and adds no global or session-wide
-ordinal. `memctl` serializes these read models and does nothing else. Reads use
-already-sanitized durable rows and do not require scanner configuration.
+ordinal. Navigation requires at least one explicit allowed namespace, rejects
+an unavailable starting stream without distinguishing absent from unauthorized,
+and resolves only stored `parent_session`, `spawned_by`, and `forked_from`
+session evidence. A native target resolves only when its binding-scoped
+captured identity is unique; an explicit target-stream UUID remains exact.
+Absent, ambiguous, and unauthorized outgoing targets all retain the immutable
+source evidence while exposing a null related session with `unavailable`
+status. Incoming edges are returned only when both their source session and
+resolved target are authorized. A later target capture can therefore change
+only this read answer. Navigation does not add confidence, chronology,
+inferred edges, or an order. `memctl` serializes these read models and does
+nothing else. Reads use already-sanitized durable rows and do not require
+scanner configuration.
 
 **`ICaptureRuntimeState`** — one durable local progress boundary. A claim
 atomically records the verified transcript prefix, advances `enqueuedThrough`,
@@ -332,4 +344,6 @@ operator reads compose the same records: `CaptureImportReceipt` carries the
 observation plus `CapturedEventReceipt` (a canonical event with its
 relationships, serialized flat), and `CapturedEventEnvelope` carries the
 observation plus one canonical event and its relationships. There is no second
-receipt model for a caller to translate between.
+receipt model for a caller to translate between. `CapturedSessionNavigation`
+is deliberately a derived read model over those facts and persisted stream
+identity/scope; it never becomes another canonical receipt.

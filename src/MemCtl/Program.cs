@@ -318,6 +318,19 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 replay, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
             return 0;
 
+        case "navigate":
+            RequireArgs(args, 3);
+            string[] allowedNamespaces = FindOptions(args, "--namespace").ToArray();
+            if (allowedNamespaces.Length == 0)
+            {
+                throw new ArgumentException("--namespace is required.");
+            }
+            var navigation = await new OperatorCaptureReads(options.ConnectionString)
+                .NavigateCapturedSessionAsync(Guid.Parse(args[2]), allowedNamespaces);
+            Console.WriteLine(JsonSerializer.Serialize(
+                navigation, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            return 0;
+
         case "route-policy":
             RequireArgs(args, 3);
             var remoteOverrides = FindOptions(args, "--remote-override")
@@ -431,6 +444,9 @@ static void Usage()
         "--credential-file path");
     Console.Error.WriteLine("memctl capture receipt <observation_uuid>");
     Console.Error.WriteLine("memctl capture replay <source_stream_uuid>");
+    Console.Error.WriteLine(
+        "memctl capture navigate <source_stream_uuid> --namespace namespace " +
+        "[--namespace namespace ...]");
     Console.Error.WriteLine(
         "memctl capture route-policy <stable_name> " +
         "[--allow-repository owner/name-pattern] " +

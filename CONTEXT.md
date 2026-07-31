@@ -176,6 +176,14 @@ present in the captured ledger. It differs from a legitimate root, for which
 the source stated no parent. A dangling relationship is retained as evidence
 of incomplete capture rather than dropped or repaired by inference.
 
+**Captured session navigation** — an authorization-aware operator read model
+over captured stream identity and immutable source relationships. It resolves
+an exact, unambiguous permitted target at read time and otherwise reports the
+stored edge as unavailable without target session identity or namespace.
+Incoming edges expose only permitted source sessions. Late capture changes the
+answer, not the canonical relationship, and navigation adds no inferred edge,
+confidence, chronology, or global order.
+
 **Canonical event header** — the small relational portion of a captured event
 containing stable, frequently queried invariants such as observation identity,
 part key, kind, actor, session, source order, and occurrence time. Speculative

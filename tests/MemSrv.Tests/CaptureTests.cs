@@ -293,6 +293,516 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(JsonValueKind.Null, secondObservation.GetProperty("source").GetProperty("provider").ValueKind);
     }
 
+    [Fact]
+    public async Task AuthorizedOperatorNavigatesSourceStatedSessionRelationshipsAtReadTime()
+    {
+        string binding = $"codex-navigation-{Guid.NewGuid():N}";
+        string captureKey = CaptureCredential();
+        string externalSessionId = $"navigation-parent-{Guid.NewGuid():N}";
+        string childId = $"navigation-child-{Guid.NewGuid():N}";
+        await EnrollAsync(binding, captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage childResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                externalSessionId,
+                childId,
+                $"navigation-child-record-{Guid.NewGuid():N}",
+                parentNativeId: externalSessionId,
+                workingDirectory: null));
+        childResponse.EnsureSuccessStatusCode();
+        JsonElement childReceipt = await childResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid childStreamUuid = childReceipt.GetProperty("observation")
+            .GetProperty("sourceStreamUuid").GetGuid();
+        Guid childObservationUuid = childReceipt.GetProperty("observationUuid").GetGuid();
+
+        JsonElement dangling = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate", childStreamUuid.ToString(),
+            "--namespace", "capture/unscoped")).RootElement;
+        Assert.Equal(
+            ["contractVersion", "session", "relationships"],
+            dangling.EnumerateObject().Select(property => property.Name));
+        Assert.Equal("capture/unscoped", dangling.GetProperty("session")
+            .GetProperty("namespace").GetString());
+        JsonElement danglingEdge = Assert.Single(
+            dangling.GetProperty("relationships").EnumerateArray());
+        Assert.Equal(
+            ["direction", "availability", "evidence", "session"],
+            danglingEdge.EnumerateObject().Select(property => property.Name));
+        Assert.Equal("outgoing", danglingEdge.GetProperty("direction").GetString());
+        Assert.Equal("unavailable", danglingEdge.GetProperty("availability").GetString());
+        Assert.Equal(JsonValueKind.Null, danglingEdge.GetProperty("session").ValueKind);
+        Assert.Equal(
+            ["relationshipType", "sourceTraceUuid", "sourceStreamUuid",
+                "targetSourceStreamUuid", "targetNativeId", "targetKind"],
+            danglingEdge.GetProperty("evidence")
+                .EnumerateObject().Select(property => property.Name));
+        Assert.Equal(
+            "parent_session",
+            danglingEdge.GetProperty("evidence").GetProperty("relationshipType").GetString());
+        Assert.Equal(
+            childStreamUuid,
+            danglingEdge.GetProperty("evidence").GetProperty("sourceStreamUuid").GetGuid());
+        Assert.Equal(
+            externalSessionId,
+            danglingEdge.GetProperty("evidence").GetProperty("targetNativeId").GetString());
+        Assert.Equal(
+            "session",
+            danglingEdge.GetProperty("evidence").GetProperty("targetKind").GetString());
+        Assert.DoesNotContain(
+            danglingEdge.EnumerateObject(),
+            property => property.Name.Contains("confidence", StringComparison.OrdinalIgnoreCase)
+                || property.Name.Contains("order", StringComparison.OrdinalIgnoreCase));
+
+        string canonicalBeforeParent = await RunMemCtlAsync(
+            "capture", "receipt", childObservationUuid.ToString());
+
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--special-namespace", "home=homelab",
+            "--directory-route", "/workspace=special:home");
+        using HttpResponseMessage parentResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                externalSessionId,
+                childId: null,
+                $"navigation-parent-record-{Guid.NewGuid():N}",
+                parentNativeId: null,
+                workingDirectory: "/workspace/parent"));
+        parentResponse.EnsureSuccessStatusCode();
+        JsonElement parentReceipt = await parentResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid parentStreamUuid = parentReceipt.GetProperty("observation")
+            .GetProperty("sourceStreamUuid").GetGuid();
+
+        JsonElement authorityHidden = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate", childStreamUuid.ToString(),
+            "--namespace", "capture/unscoped")).RootElement;
+        Assert.Equal(
+            danglingEdge.GetRawText(),
+            Assert.Single(authorityHidden.GetProperty("relationships").EnumerateArray())
+                .GetRawText());
+        Assert.Equal(
+            canonicalBeforeParent,
+            await RunMemCtlAsync("capture", "receipt", childObservationUuid.ToString()));
+
+        JsonElement childNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate", childStreamUuid.ToString(),
+            "--namespace", "capture/unscoped",
+            "--namespace", "homelab")).RootElement;
+        JsonElement parentEdge = Assert.Single(
+            childNavigation.GetProperty("relationships").EnumerateArray());
+        Assert.Equal("available", parentEdge.GetProperty("availability").GetString());
+        Assert.Equal(
+            parentStreamUuid,
+            parentEdge.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+        Assert.Equal(
+            "homelab",
+            parentEdge.GetProperty("session").GetProperty("namespace").GetString());
+
+        JsonElement parentNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate", parentStreamUuid.ToString(),
+            "--namespace", "capture/unscoped",
+            "--namespace", "homelab")).RootElement;
+        JsonElement childEdge = Assert.Single(
+            parentNavigation.GetProperty("relationships").EnumerateArray());
+        Assert.Equal("incoming", childEdge.GetProperty("direction").GetString());
+        Assert.Equal("available", childEdge.GetProperty("availability").GetString());
+        Assert.Equal(
+            childStreamUuid,
+            childEdge.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+
+        var missingAuthority = await RunMemCtlForResultAsync(
+            null, "capture", "navigate", childStreamUuid.ToString());
+        Assert.NotEqual(0, missingAuthority.ExitCode);
+        Assert.Contains("--namespace is required", missingAuthority.Stderr);
+
+        var disallowedStart = await RunMemCtlForResultAsync(
+            null,
+            "capture", "navigate", parentStreamUuid.ToString(),
+            "--namespace", "capture/unscoped");
+        var unknownStart = await RunMemCtlForResultAsync(
+            null,
+            "capture", "navigate", Guid.NewGuid().ToString(),
+            "--namespace", "capture/unscoped");
+        Assert.Equal(disallowedStart.ExitCode, unknownStart.ExitCode);
+        Assert.Equal(disallowedStart.Stdout, unknownStart.Stdout);
+        Assert.Equal(disallowedStart.Stderr, unknownStart.Stderr);
+
+        using HttpResponseMessage rootResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                $"navigation-root-{Guid.NewGuid():N}",
+                childId: null,
+                $"navigation-root-record-{Guid.NewGuid():N}",
+                parentNativeId: null,
+                workingDirectory: "/workspace/root"));
+        rootResponse.EnsureSuccessStatusCode();
+        JsonElement rootReceipt = await rootResponse.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement rootNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate",
+            rootReceipt.GetProperty("observation").GetProperty("sourceStreamUuid")
+                .GetGuid().ToString(),
+            "--namespace", "homelab")).RootElement;
+        Assert.Empty(rootNavigation.GetProperty("relationships").EnumerateArray());
+
+        string ambiguousNativeId = $"navigation-ambiguous-{Guid.NewGuid():N}";
+        var candidatePrivateMarkers = new List<string>();
+        foreach (var candidate in new[]
+        {
+            (ExternalSessionId: ambiguousNativeId, ChildId: (string?)null,
+                Content: $"navigation-candidate-content-{Guid.NewGuid():N}"),
+            (ExternalSessionId: $"other-family-{Guid.NewGuid():N}",
+                ChildId: (string?)ambiguousNativeId,
+                Content: $"navigation-candidate-content-{Guid.NewGuid():N}")
+        })
+        {
+            using HttpResponseMessage candidateResponse = await client.PostAsJsonAsync(
+                "/capture/v1/observations",
+                SessionRelationshipObservation(
+                    candidate.ExternalSessionId,
+                    candidate.ChildId,
+                    candidate.Content,
+                    parentNativeId: null,
+                    workingDirectory: "/workspace/candidate"));
+            candidateResponse.EnsureSuccessStatusCode();
+            JsonElement candidateReceipt =
+                await candidateResponse.Content.ReadFromJsonAsync<JsonElement>();
+            candidatePrivateMarkers.AddRange(
+            [
+                candidateReceipt.GetProperty("observationUuid").GetGuid().ToString(),
+                candidateReceipt.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid().ToString(),
+                candidateReceipt.GetProperty("events")[0]
+                    .GetProperty("sessionId").GetString()!,
+                candidateReceipt.GetProperty("effectiveNamespace").GetString()!,
+                candidate.Content
+            ]);
+            if (!string.Equals(
+                candidate.ExternalSessionId, ambiguousNativeId, StringComparison.Ordinal))
+            {
+                candidatePrivateMarkers.Add(candidate.ExternalSessionId);
+            }
+        }
+
+        using HttpResponseMessage ambiguousSourceResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                $"navigation-source-family-{Guid.NewGuid():N}",
+                $"navigation-source-child-{Guid.NewGuid():N}",
+                $"navigation-ambiguous-source-{Guid.NewGuid():N}",
+                parentNativeId: ambiguousNativeId,
+                workingDirectory: null));
+        ambiguousSourceResponse.EnsureSuccessStatusCode();
+        JsonElement ambiguousSourceReceipt =
+            await ambiguousSourceResponse.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement ambiguousNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate",
+            ambiguousSourceReceipt.GetProperty("observation").GetProperty("sourceStreamUuid")
+                .GetGuid().ToString(),
+            "--namespace", "capture/unscoped",
+            "--namespace", "homelab")).RootElement;
+        JsonElement ambiguousEdge = Assert.Single(
+            ambiguousNavigation.GetProperty("relationships").EnumerateArray());
+        Assert.Equal("unavailable", ambiguousEdge.GetProperty("availability").GetString());
+        Assert.Equal(JsonValueKind.Null, ambiguousEdge.GetProperty("session").ValueKind);
+        Assert.Equal(
+            ambiguousNativeId,
+            ambiguousEdge.GetProperty("evidence").GetProperty("targetNativeId").GetString());
+        string ambiguousOutput = ambiguousNavigation.GetRawText();
+        Assert.All(
+            candidatePrivateMarkers.Distinct(StringComparer.Ordinal),
+            marker => Assert.DoesNotContain(
+                marker, ambiguousOutput, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task AuthorizedOperatorNavigatesEveryStoredSessionRelationshipInBothDirections()
+    {
+        string binding = $"codex-navigation-complete-{Guid.NewGuid():N}";
+        string captureKey = CaptureCredential();
+        string parentNativeId = $"navigation-parent-{Guid.NewGuid():N}";
+        await EnrollAsync(binding, captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage parentResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                parentNativeId,
+                childId: null,
+                $"navigation-parent-record-{Guid.NewGuid():N}",
+                parentNativeId: null,
+                workingDirectory: null));
+        parentResponse.EnsureSuccessStatusCode();
+        JsonElement parentReceipt = await parentResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid parentStreamUuid = parentReceipt.GetProperty("observation")
+            .GetProperty("sourceStreamUuid").GetGuid();
+
+        string[] relationshipTypes = ["parent_session", "spawned_by", "forked_from"];
+        var relatedStreams = new Dictionary<string, Guid>(StringComparer.Ordinal);
+        foreach (string relationshipType in relationshipTypes)
+        {
+            using HttpResponseMessage relatedResponse = await client.PostAsJsonAsync(
+                "/capture/v1/observations",
+                SessionRelationshipObservation(
+                    $"navigation-source-{relationshipType}-{Guid.NewGuid():N}",
+                    $"navigation-child-{relationshipType}-{Guid.NewGuid():N}",
+                    $"navigation-record-{relationshipType}-{Guid.NewGuid():N}",
+                    parentNativeId,
+                    workingDirectory: null,
+                    relationshipType: relationshipType));
+            relatedResponse.EnsureSuccessStatusCode();
+            JsonElement relatedReceipt =
+                await relatedResponse.Content.ReadFromJsonAsync<JsonElement>();
+            relatedStreams.Add(
+                relationshipType,
+                relatedReceipt.GetProperty("observation")
+                    .GetProperty("sourceStreamUuid").GetGuid());
+        }
+
+        JsonElement parentNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate", parentStreamUuid.ToString(),
+            "--namespace", "capture/unscoped")).RootElement;
+        Dictionary<string, JsonElement> incomingByType = parentNavigation
+            .GetProperty("relationships")
+            .EnumerateArray()
+            .ToDictionary(
+                edge => edge.GetProperty("evidence")
+                    .GetProperty("relationshipType").GetString()!,
+                edge => edge.Clone(),
+                StringComparer.Ordinal);
+        Assert.Equal(relationshipTypes.Order(), incomingByType.Keys.Order());
+        foreach ((string relationshipType, Guid relatedStreamUuid) in relatedStreams)
+        {
+            JsonElement incoming = incomingByType[relationshipType];
+            Assert.Equal("incoming", incoming.GetProperty("direction").GetString());
+            Assert.Equal("available", incoming.GetProperty("availability").GetString());
+            Assert.Equal(
+                relatedStreamUuid,
+                incoming.GetProperty("evidence").GetProperty("sourceStreamUuid").GetGuid());
+            Assert.Equal(
+                relatedStreamUuid,
+                incoming.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+
+            JsonElement reverse = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "navigate", relatedStreamUuid.ToString(),
+                "--namespace", "capture/unscoped")).RootElement;
+            JsonElement outgoing = Assert.Single(
+                reverse.GetProperty("relationships").EnumerateArray());
+            Assert.Equal("outgoing", outgoing.GetProperty("direction").GetString());
+            Assert.Equal("available", outgoing.GetProperty("availability").GetString());
+            Assert.Equal(
+                relationshipType,
+                outgoing.GetProperty("evidence").GetProperty("relationshipType").GetString());
+            Assert.Equal(
+                parentNativeId,
+                outgoing.GetProperty("evidence").GetProperty("targetNativeId").GetString());
+            Assert.Equal(
+                parentStreamUuid,
+                outgoing.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+        }
+
+        string classificationNativeId = $"navigation-classification-{Guid.NewGuid():N}";
+        string toolCallNativeId = $"navigation-tool-call-{Guid.NewGuid():N}";
+        using HttpResponseMessage filteredResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                $"navigation-filtered-source-{Guid.NewGuid():N}",
+                $"navigation-filtered-child-{Guid.NewGuid():N}",
+                $"navigation-filtered-record-{Guid.NewGuid():N}",
+                parentNativeId,
+                workingDirectory: null,
+                additionalRelationships:
+                [
+                    ("source_classification", classificationNativeId, "session"),
+                    ("spawned_by", toolCallNativeId, "tool_call")
+                ]));
+        filteredResponse.EnsureSuccessStatusCode();
+        JsonElement filteredReceipt =
+            await filteredResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid filteredObservationUuid = filteredReceipt.GetProperty("observationUuid").GetGuid();
+        string canonicalReceiptBeforeNavigation = await RunMemCtlAsync(
+            "capture", "receipt", filteredObservationUuid.ToString());
+        JsonElement canonicalEnvelope =
+            JsonDocument.Parse(canonicalReceiptBeforeNavigation).RootElement;
+        Assert.Equal(
+            [
+                ("parent_session", "session", parentNativeId),
+                ("source_classification", "session", classificationNativeId),
+                ("spawned_by", "tool_call", toolCallNativeId)
+            ],
+            canonicalEnvelope.GetProperty("relationships").EnumerateArray().Select(
+                relationship => (
+                    relationship.GetProperty("type").GetString()!,
+                    relationship.GetProperty("target").GetProperty("kind").GetString()!,
+                    relationship.GetProperty("target").GetProperty("nativeId").GetString()!
+                )));
+        JsonElement filteredNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate",
+            filteredReceipt.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid().ToString(),
+            "--namespace", "capture/unscoped")).RootElement;
+        JsonElement permittedEdge = Assert.Single(
+            filteredNavigation.GetProperty("relationships").EnumerateArray());
+        Assert.Equal(
+            "parent_session",
+            permittedEdge.GetProperty("evidence").GetProperty("relationshipType").GetString());
+        Assert.Equal(
+            "session",
+            permittedEdge.GetProperty("evidence").GetProperty("targetKind").GetString());
+        Assert.Equal("available", permittedEdge.GetProperty("availability").GetString());
+        Assert.Equal(
+            parentStreamUuid,
+            permittedEdge.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+        Assert.Equal(
+            canonicalReceiptBeforeNavigation,
+            await RunMemCtlAsync(
+                "capture", "receipt", filteredObservationUuid.ToString()));
+    }
+
+    [Fact]
+    public async Task UnavailableExplicitRelationshipTargetDoesNotLeakThroughPackagedNavigation()
+    {
+        string binding = $"codex-explicit-navigation-{Guid.NewGuid():N}";
+        string captureKey = CaptureCredential();
+        string targetSessionId = $"explicit-target-session-{Guid.NewGuid():N}";
+        string targetContent = $"explicit-target-content-{Guid.NewGuid():N}";
+        string safeNativeTargetId = $"source-stated-target-{Guid.NewGuid():N}";
+        await EnrollAsync(binding, captureKey);
+        await RunMemCtlAsync(
+            "capture", "route-policy", binding,
+            "--special-namespace", "home=homelab",
+            "--directory-route", "/workspace=special:home");
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage targetResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                targetSessionId,
+                childId: null,
+                targetContent,
+                parentNativeId: null,
+                workingDirectory: "/workspace/target"));
+        targetResponse.EnsureSuccessStatusCode();
+        JsonElement targetReceipt = await targetResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid targetStreamUuid = targetReceipt.GetProperty("observation")
+            .GetProperty("sourceStreamUuid").GetGuid();
+
+        using HttpResponseMessage explicitSourceResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                $"explicit-source-session-{Guid.NewGuid():N}",
+                childId: null,
+                $"explicit-source-record-{Guid.NewGuid():N}",
+                parentNativeId: safeNativeTargetId,
+                workingDirectory: null,
+                targetSourceStreamUuid: targetStreamUuid));
+        explicitSourceResponse.EnsureSuccessStatusCode();
+        JsonElement explicitSourceReceipt =
+            await explicitSourceResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid explicitSourceStreamUuid = explicitSourceReceipt.GetProperty("observation")
+            .GetProperty("sourceStreamUuid").GetGuid();
+
+        string canonicalReceipt = await RunMemCtlAsync(
+            "capture", "receipt",
+            explicitSourceReceipt.GetProperty("observationUuid").GetGuid().ToString());
+        Assert.Contains(
+            targetStreamUuid.ToString(),
+            canonicalReceipt,
+            StringComparison.OrdinalIgnoreCase);
+
+        JsonElement explicitNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate", explicitSourceStreamUuid.ToString(),
+            "--namespace", "capture/unscoped")).RootElement;
+        JsonElement explicitEdge = Assert.Single(
+            explicitNavigation.GetProperty("relationships").EnumerateArray());
+        JsonElement explicitEvidence = explicitEdge.GetProperty("evidence");
+        Assert.Equal("unavailable", explicitEdge.GetProperty("availability").GetString());
+        Assert.Equal(JsonValueKind.Null, explicitEdge.GetProperty("session").ValueKind);
+        Assert.Equal(
+            JsonValueKind.Null,
+            explicitEvidence.GetProperty("targetSourceStreamUuid").ValueKind);
+        Assert.Equal(
+            "parent_session",
+            explicitEvidence.GetProperty("relationshipType").GetString());
+        Assert.Equal(
+            explicitSourceStreamUuid,
+            explicitEvidence.GetProperty("sourceStreamUuid").GetGuid());
+        Assert.NotEqual(
+            targetStreamUuid,
+            explicitEvidence.GetProperty("sourceTraceUuid").GetGuid());
+        Assert.Equal(
+            safeNativeTargetId,
+            explicitEvidence.GetProperty("targetNativeId").GetString());
+        Assert.Equal("session", explicitEvidence.GetProperty("targetKind").GetString());
+        Assert.DoesNotContain(
+            targetStreamUuid.ToString(),
+            explicitNavigation.GetRawText(),
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("homelab", explicitNavigation.GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            targetSessionId,
+            explicitNavigation.GetRawText(),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(targetContent, explicitNavigation.GetRawText(), StringComparison.Ordinal);
+
+        using HttpResponseMessage nativeSourceResponse = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            SessionRelationshipObservation(
+                $"native-source-session-{Guid.NewGuid():N}",
+                childId: null,
+                $"native-source-record-{Guid.NewGuid():N}",
+                parentNativeId: safeNativeTargetId,
+                workingDirectory: null));
+        nativeSourceResponse.EnsureSuccessStatusCode();
+        JsonElement nativeSourceReceipt =
+            await nativeSourceResponse.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement nativeNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate",
+            nativeSourceReceipt.GetProperty("observation")
+                .GetProperty("sourceStreamUuid").GetGuid().ToString(),
+            "--namespace", "capture/unscoped")).RootElement;
+        JsonElement nativeEdge = Assert.Single(
+            nativeNavigation.GetProperty("relationships").EnumerateArray());
+        JsonElement nativeEvidence = nativeEdge.GetProperty("evidence");
+        Assert.Equal(
+            nativeEdge.GetProperty("availability").GetRawText(),
+            explicitEdge.GetProperty("availability").GetRawText());
+        Assert.Equal(
+            nativeEdge.GetProperty("session").GetRawText(),
+            explicitEdge.GetProperty("session").GetRawText());
+        Assert.Equal(
+            nativeEvidence.GetProperty("targetSourceStreamUuid").GetRawText(),
+            explicitEvidence.GetProperty("targetSourceStreamUuid").GetRawText());
+        Assert.Equal(
+            nativeEvidence.GetProperty("relationshipType").GetRawText(),
+            explicitEvidence.GetProperty("relationshipType").GetRawText());
+        Assert.Equal(
+            nativeEvidence.GetProperty("targetNativeId").GetRawText(),
+            explicitEvidence.GetProperty("targetNativeId").GetRawText());
+        Assert.Equal(
+            nativeEvidence.GetProperty("targetKind").GetRawText(),
+            explicitEvidence.GetProperty("targetKind").GetRawText());
+
+        JsonElement authorizedNavigation = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture", "navigate", explicitSourceStreamUuid.ToString(),
+            "--namespace", "capture/unscoped",
+            "--namespace", "homelab")).RootElement;
+        JsonElement authorizedEdge = Assert.Single(
+            authorizedNavigation.GetProperty("relationships").EnumerateArray());
+        Assert.Equal("available", authorizedEdge.GetProperty("availability").GetString());
+        Assert.Equal(
+            targetStreamUuid,
+            authorizedEdge.GetProperty("evidence")
+                .GetProperty("targetSourceStreamUuid").GetGuid());
+        Assert.Equal(
+            targetStreamUuid,
+            authorizedEdge.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+        Assert.Equal(
+            "homelab",
+            authorizedEdge.GetProperty("session").GetProperty("namespace").GetString());
+    }
+
     [Theory]
     [InlineData(AgentAKey)]
     [InlineData("mcap_short")]
@@ -5308,6 +5818,75 @@ public sealed class CaptureTests : HttpSeamTestBase
                 }
             }
         };
+
+    private static object SessionRelationshipObservation(
+        string externalSessionId,
+        string? childId,
+        string nativeId,
+        string? parentNativeId,
+        string? workingDirectory,
+        Guid? targetSourceStreamUuid = null,
+        string relationshipType = "parent_session",
+        IReadOnlyCollection<(string Type, string NativeId, string Kind)>?
+            additionalRelationships = null)
+    {
+        var relationships = new List<object>();
+        if (parentNativeId is not null)
+        {
+            relationships.Add(new
+            {
+                type = relationshipType,
+                target = new
+                {
+                    sourceStreamUuid = targetSourceStreamUuid,
+                    nativeId = parentNativeId,
+                    kind = "session"
+                }
+            });
+        }
+        relationships.AddRange(
+            additionalRelationships?.Select(relationship => (object)new
+            {
+                type = relationship.Type,
+                target = new
+                {
+                    sourceStreamUuid = (Guid?)null,
+                    nativeId = relationship.NativeId,
+                    kind = relationship.Kind
+                }
+            }) ?? []);
+
+        return new
+        {
+            contractVersion = 1,
+            sourceIdentity = new { externalSessionId, childId },
+            sourcePosition = 0,
+            locator = new { kind = "native_id", nativeId },
+            routeEvidence = workingDirectory is null
+                ? null
+                : new { workingDirectory, remotes = Array.Empty<object>() },
+            source = new
+            {
+                harness = "codex",
+                harnessVersion = "synthetic",
+                recordType = "session_meta"
+            },
+            adapter = new { name = "codex-synthetic", version = "1" },
+            sourcePayload = new { externalSessionId, childId },
+            events = new object[]
+            {
+                new
+                {
+                    partKey = "metadata/0",
+                    partOrder = 0,
+                    kind = "lifecycle",
+                    actor = "harness",
+                    payload = new { label = childId ?? externalSessionId },
+                    relationships = relationships.ToArray()
+                }
+            }
+        };
+    }
 
     private static object AdapterUpgradeToolObservation(
         string externalSessionId,

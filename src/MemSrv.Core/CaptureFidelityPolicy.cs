@@ -1196,12 +1196,26 @@ public static class CaptureFidelityPolicy
         && opaqueText.ValueKind == JsonValueKind.String
         && opaqueText.GetString() is { Length: > 0 } text
         && HasTerminalRecordLength(Encoding.UTF8.GetByteCount(text), observation)
+        && FailsStrictJsonParsing(text)
         && value.TryGetProperty("parseError", out JsonElement parseError)
         && HasOnlyProperties(parseError, "reason", "policyVersion", "sourceIdentity")
         && HasString(parseError, "reason", MalformedJsonReason)
         && HasString(parseError, "policyVersion", CurrentVersion)
         && parseError.TryGetProperty("sourceIdentity", out JsonElement sourceIdentity)
         && HasTerminalRecordSourceIdentity(sourceIdentity, observation);
+
+    private static bool FailsStrictJsonParsing(string text)
+    {
+        try
+        {
+            using JsonDocument _ = JsonDocument.Parse(text);
+            return false;
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
+    }
 
     private static bool IsUninspectableRecordRepresentation(
         JsonElement value,

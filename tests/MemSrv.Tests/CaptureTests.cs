@@ -1896,6 +1896,47 @@ public sealed class CaptureTests : HttpSeamTestBase
     }
 
     [Fact]
+    public async Task VersionTenConvergesForValidJsonInParseErrorEnvelopeLookalike()
+    {
+        string captureKey = CaptureCredential();
+        string externalSessionId = $"external-{Guid.NewGuid():N}";
+        string locator = $"adapter-v10-valid-json-lookalike-{Guid.NewGuid():N}";
+        await EnrollAsync(
+            $"codex-adapter-v10-valid-json-lookalike-{Guid.NewGuid():N}",
+            captureKey);
+        using var client = CaptureClient(captureKey);
+
+        using HttpResponseMessage accepted = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            TerminalMalformedRepresentationObservation(
+                externalSessionId,
+                locator,
+                adapterVersion: "9",
+                recordType: "malformed_json",
+                opaqueText: "{}"));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        JsonElement acceptedReceipt =
+            await accepted.Content.ReadFromJsonAsync<JsonElement>();
+
+        using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
+            "/capture/v1/observations",
+            TerminalMalformedRepresentationObservation(
+                externalSessionId,
+                locator,
+                adapterVersion: "10",
+                recordType: "malformed_json",
+                opaqueText: "{}"));
+
+        Assert.Equal(HttpStatusCode.OK, upgradedRetry.StatusCode);
+        JsonElement retryReceipt =
+            await upgradedRetry.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
+        Assert.Equal(
+            acceptedReceipt.GetProperty("observationUuid").GetGuid(),
+            retryReceipt.GetProperty("observationUuid").GetGuid());
+    }
+
+    [Fact]
     public async Task VersionTenUnsupportedBinaryFidelityCannotMasqueradeAsVersionNine()
     {
         string captureKey = CaptureCredential();
@@ -6863,9 +6904,9 @@ public sealed class CaptureTests : HttpSeamTestBase
         string externalSessionId,
         string locatorSeed,
         string adapterVersion,
-        string recordType)
+        string recordType,
+        string opaqueText = """{"type":"response_item","payload":""")
     {
-        const string opaqueText = """{"type":"response_item","payload":""";
         object safeRepresentation = recordType switch
         {
             "malformed_json" => new

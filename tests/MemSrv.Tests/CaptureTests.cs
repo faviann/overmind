@@ -602,6 +602,8 @@ public sealed class CaptureTests : HttpSeamTestBase
                 outgoing.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
         }
 
+        string classificationNativeId = $"navigation-classification-{Guid.NewGuid():N}";
+        string toolCallNativeId = $"navigation-tool-call-{Guid.NewGuid():N}";
         using HttpResponseMessage filteredResponse = await client.PostAsJsonAsync(
             "/capture/v1/observations",
             SessionRelationshipObservation(
@@ -612,13 +614,29 @@ public sealed class CaptureTests : HttpSeamTestBase
                 workingDirectory: null,
                 additionalRelationships:
                 [
-                    ("source_classification",
-                        $"navigation-classification-{Guid.NewGuid():N}", "session"),
-                    ("spawned_by", $"navigation-tool-call-{Guid.NewGuid():N}", "tool_call")
+                    ("source_classification", classificationNativeId, "session"),
+                    ("spawned_by", toolCallNativeId, "tool_call")
                 ]));
         filteredResponse.EnsureSuccessStatusCode();
         JsonElement filteredReceipt =
             await filteredResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Guid filteredObservationUuid = filteredReceipt.GetProperty("observationUuid").GetGuid();
+        string canonicalReceiptBeforeNavigation = await RunMemCtlAsync(
+            "capture", "receipt", filteredObservationUuid.ToString());
+        JsonElement canonicalEnvelope =
+            JsonDocument.Parse(canonicalReceiptBeforeNavigation).RootElement;
+        Assert.Equal(
+            [
+                ("parent_session", "session", parentNativeId),
+                ("source_classification", "session", classificationNativeId),
+                ("spawned_by", "tool_call", toolCallNativeId)
+            ],
+            canonicalEnvelope.GetProperty("relationships").EnumerateArray().Select(
+                relationship => (
+                    relationship.GetProperty("type").GetString()!,
+                    relationship.GetProperty("target").GetProperty("kind").GetString()!,
+                    relationship.GetProperty("target").GetProperty("nativeId").GetString()!
+                )));
         JsonElement filteredNavigation = JsonDocument.Parse(await RunMemCtlAsync(
             "capture", "navigate",
             filteredReceipt.GetProperty("observation")
@@ -636,6 +654,10 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(
             parentStreamUuid,
             permittedEdge.GetProperty("session").GetProperty("sourceStreamUuid").GetGuid());
+        Assert.Equal(
+            canonicalReceiptBeforeNavigation,
+            await RunMemCtlAsync(
+                "capture", "receipt", filteredObservationUuid.ToString()));
     }
 
     [Fact]

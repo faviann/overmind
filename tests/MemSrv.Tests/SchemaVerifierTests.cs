@@ -418,13 +418,21 @@ public sealed class SchemaVerifierTests
                         FROM capture_observations
                         WHERE observation_uuid = @observationUuid
                         """,
-                        new { observationUuid }));
+                    new { observationUuid }));
             }
+
+            File.Copy(
+                Path.Combine(_root, "migrations", "0009_capture_outcome.sql"),
+                Path.Combine(migrations, "0009_capture_outcome.sql"));
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
 
             var envelope = Assert.Single(
                 await new OperatorCaptureReads(admin)
                     .ReadCapturedEventEnvelopesAsync(observationUuid));
             Assert.Null(envelope.Observation.RouteEvidence);
+            Assert.Equal("healthy", envelope.Outcome.CaptureHealth);
+            Assert.Equal("complete", envelope.Outcome.CaptureFidelity);
+            Assert.Empty(envelope.Outcome.Counters);
         }
         finally
         {
@@ -577,6 +585,10 @@ public sealed class SchemaVerifierTests
             File.Copy(
                 Path.Combine(_root, "migrations", "0008_capture_source_identity.sql"),
                 Path.Combine(migrations, "0008_capture_source_identity.sql"));
+            DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
+            File.Copy(
+                Path.Combine(_root, "migrations", "0009_capture_outcome.sql"),
+                Path.Combine(migrations, "0009_capture_outcome.sql"));
             DatabaseMigrator.Migrate(admin, migrations, logToConsole: false);
 
             await using (var verification = new NpgsqlConnection(admin))

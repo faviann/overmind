@@ -73,9 +73,9 @@ public static class CaptureFidelityPolicy
                 locatorKind,
                 effectiveBound,
                 deadline);
-            return new(omitted, OmissionCount: 1);
+            return new(omitted, [originalByteCount]);
         }
-        return new(rewritten.Value, rewritten.OmissionCount);
+        return new(rewritten.Value, rewritten.OriginalByteCounts);
     }
 
     /// <summary>
@@ -122,7 +122,7 @@ public static class CaptureFidelityPolicy
         }
 
         long remaining = effectiveBound - rewrittenSource.SerializedBytes;
-        int omissionCount = rewrittenSource.OmissionCount;
+        var omissionByteCounts = new List<long>(rewrittenSource.OriginalByteCounts);
         var events = new CaptureEvent[observation.Events.Count];
         for (int index = 0; index < observation.Events.Count; index++)
         {
@@ -155,13 +155,13 @@ public static class CaptureFidelityPolicy
                     deadline);
             }
             remaining -= rewrittenPayload.SerializedBytes;
-            omissionCount += rewrittenPayload.OmissionCount;
+            omissionByteCounts.AddRange(rewrittenPayload.OriginalByteCounts);
             events[index] = item with { Payload = rewrittenPayload.Value };
         }
 
-        if (omissionCount == 0)
+        if (omissionByteCounts.Count == 0)
         {
-            return new(observation, 0);
+            return new(observation, []);
         }
 
         CaptureObservationRequest selected = observation with
@@ -178,7 +178,7 @@ public static class CaptureFidelityPolicy
                 deadline);
         }
         deadline.AssertWithinDeadline();
-        return new(selected, omissionCount);
+        return new(selected, omissionByteCounts);
     }
 
     public static BinaryFidelitySelection<CaptureObservationCommand>
@@ -216,7 +216,7 @@ public static class CaptureFidelityPolicy
                 deadline);
         }
         remaining -= rewrittenSource.SerializedBytes;
-        int omissionCount = rewrittenSource.OmissionCount;
+        var omissionByteCounts = new List<long>(rewrittenSource.OriginalByteCounts);
         var events = new CaptureEvent[observation.Events.Count];
         for (int index = 0; index < observation.Events.Count; index++)
         {
@@ -247,13 +247,13 @@ public static class CaptureFidelityPolicy
                     deadline);
             }
             remaining -= rewrittenPayload.SerializedBytes;
-            omissionCount += rewrittenPayload.OmissionCount;
+            omissionByteCounts.AddRange(rewrittenPayload.OriginalByteCounts);
             events[index] = item with { Payload = rewrittenPayload.Value };
         }
 
-        if (omissionCount == 0)
+        if (omissionByteCounts.Count == 0)
         {
-            return new(observation, 0);
+            return new(observation, []);
         }
 
         CaptureObservationCommand selected = observation with
@@ -269,7 +269,7 @@ public static class CaptureFidelityPolicy
                 deadline);
         }
         deadline.AssertWithinDeadline();
-        return new(selected, omissionCount);
+        return new(selected, omissionByteCounts);
     }
 
     /// <summary>
@@ -278,9 +278,65 @@ public static class CaptureFidelityPolicy
     /// </summary>
     public static bool ContainsUnsupportedBinaryOmission(
         CaptureObservationCommand observation) =>
-        ContainsUnsupportedBinaryOmission(observation.SourcePayload, observation)
-        || observation.Events.Any(
-            item => ContainsUnsupportedBinaryOmission(item.Payload, observation));
+        UnsupportedBinaryOmissionByteCounts(observation).Count > 0;
+
+    /// <summary>
+    /// Returns the safe original byte count from every exact policy-owned
+    /// unsupported-binary omission in a command.
+    /// </summary>
+    public static IReadOnlyList<long> UnsupportedBinaryOmissionByteCounts(
+        CaptureObservationCommand observation)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        var counts = new List<long>();
+        CollectUnsupportedBinaryOmissionByteCounts(
+            observation.SourcePayload,
+            observation.SourceIdentity,
+            observation.SourcePosition,
+            observation.Locator.Kind,
+            counts);
+        foreach (CaptureEvent item in observation.Events)
+        {
+            CollectUnsupportedBinaryOmissionByteCounts(
+                item.Payload,
+                observation.SourceIdentity,
+                observation.SourcePosition,
+                observation.Locator.Kind,
+                counts);
+        }
+        return counts;
+    }
+
+    /// <summary>
+    /// Reconstructs the same exact policy-owned omission counts from canonical
+    /// observation and event payloads. Canonical observations do not expose
+    /// source position, so the policy marker's non-negative position remains
+    /// trusted through immutable scan provenance.
+    /// </summary>
+    public static IReadOnlyList<long> UnsupportedBinaryOmissionByteCounts(
+        CaptureObservationReceipt observation,
+        IEnumerable<JsonElement> eventPayloads)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        ArgumentNullException.ThrowIfNull(eventPayloads);
+        var counts = new List<long>();
+        CollectUnsupportedBinaryOmissionByteCounts(
+            observation.SafeSourcePayload,
+            observation.SourceIdentity,
+            sourcePosition: null,
+            observation.Locator.Kind,
+            counts);
+        foreach (JsonElement payload in eventPayloads)
+        {
+            CollectUnsupportedBinaryOmissionByteCounts(
+                payload,
+                observation.SourceIdentity,
+                sourcePosition: null,
+                observation.Locator.Kind,
+                counts);
+        }
+        return counts;
+    }
 
     /// <summary>
     /// Reports whether a command is exactly one of the adapter-owned v10
@@ -332,6 +388,132 @@ public static class CaptureFidelityPolicy
         };
     }
 
+    /// <summary>
+    /// Classifies only exact policy- or adapter-owned deterministic fidelity
+    /// representations. Source-owned lookalikes are not outcomes.
+    /// </summary>
+    public static CaptureDeterministicFidelity? ClassifyDeterministicFidelity(
+        CaptureObservationCommand observation)
+    {
+        if (IsAdapterOwnedTerminalMalformedRepresentation(observation))
+        {
+            return observation.Source.RecordType switch
+            {
+                "malformed_json" => new(
+                    MalformedJsonReason,
+                    ((CaptureSourceLocator.ByteRange)observation.Locator).Length),
+                "source_record_omission" => new(
+                    InvalidUtf8ContentPolicy,
+                    ((CaptureSourceLocator.ByteRange)observation.Locator).Length),
+                _ => null
+            };
+        }
+        if (ContainsUnsupportedBinaryOmission(observation))
+        {
+            return new(
+                UnsupportedBinaryReason,
+                observation.Locator is CaptureSourceLocator.ByteRange binaryRange
+                    ? binaryRange.Length
+                    : CountSerializedBytes(observation));
+        }
+        if (!string.Equals(
+                observation.Adapter.Name,
+                "capture-fidelity-policy",
+                StringComparison.Ordinal)
+            || !string.Equals(
+                observation.Adapter.Version,
+                CurrentVersion,
+                StringComparison.Ordinal)
+            || observation.SourcePayload.ValueKind != JsonValueKind.Object
+            || !observation.SourcePayload.TryGetProperty(
+                "omission",
+                out JsonElement omission)
+            || !HasOnlyProperties(
+                omission,
+                "reason",
+                "originalByteCount",
+                "policyVersion",
+                "sourceIdentity")
+            || omission.GetProperty("reason").GetString() is not { } reason
+            || reason is not (
+                TransportLimitReason
+                or ContentLimitReason
+                or UnsupportedBinaryReason)
+            || !omission.TryGetProperty(
+                "originalByteCount",
+                out JsonElement originalByteCount)
+            || !originalByteCount.TryGetInt64(out long count)
+            || count < 0
+            || !HasString(omission, "policyVersion", CurrentVersion)
+            || !omission.TryGetProperty(
+                "sourceIdentity",
+                out JsonElement sourceIdentity)
+            || sourceIdentity.ValueKind != JsonValueKind.Object
+            || !HasTrustedSourceIdentity(
+                sourceIdentity,
+                observation.SourceIdentity,
+                observation.SourcePosition,
+                observation.Locator.Kind))
+        {
+            return null;
+        }
+        return new(reason, count);
+    }
+
+    /// <summary>
+    /// Recognizes only an exact whole-observation policy receipt and returns
+    /// its trusted original byte count. Canonical readers use this same seam
+    /// as import so policy JSON compatibility has one owner.
+    /// </summary>
+    public static CaptureDeterministicFidelity?
+        ClassifyCanonicalWholeObservationOmission(
+            CaptureObservationReceipt observation)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        if (!string.Equals(
+                observation.Adapter.Name,
+                "capture-fidelity-policy",
+                StringComparison.Ordinal)
+            || !string.Equals(
+                observation.Adapter.Version,
+                CurrentVersion,
+                StringComparison.Ordinal)
+            || observation.SafeSourcePayload.ValueKind != JsonValueKind.Object
+            || !observation.SafeSourcePayload.TryGetProperty(
+                "omission",
+                out JsonElement omission)
+            || !HasOnlyProperties(
+                omission,
+                "reason",
+                "originalByteCount",
+                "policyVersion",
+                "sourceIdentity")
+            || omission.GetProperty("reason").GetString() is not { } reason
+            || reason is not (
+                TransportLimitReason
+                or ContentLimitReason
+                or UnsupportedBinaryReason)
+            || !omission.TryGetProperty(
+                "originalByteCount",
+                out JsonElement countElement)
+            || !countElement.TryGetInt64(out long count)
+            || count < 0
+            || !HasString(omission, "policyVersion", CurrentVersion)
+            || !omission.TryGetProperty(
+                "sourceIdentity",
+                out JsonElement sourceIdentity)
+            || sourceIdentity.ValueKind != JsonValueKind.Object
+            || !HasTrustedSourceIdentity(
+                sourceIdentity,
+                observation.SourceIdentity,
+                expectedSourcePosition: null,
+                observation.Locator.Kind))
+        {
+            return null;
+        }
+        return new(reason, count);
+    }
+
     public static BoundedCaptureRepresentation<CaptureObservationRequest>
         SerializeForTransport(
         CaptureObservationRequest observation,
@@ -374,6 +556,25 @@ public static class CaptureFidelityPolicy
                 CaptureLedger.JsonOptions)
             ?? throw new InvalidOperationException(
                 "The bounded transport representation could not be reconstructed.");
+        if (bounded.WasOmitted)
+        {
+            CaptureOutcomeSummary outcome = CaptureOutcomeAggregation.Merge(
+                observation.AdapterOutcome ?? CaptureOutcomeAggregation.Empty,
+                CaptureOutcomeAggregation.FidelityOmission(
+                    observation.Source.Harness,
+                    TransportLimitReason,
+                    bounded.OriginalByteCount));
+            CaptureObservationRequest enriched = snapshot with { AdapterOutcome = outcome };
+            string enrichedJson = JsonSerializer.Serialize(enriched, CaptureLedger.JsonOptions);
+            if (Encoding.UTF8.GetByteCount(enrichedJson) <= effectiveBound)
+            {
+                return bounded with
+                {
+                    Observation = enriched,
+                    Serialized = enrichedJson
+                };
+            }
+        }
         return bounded with { Observation = snapshot };
     }
 
@@ -400,12 +601,14 @@ public static class CaptureFidelityPolicy
             (command, originalByteCount) =>
                 OmitForContentLimit(command, originalByteCount),
             _ => new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the observation budget of {effectiveBound} bytes was exceeded"));
         CaptureObservationRequest snapshot =
             JsonSerializer.Deserialize<CaptureObservationRequest>(
                 bounded.Serialized,
                 CaptureLedger.JsonOptions)
             ?? throw new SafetyScanException(
+                CaptureOutcomeReason.RequiredInspectionIncomplete,
                 "the bounded capture representation could not be reconstructed");
         return bounded with
         {
@@ -431,7 +634,8 @@ public static class CaptureFidelityPolicy
             Adapter = CompactAdapter(),
             SourcePayload = provenance,
             Events = [OmissionEvent()],
-            RouteEvidence = null
+            RouteEvidence = null,
+            AdapterOutcome = null
         };
     }
 
@@ -536,10 +740,11 @@ public static class CaptureFidelityPolicy
         if (omittedByteCount > effectiveBound)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.RequiredInspectionIncomplete,
                 "the required unsupported-binary omission cannot fit within " +
                 $"the observation budget of {effectiveBound} bytes");
         }
-        return new(omitted, OmissionCount: 1);
+        return new(omitted, [originalByteCount]);
     }
 
     private static BinaryFidelitySelection<CaptureObservationRequest>
@@ -570,7 +775,7 @@ public static class CaptureFidelityPolicy
                 $"within the {effectiveBound}-byte transport limit.");
         }
         deadline.AssertWithinDeadline();
-        return new(omitted, OmissionCount: 1);
+        return new(omitted, [originalByteCount]);
     }
 
     private static JsonElement MaterializeUnsupportedBinaryProvenance(
@@ -621,6 +826,7 @@ public static class CaptureFidelityPolicy
         catch (CaptureRepresentationLimitException)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.RequiredInspectionIncomplete,
                 "the required unsupported-binary omission cannot fit within " +
                 $"the fidelity budget of {effectiveBound} bytes");
         }
@@ -674,7 +880,7 @@ public static class CaptureFidelityPolicy
             {
                 return new(
                     source,
-                    OmissionCount: 0,
+                    OriginalByteCounts: [],
                     SerializedBytes: 0,
                     ExceededBound: false);
             }
@@ -702,7 +908,7 @@ public static class CaptureFidelityPolicy
                 deadline.AssertWithinDeadline();
                 return new(
                     materialized,
-                    state.OmissionCount,
+                    state.OriginalByteCounts,
                     stream.BytesWritten,
                     ExceededBound: false);
             }
@@ -713,7 +919,7 @@ public static class CaptureFidelityPolicy
             // deterministic whole-observation omission for this case.
             return new(
                 source,
-                OmissionCount: 0,
+                OriginalByteCounts: [],
                 SerializedBytes: maxBytes,
                 ExceededBound: true);
         }
@@ -889,7 +1095,7 @@ public static class CaptureFidelityPolicy
                 state.SourceIdentity,
                 state.SourcePosition,
                 state.LocatorKind);
-            state.OmissionCount++;
+            state.OriginalByteCounts.Add(originalByteCount);
         }
         writer.WriteEndObject();
     }
@@ -1017,9 +1223,12 @@ public static class CaptureFidelityPolicy
         return candidate;
     }
 
-    private static bool ContainsUnsupportedBinaryOmission(
+    private static void CollectUnsupportedBinaryOmissionByteCounts(
         JsonElement value,
-        CaptureObservationCommand observation)
+        CaptureSourceIdentity expectedIdentity,
+        long? sourcePosition,
+        string locatorKind,
+        List<long> counts)
     {
         switch (value.ValueKind)
         {
@@ -1030,26 +1239,35 @@ public static class CaptureFidelityPolicy
                             value,
                             property.Name,
                             property.Value,
-                            observation)
-                        || ContainsUnsupportedBinaryOmission(
-                            property.Value,
-                            observation))
+                            expectedIdentity,
+                            sourcePosition,
+                            locatorKind))
                     {
-                        return true;
+                        counts.Add(property.Value.GetProperty(
+                            "originalByteCount").GetInt64());
+                    }
+                    else
+                    {
+                        CollectUnsupportedBinaryOmissionByteCounts(
+                            property.Value,
+                            expectedIdentity,
+                            sourcePosition,
+                            locatorKind,
+                            counts);
                     }
                 }
-                return false;
+                break;
             case JsonValueKind.Array:
                 foreach (JsonElement item in value.EnumerateArray())
                 {
-                    if (ContainsUnsupportedBinaryOmission(item, observation))
-                    {
-                        return true;
-                    }
+                    CollectUnsupportedBinaryOmissionByteCounts(
+                        item,
+                        expectedIdentity,
+                        sourcePosition,
+                        locatorKind,
+                        counts);
                 }
-                return false;
-            default:
-                return false;
+                break;
         }
     }
 
@@ -1057,9 +1275,15 @@ public static class CaptureFidelityPolicy
         JsonElement parent,
         string name,
         JsonElement value,
-        CaptureObservationCommand observation)
+        CaptureSourceIdentity expectedIdentity,
+        long? sourcePosition,
+        string locatorKind)
     {
-        if (!IsUnsupportedBinaryOmission(value, observation))
+        if (!IsUnsupportedBinaryOmission(
+                value,
+                expectedIdentity,
+                sourcePosition,
+                locatorKind))
         {
             return false;
         }
@@ -1099,7 +1323,9 @@ public static class CaptureFidelityPolicy
 
     private static bool IsUnsupportedBinaryOmission(
         JsonElement value,
-        CaptureObservationCommand observation)
+        CaptureSourceIdentity expectedIdentity,
+        long? sourcePosition,
+        string locatorKind)
     {
         if (value.ValueKind != JsonValueKind.Object
             || !HasOnlyBinaryOmissionProperties(value)
@@ -1114,7 +1340,11 @@ public static class CaptureFidelityPolicy
             || !HasString(value, "policyVersion", CurrentVersion)
             || !value.TryGetProperty("sourceIdentity", out JsonElement sourceIdentity)
             || sourceIdentity.ValueKind != JsonValueKind.Object
-            || !HasTrustedSourceIdentity(sourceIdentity, observation))
+            || !HasTrustedSourceIdentity(
+                sourceIdentity,
+                expectedIdentity,
+                sourcePosition,
+                locatorKind))
         {
             return false;
         }
@@ -1152,7 +1382,9 @@ public static class CaptureFidelityPolicy
 
     private static bool HasTrustedSourceIdentity(
         JsonElement value,
-        CaptureObservationCommand observation)
+        CaptureSourceIdentity expectedIdentity,
+        long? expectedSourcePosition,
+        string expectedLocatorKind)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (JsonProperty property in value.EnumerateObject())
@@ -1168,24 +1400,27 @@ public static class CaptureFidelityPolicy
             }
         }
 
-        bool childMatches = observation.SourceIdentity.ChildId is null
-            ? !value.TryGetProperty("childId", out _)
-            : value.TryGetProperty("childId", out JsonElement child)
+        bool hasChildProperty = value.TryGetProperty("childId", out JsonElement child);
+        bool childMatches = expectedIdentity.ChildId is null
+            ? !hasChildProperty || child.ValueKind == JsonValueKind.Null
+            : hasChildProperty
                 && child.ValueKind == JsonValueKind.String
                 && string.Equals(
                     child.GetString(),
-                    observation.SourceIdentity.ChildId,
+                    expectedIdentity.ChildId,
                     StringComparison.Ordinal);
-        return seen.Count == (observation.SourceIdentity.ChildId is null ? 3 : 4)
+        return seen.Count == (hasChildProperty ? 4 : 3)
             && HasString(
                 value,
                 "externalSessionId",
-                observation.SourceIdentity.ExternalSessionId)
+                expectedIdentity.ExternalSessionId)
             && childMatches
             && value.TryGetProperty("sourcePosition", out JsonElement position)
             && position.TryGetInt64(out long sourcePosition)
-            && sourcePosition == observation.SourcePosition
-            && HasString(value, "locatorKind", observation.Locator.Kind);
+            && (expectedSourcePosition is null
+                ? sourcePosition >= 0
+                : sourcePosition == expectedSourcePosition)
+            && HasString(value, "locatorKind", expectedLocatorKind);
     }
 
     private static bool IsMalformedJsonRepresentation(
@@ -1355,7 +1590,7 @@ public static class CaptureFidelityPolicy
         public TrustedTraversalRootContext RootContext { get; } = rootContext;
         public int Depth { get; set; }
         public bool InCodexResponsePayload { get; set; }
-        public int OmissionCount { get; set; }
+        public List<long> OriginalByteCounts { get; } = [];
     }
 
     private enum TrustedTraversalRootContext
@@ -1367,7 +1602,7 @@ public static class CaptureFidelityPolicy
 
     private sealed record RewrittenJson(
         JsonElement Value,
-        int OmissionCount,
+        IReadOnlyList<long> OriginalByteCounts,
         long SerializedBytes,
         bool ExceededBound);
 
@@ -1422,9 +1657,31 @@ public sealed record BoundedCaptureRepresentation<T>(
     long OriginalByteCount,
     bool WasOmitted);
 
-public sealed record BinaryFidelitySelection<T>(
-    T Observation,
-    int OmissionCount)
+public sealed record BinaryFidelitySelection<T>
 {
+    public BinaryFidelitySelection(
+        T observation,
+        IReadOnlyList<long> originalByteCounts)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        ArgumentNullException.ThrowIfNull(originalByteCounts);
+        long[] materialized = originalByteCounts.ToArray();
+        if (materialized.Any(count => count < 0))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(originalByteCounts),
+                "Binary omission byte counts cannot be negative.");
+        }
+        Observation = observation;
+        OriginalByteCounts = Array.AsReadOnly(materialized);
+    }
+
+    public T Observation { get; }
+    public IReadOnlyList<long> OriginalByteCounts { get; }
+    public int OmissionCount => OriginalByteCounts.Count;
     public bool WasOmitted => OmissionCount > 0;
 }
+
+public sealed record CaptureDeterministicFidelity(
+    string Reason,
+    long OriginalByteCount);

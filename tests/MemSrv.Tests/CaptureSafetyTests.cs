@@ -120,6 +120,22 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             Assert.Empty(tracer.Stdout);
             Assert.Contains("refuses to run", tracer.Stderr);
             Assert.Contains(expectedReason, tracer.Stderr, StringComparison.OrdinalIgnoreCase);
+            JsonElement tracerOutcome = StructuredTracerOutcome(tracer.Stderr);
+            Assert.Equal("blocked", tracerOutcome.GetProperty("captureHealth").GetString());
+            Assert.Equal("complete", tracerOutcome.GetProperty("captureFidelity").GetString());
+            JsonElement tracerCounter = Assert.Single(
+                tracerOutcome.GetProperty("counters").EnumerateArray());
+            Assert.Equal("codex", tracerCounter.GetProperty("harness").GetString());
+            Assert.Equal(
+                CaptureOutcomeAggregation.SafetyFailureClass,
+                tracerCounter.GetProperty("class").GetString());
+            Assert.Equal(
+                CaptureOutcomeReason.ScannerPolicyUnavailable,
+                tracerCounter.GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureSizeBand.Unknown,
+                tracerCounter.GetProperty("sizeBand").GetString());
+            Assert.Equal(1, tracerCounter.GetProperty("count").GetInt64());
         }
         finally
         {
@@ -158,6 +174,16 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
         Assert.Equal("new", receipt.Status);
         Assert.Equal(0, receipt.SourcePosition);
+        Assert.Equal("healthy", receipt.Outcome.CaptureHealth);
+        Assert.Equal("degraded", receipt.Outcome.CaptureFidelity);
+        Assert.Equal(
+            new CaptureOutcomeCounter(
+                "codex",
+                CaptureOutcomeAggregation.FidelityOmissionClass,
+                CaptureFidelityPolicy.ContentLimitReason,
+                CaptureSizeBand.UpTo1MiB,
+                1),
+            Assert.Single(receipt.Outcome.Counters));
         Assert.DoesNotContain(rawPayload, receipt.Observation.SafeSourcePayload.GetRawText());
         JsonElement omission = receipt.Observation.SafeSourcePayload.GetProperty("omission");
         Assert.Equal(
@@ -174,6 +200,87 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         CaptureImportReceipt retry = await ingestion.ImportAsync(binding!, command);
         Assert.Equal("already_accepted", retry.Status);
         Assert.Equal(receipt.ObservationUuid, retry.ObservationUuid);
+    }
+
+    [Fact]
+    public async Task UnexpectedScannerFailureIsContentFreeAndAppendsNothing()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"scanner-internal-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        var command = CaptureObservationCommand.FromRequest(
+            JsonSerializer.Deserialize<CaptureObservationRequest>(
+                JsonSerializer.Serialize(
+                    Observation(
+                        UniqueSession(),
+                        0,
+                        $"scanner-internal-{Guid.NewGuid():N}",
+                        "safe candidate"),
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!);
+        var failingIngestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(new ThrowingSafetyScanner()));
+
+        SafetyScannerInternalException failure =
+            await Assert.ThrowsAsync<SafetyScannerInternalException>(
+                () => failingIngestion.ImportAsync(binding, command));
+
+        Assert.DoesNotContain("scanner implementation detail", failure.Message);
+        Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
+        Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+        Assert.Equal("complete", failure.Outcome?.CaptureFidelity);
+        Assert.Equal(
+            CaptureOutcomeReason.ScannerInternalFailure,
+            Assert.Single(failure.Outcome!.Counters).Reason);
+
+        CaptureImportReceipt accepted = await new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")))
+            .ImportAsync(binding, command);
+        Assert.Equal("new", accepted.Status);
+        Assert.Equal(0, accepted.SourcePosition);
+    }
+
+    [Fact]
+    public async Task IncompleteRequiredInspectionIsBlockedAndAppendsNothing()
+    {
+        string captureKey = CaptureCredential();
+        await EnrollAsync($"inspection-incomplete-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        var command = CaptureObservationCommand.FromRequest(
+            JsonSerializer.Deserialize<CaptureObservationRequest>(
+                JsonSerializer.Serialize(
+                    Observation(
+                        UniqueSession(),
+                        0,
+                        $"inspection-incomplete-{Guid.NewGuid():N}",
+                        "safe"),
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web))!);
+        var constrained = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(
+                Path.Combine(_root, "config/never_store.yaml"),
+                null,
+                SafetyBudgets.Default with { MaxLeafBytes = 8 }));
+
+        SafetyScanException failure = await Assert.ThrowsAsync<SafetyScanException>(
+            () => constrained.ImportAsync(binding, command));
+
+        Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+        Assert.Equal(
+            CaptureOutcomeReason.RequiredInspectionIncomplete,
+            Assert.Single(failure.Outcome!.Counters).Reason);
+
+        CaptureImportReceipt accepted = await new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")))
+            .ImportAsync(binding, command);
+        Assert.Equal("new", accepted.Status);
+        Assert.Equal(0, accepted.SourcePosition);
     }
 
     [Fact]
@@ -643,6 +750,17 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         Assert.Equal(
             sourceSessionId,
             first.Observation.SourceIdentity.ExternalSessionId);
+        Assert.Equal("healthy", first.Outcome.CaptureHealth);
+        Assert.Equal("degraded", first.Outcome.CaptureFidelity);
+        Assert.Equal(
+            CaptureFidelityPolicy.TransportLimitReason,
+            Assert.Single(first.Outcome.Counters).Reason);
+        CapturedEventEnvelope envelope = Assert.Single(
+            await new OperatorCaptureReads(RuntimeConnection)
+                .ReadCapturedEventEnvelopesAsync(first.ObservationUuid));
+        Assert.Equal(
+            JsonSerializer.Serialize(first.Outcome, CaptureLedger.JsonOptions),
+            JsonSerializer.Serialize(envelope.Outcome, CaptureLedger.JsonOptions));
     }
 
     [Theory]
@@ -740,6 +858,16 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         string body = await refused.Content.ReadAsStringAsync();
         Assert.Contains("failed closed", body);
         Assert.Contains("match-count budget of 10000", body);
+        using (JsonDocument failureDocument = JsonDocument.Parse(body))
+        {
+            JsonElement outcome = failureDocument.RootElement.GetProperty("outcome");
+            Assert.Equal(
+                "blocked",
+                outcome.GetProperty("captureHealth").GetString());
+            Assert.Equal(
+                CaptureOutcomeReason.ScanBudgetExhausted,
+                outcome.GetProperty("counters")[0].GetProperty("reason").GetString());
+        }
 
         var rejectedLocators = new List<string> { locator };
         var binding = await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey);
@@ -768,6 +896,15 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 "scan-time" => "total scan-time budget",
                 _ => "matcher timeout"
             }, failure.Message);
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal("complete", failure.Outcome?.CaptureFidelity);
+            CaptureOutcomeCounter counter = Assert.Single(failure.Outcome!.Counters);
+            Assert.Equal("codex", counter.Harness);
+            Assert.Equal(
+                name == "matcher-timeout"
+                    ? CaptureOutcomeReason.MatcherTimeout
+                    : CaptureOutcomeReason.ScanBudgetExhausted,
+                counter.Reason);
         }
 
         await using (var connection = new NpgsqlConnection(AdminConnection))
@@ -1176,6 +1313,17 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             Assert.Equal(0, Volatile.Read(ref requestCount));
             Assert.Contains("failed closed", tracer.Stderr);
             Assert.Contains("match-count budget of 10000", tracer.Stderr);
+            JsonElement outcome = StructuredTracerOutcome(tracer.Stderr);
+            Assert.Equal("blocked", outcome.GetProperty("captureHealth").GetString());
+            JsonElement counter = Assert.Single(
+                outcome.GetProperty("counters").EnumerateArray());
+            Assert.Equal(
+                CaptureOutcomeReason.ScanBudgetExhausted,
+                counter.GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureSizeBand.UpTo1MiB,
+                counter.GetProperty("sizeBand").GetString());
+            Assert.Equal(1, counter.GetProperty("count").GetInt64());
             // AC10 still holds on the refusal path.
             Assert.DoesNotContain("AKIA0000", tracer.Stderr, StringComparison.Ordinal);
             Assert.DoesNotContain(captureKey, tracer.Stderr, StringComparison.Ordinal);
@@ -1375,6 +1523,18 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         lock (buffer) { return buffer.ToString(); }
     }
 
+    private static JsonElement StructuredTracerOutcome(string stderr)
+    {
+        string line = Assert.Single(
+            stderr.Split(
+                Environment.NewLine,
+                StringSplitOptions.RemoveEmptyEntries),
+            value => value.StartsWith(
+                "{\"contractVersion\":",
+                StringComparison.Ordinal));
+        return JsonDocument.Parse(line).RootElement.Clone();
+    }
+
     private static object Observation(
         string sourceSessionId, long position, string nativeId, string message) =>
         ObservationWithPayload(sourceSessionId, position, nativeId, new { text = message });
@@ -1401,4 +1561,76 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 }
             }
         };
+
+    [Fact]
+    public async Task InjectedScannerOmissionsAppendAdvanceAndCountEveryOccurrence()
+    {
+        string captureKey = CaptureCredential();
+        string sourceSessionId = UniqueSession();
+        await EnrollAsync($"scanner-omissions-{Guid.NewGuid():N}", captureKey);
+        CaptureBindingContext binding = Assert.IsType<CaptureBindingContext>(
+            await new CaptureAuthority(RuntimeConnection).ResolveAsync(captureKey));
+        CaptureObservationCommand Command(long position, string locator, JsonElement payload) =>
+            CaptureObservationCommand.FromRequest(new CaptureObservationRequest(
+                1,
+                sourceSessionId,
+                position,
+                new CaptureLocator("native_id", locator, null, null, null),
+                null,
+                new CaptureSource("codex", null, "synthetic"),
+                new CaptureAdapter("test", "1"),
+                payload,
+                [new CaptureEvent(
+                    "event/0", 0, "opaque", "harness", payload, null, [])]));
+        var ingestion = new CaptureIngestion(
+            RuntimeConnection,
+            new NeverStoreGate(new SelectiveOmissionScanner()));
+        JsonElement omittedPayload = JsonSerializer.SerializeToElement(
+            new { first = "omit-me", second = "omit-me" });
+
+        CaptureImportReceipt omitted = await ingestion.ImportAsync(
+            binding,
+            Command(0, $"scanner-omitted-{Guid.NewGuid():N}", omittedPayload));
+
+        Assert.Equal("new", omitted.Status);
+        CaptureOutcomeCounter counter = Assert.Single(omitted.Outcome.Counters);
+        Assert.Equal(CaptureOutcomeReason.LeafExceedsLimit, counter.Reason);
+        Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+        Assert.Equal(4, counter.Count);
+        CaptureImportReceipt advanced = await ingestion.ImportAsync(
+            binding,
+            Command(
+                1,
+                $"scanner-safe-{Guid.NewGuid():N}",
+                JsonSerializer.SerializeToElement(new { safe = "kept" })));
+        Assert.Equal("new", advanced.Status);
+        Assert.Equal(1, advanced.SourcePosition);
+    }
+
+    private sealed class SelectiveOmissionScanner : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            value == "omit-me"
+                ? LeafOutcome.Omitted(
+                    CaptureOutcomeReason.LeafExceedsLimit,
+                    Encoding.UTF8.GetByteCount(value))
+                : LeafOutcome.Scanned(value, [], [], 0, null);
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) => false;
+    }
+
+    private sealed class ThrowingSafetyScanner : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            throw new InvalidOperationException("scanner implementation detail");
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) =>
+            throw new InvalidOperationException("scanner implementation detail");
+    }
 }

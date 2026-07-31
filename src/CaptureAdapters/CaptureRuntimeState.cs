@@ -106,7 +106,8 @@ public sealed record CaptureRuntimeQueueItem
         string sourceStream,
         long sourcePosition,
         CaptureRuntimeLocatorEvidence deterministicLocatorEvidence,
-        string redactedSafeCandidate)
+        string redactedSafeCandidate,
+        CaptureOutcomeSummary? outcome = null)
     {
         if (sourcePosition != deterministicLocatorEvidence.SourcePosition)
         {
@@ -117,17 +118,20 @@ public sealed record CaptureRuntimeQueueItem
         SourcePosition = sourcePosition;
         DeterministicLocatorEvidence = deterministicLocatorEvidence;
         RedactedSafeCandidate = redactedSafeCandidate;
+        Outcome = outcome ?? CaptureOutcomeAggregation.Empty;
     }
 
     public CaptureRuntimeQueueItem(
         string sourceStream,
         CaptureRuntimeLocatorEvidence deterministicLocatorEvidence,
-        string redactedSafeCandidate)
+        string redactedSafeCandidate,
+        CaptureOutcomeSummary? outcome = null)
         : this(
             sourceStream,
             deterministicLocatorEvidence.SourcePosition,
             deterministicLocatorEvidence,
-            redactedSafeCandidate)
+            redactedSafeCandidate,
+            outcome)
     {
     }
 
@@ -135,6 +139,7 @@ public sealed record CaptureRuntimeQueueItem
     public long SourcePosition { get; }
     public CaptureRuntimeLocatorEvidence DeterministicLocatorEvidence { get; }
     public string RedactedSafeCandidate { get; }
+    public CaptureOutcomeSummary Outcome { get; }
 }
 
 public sealed record CaptureServerReceiptState(
@@ -620,29 +625,50 @@ public static class CodexCaptureClaimer
             {
                 continue;
             }
-            var terminal = adapter.Adapt(record) as CaptureSourcePositionOutcome.Terminal;
-            if (terminal is null)
-            {
-                break;
-            }
             if (record.Locator is not CaptureSourceLocator.ByteRange byteRange)
             {
                 throw new InvalidDataException(
                     "Persisted Codex records require a verified byte-range locator.");
             }
-            VerifyRecord(sourceBytes, byteRange, sourceStream, record.SourcePosition);
-
+            CaptureSourcePositionOutcome.Terminal? terminal;
+            BoundedCaptureRepresentation<CaptureObservationRequest> bounded;
+            string candidateJson;
+            NeverStoreScan candidateScan;
+            try
+            {
+                terminal = adapter.Adapt(record)
+                    as CaptureSourcePositionOutcome.Terminal;
+                if (terminal is null)
+                {
+                    break;
+                }
+                VerifyRecord(sourceBytes, byteRange, sourceStream, record.SourcePosition);
+                bounded = CaptureFidelityPolicy.SerializeForTransport(
+                    terminal.Observation,
+                    maxTransportBytes);
+                string boundedJson = bounded.Serialized;
+                safetyGate.AssertObservationWithinBudget(boundedJson);
+                candidateScan = safetyGate.ScanJson(boundedJson);
+                candidateJson = candidateScan.Redacted;
+            }
+            catch (SafetyConfigurationException failure)
+            {
+                failure.ReportCaptureOutcome(
+                    adapter.Harness,
+                    byteRange.Length);
+                throw;
+            }
+            catch (SafetyScanException failure)
+            {
+                failure.ReportCaptureOutcome(
+                    adapter.Harness,
+                    byteRange.Length);
+                throw;
+            }
             long prefixLength = checked(byteRange.Offset + byteRange.Length);
             var prefix = new CapturePrefixEvidence(
                 prefixLength,
                 Digest(sourceBytes.AsSpan(0, checked((int)prefixLength))));
-            BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
-                CaptureFidelityPolicy.SerializeForTransport(
-                    terminal.Observation,
-                    maxTransportBytes);
-            string boundedJson = bounded.Serialized;
-            safetyGate.AssertObservationWithinBudget(boundedJson);
-            string candidateJson = safetyGate.ScanJson(boundedJson).Redacted;
             var locatorEvidence = new CaptureRuntimeLocatorEvidence(
                 transcriptIdentity,
                 record.SourcePosition,
@@ -653,7 +679,14 @@ public static class CodexCaptureClaimer
             var claim = new CaptureRuntimeQueueItem(
                 sourceStream,
                 locatorEvidence,
-                candidateJson);
+                candidateJson,
+                CaptureOutcomeAggregation.Merge(
+                    RuntimeOutcome(bounded),
+                    [.. candidateScan.Omissions.Select(omission =>
+                        CaptureOutcomeAggregation.FidelityOmission(
+                            terminal.Observation.Source.Harness,
+                            omission.Reason,
+                            omission.OriginalByteCount))]));
             if (await state.ClaimAsync(
                     claim,
                     expectedPrefix,
@@ -705,6 +738,23 @@ public static class CodexCaptureClaimer
 
     private static string Digest(ReadOnlySpan<byte> bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    private static CaptureOutcomeSummary RuntimeOutcome(
+        BoundedCaptureRepresentation<CaptureObservationRequest> bounded)
+    {
+        CaptureOutcomeSummary outcome =
+            bounded.Observation.AdapterOutcome ?? CaptureOutcomeAggregation.Empty;
+        return bounded.WasOmitted
+            && !outcome.Counters.Any(counter =>
+                counter.Reason == CaptureFidelityPolicy.TransportLimitReason)
+                ? CaptureOutcomeAggregation.Merge(
+                    outcome,
+                    CaptureOutcomeAggregation.FidelityOmission(
+                        bounded.Observation.Source.Harness,
+                        CaptureFidelityPolicy.TransportLimitReason,
+                        bounded.OriginalByteCount))
+                : outcome;
+    }
 }
 
 public sealed class CapturePrefixChangedException(string sourceStream, string reason)

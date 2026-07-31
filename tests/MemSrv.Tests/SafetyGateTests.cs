@@ -570,6 +570,8 @@ public sealed class SafetyGateTests : IDisposable
         Assert.Equal(JsonValueKind.Null, root.GetProperty("absent").ValueKind);
         Assert.Contains("sensitive_field_scalar", result.OmissionReasons);
         Assert.Contains("sensitive_field_subtree", result.OmissionReasons);
+        Assert.Equal(3, result.Omissions.Count);
+        Assert.All(result.Omissions, omission => Assert.Null(omission.OriginalByteCount));
     }
 
     [Fact]
@@ -678,6 +680,8 @@ public sealed class SafetyGateTests : IDisposable
         Assert.Equal(
             "[OMITTED:leaf_exceeds_limit]", document.RootElement.GetProperty("big").GetString());
         Assert.Equal(["leaf_exceeds_limit"], result.OmissionReasons);
+        CaptureScanOmission omission = Assert.Single(result.Omissions);
+        Assert.Equal(64, omission.OriginalByteCount);
     }
 
     [Fact]
@@ -688,6 +692,7 @@ public sealed class SafetyGateTests : IDisposable
 
         var failure = Assert.Throws<SafetyScanException>(
             () => gate.AssertAllowed(new string('y', 64)));
+        Assert.Equal(CaptureOutcomeReason.RequiredInspectionIncomplete, failure.OutcomeReason);
         Assert.Contains("could not be inspected completely", failure.Message);
         Assert.Contains("leaf_exceeds_limit", failure.Message);
     }
@@ -834,6 +839,7 @@ public sealed class SafetyGateTests : IDisposable
         string pathological = string.Concat(Enumerable.Repeat("0123456789abcdef", 200_000));
 
         var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(pathological));
+        Assert.Equal(CaptureOutcomeReason.MatcherTimeout, failure.OutcomeReason);
         Assert.Contains("decoder candidate scan", failure.Message);
         Assert.Contains("matcher timeout", failure.Message);
     }
@@ -881,6 +887,7 @@ public sealed class SafetyGateTests : IDisposable
         Assert.Equal(2, gate.Scan($"{FakeAwsKeyId} {FakeAwsKeyId}").RedactionCount);
         var failure = Assert.Throws<SafetyScanException>(
             () => gate.Scan($"{FakeAwsKeyId} {FakeAwsKeyId} {FakeAwsKeyId}"));
+        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
         Assert.Contains("match-count budget of 2", failure.Message);
     }
 
@@ -894,6 +901,7 @@ public sealed class SafetyGateTests : IDisposable
                 Encoding.UTF8.GetBytes($"synthetic-candidate-{index:0000}"))));
 
         var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(flood));
+        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
         Assert.Contains("decoder-candidate budget of 2", failure.Message);
     }
 
@@ -906,6 +914,7 @@ public sealed class SafetyGateTests : IDisposable
             Encoding.UTF8.GetBytes("synthetic-decodable-payload-value"));
 
         var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(candidate));
+        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
         Assert.Contains("total-decoded-byte budget of 8", failure.Message);
     }
 
@@ -916,6 +925,7 @@ public sealed class SafetyGateTests : IDisposable
             _shippedRules, null, SafetyBudgets.Default with { MaxScanTime = TimeSpan.Zero });
 
         var failure = Assert.Throws<SafetyScanException>(() => gate.Scan("anything at all"));
+        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
         Assert.Contains("total scan-time budget", failure.Message);
     }
 
@@ -931,6 +941,7 @@ public sealed class SafetyGateTests : IDisposable
         string pathological = string.Concat(Enumerable.Repeat("AKIA", 400_000));
 
         var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(pathological));
+        Assert.Equal(CaptureOutcomeReason.MatcherTimeout, failure.OutcomeReason);
         Assert.Contains("matcher timeout", failure.Message);
     }
 
@@ -943,6 +954,7 @@ public sealed class SafetyGateTests : IDisposable
         gate.AssertObservationWithinBudget(new string('a', 16));
         var failure = Assert.Throws<SafetyScanException>(
             () => gate.AssertObservationWithinBudget(new string('a', 17)));
+        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
         Assert.Contains("observation budget of 16 bytes", failure.Message);
     }
 

@@ -35,9 +35,16 @@ var safetyGate = new NeverStoreGate(
     captureOptions.NeverStorePath, captureOptions.NeverStoreLiteralsPath);
 if (!safetyGate.IsConfigured)
 {
+    CaptureOutcomeSummary outcome = CaptureOutcomeAggregation.Summarize(
+    [
+        CaptureOutcomeAggregation.SafetyFailure(
+            "codex",
+            CaptureOutcomeReason.ScannerPolicyUnavailable)
+    ]);
     Console.Error.WriteLine(
         $"Codex capture tracer refuses to run: {safetyGate.FailureReason}. " +
         "Capture is unhealthy until the never-store rule set loads.");
+    WriteOutcome(outcome);
     return 3;
 }
 
@@ -149,10 +156,10 @@ if (scheduled)
                         {
                             // One source stream or endpoint outage cannot cancel
                             // responsibility for later cycles/streams.
-                            Console.Error.WriteLine(ex.Message);
+                            WriteFailure(ex);
                         }
                     },
-                    ex => Console.Error.WriteLine(ex.Message),
+                    WriteFailure,
                     cancellationToken);
             },
             schedule,
@@ -179,12 +186,12 @@ catch (CaptureDeliveryException ex)
 }
 catch (SafetyScanException ex)
 {
-    Console.Error.WriteLine(ex.Message);
+    WriteFailure(ex);
     return 3;
 }
 catch (SafetyConfigurationException ex)
 {
-    Console.Error.WriteLine(ex.Message);
+    WriteFailure(ex);
     return 3;
 }
 catch (CapturePrefixChangedException ex)
@@ -311,6 +318,26 @@ static void WriteLimitation() =>
     Console.Error.WriteLine(
         "LIMITATION: disabled non-production synthetic Codex transcript tracer; " +
         "not a live adapter, hook, historical importer, or supported capture product.");
+
+static void WriteFailure(Exception failure)
+{
+    Console.Error.WriteLine(failure.Message);
+    CaptureOutcomeSummary? outcome = failure switch
+    {
+        SafetyConfigurationException configuration => configuration.Outcome,
+        SafetyScanException scan => scan.Outcome,
+        _ => null
+    };
+    if (outcome is not null)
+    {
+        WriteOutcome(outcome);
+    }
+}
+
+static void WriteOutcome(CaptureOutcomeSummary outcome) =>
+    Console.Error.WriteLine(JsonSerializer.Serialize(
+        outcome,
+        new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
 static string Required(string name) =>
     Environment.GetEnvironmentVariable(name) is { Length: > 0 } value

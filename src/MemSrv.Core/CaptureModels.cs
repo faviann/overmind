@@ -32,7 +32,8 @@ public sealed record CaptureObservationRequest(
     JsonElement SourcePayload,
     IReadOnlyList<CaptureEvent> Events,
     CaptureRouteEvidence? RouteEvidence = null,
-    CaptureSourceIdentity? SourceIdentity = null);
+    CaptureSourceIdentity? SourceIdentity = null,
+    CaptureOutcomeSummary? AdapterOutcome = null);
 
 /// <summary>
 /// Harness-native identity facts used with the authenticated capture binding to
@@ -231,7 +232,8 @@ public sealed record CaptureObservationCommand(
     CaptureAdapter Adapter,
     JsonElement SourcePayload,
     IReadOnlyList<CaptureEvent> Events,
-    CaptureRouteEvidence? RouteEvidence)
+    CaptureRouteEvidence? RouteEvidence,
+    CaptureOutcomeSummary? AdapterOutcome = null)
 {
     public static CaptureObservationCommand FromRequest(CaptureObservationRequest request)
     {
@@ -267,7 +269,8 @@ public sealed record CaptureObservationCommand(
             request.Adapter,
             request.SourcePayload,
             request.Events,
-            request.RouteEvidence);
+            request.RouteEvidence,
+            request.AdapterOutcome);
     }
 }
 
@@ -368,7 +371,8 @@ public sealed record CapturedEventEnvelope(
     int ContractVersion,
     CaptureObservationReceipt Observation,
     CanonicalCapturedEvent Event,
-    IReadOnlyList<CaptureRelationship> Relationships);
+    IReadOnlyList<CaptureRelationship> Relationships,
+    CaptureOutcomeSummary Outcome);
 
 /// <summary>
 /// Durable evidence used to derive presentation order for one source-stream
@@ -447,4 +451,5 @@ public sealed record CaptureImportReceipt(
     string EffectiveNamespace,
     string RouteBasis,
     CaptureObservationReceipt Observation,
-    IReadOnlyList<CapturedEventReceipt> Events);
+    IReadOnlyList<CapturedEventReceipt> Events,
+    CaptureOutcomeSummary Outcome);

@@ -251,6 +251,92 @@ public sealed class CaptureRuntimeStateTests
             exception.Message);
     }
 
+    [Fact]
+    public void LegacyQueueItemWithoutOutcomeDefaultsToHealthyComplete()
+    {
+        const string legacy = """
+            {
+              "sourceStream": "stream",
+              "sourcePosition": 7,
+              "deterministicLocatorEvidence": {
+                "transcriptIdentity": "transcript",
+                "sourcePosition": 7,
+                "byteOffset": 11,
+                "byteLength": 13,
+                "recordSha256": "record",
+                "prefixEvidence": { "byteLength": 24, "sha256": "prefix" }
+              },
+              "redactedSafeCandidate": "{\"safe\":true}"
+            }
+            """;
+
+        CaptureRuntimeQueueItem item = Assert.IsType<CaptureRuntimeQueueItem>(
+            JsonSerializer.Deserialize<CaptureRuntimeQueueItem>(
+                legacy,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        Assert.Equal("healthy", item.Outcome.CaptureHealth);
+        Assert.Equal("complete", item.Outcome.CaptureFidelity);
+        Assert.Empty(item.Outcome.Counters);
+    }
+
+    [Fact]
+    public async Task RuntimeStateRejectsOpenOutcomeDimensionsWithoutEchoingContent()
+    {
+        const string contentLike = "private-runtime-content-must-not-echo";
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-invalid-outcome-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var outcome = CaptureOutcomeAggregation.Summarize(
+            [
+                CaptureOutcomeAggregation.FidelityOmission(
+                    "codex",
+                    CaptureFidelityPolicy.ContentLimitReason,
+                    1)
+            ]);
+            var locator = new CaptureRuntimeLocatorEvidence(
+                "transcript",
+                0,
+                0,
+                1,
+                "record",
+                new CapturePrefixEvidence(1, "prefix"));
+            var snapshot = new CaptureRuntimeSnapshot(
+                1,
+                [
+                    new CaptureRuntimeStreamState(
+                        "stream",
+                        "transcript",
+                        locator.PrefixEvidence,
+                        0,
+                        [new CaptureRuntimeQueueItem("stream", locator, "{}", outcome)],
+                        null,
+                        null)
+                ]);
+            string durableJson = JsonSerializer.Serialize(
+                snapshot,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            durableJson = durableJson.Replace(
+                $"\"reason\":\"{CaptureFidelityPolicy.ContentLimitReason}\"",
+                $"\"reason\":\"{contentLike}\"",
+                StringComparison.Ordinal);
+            await File.WriteAllTextAsync(
+                Path.Combine(directory, "capture-state.json"),
+                durableJson);
+
+            Exception failure = await Assert.ThrowsAnyAsync<Exception>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+
+            Assert.DoesNotContain(contentLike, failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Theory]
     [MemberData(nameof(InvalidStopStateShapes))]
     public void CaptureRuntimeStopStateContractRejectsInvalidConstructorAndJsonShapes(
@@ -421,7 +507,8 @@ public sealed class CaptureRuntimeStateTests
                     "sourceStream",
                     "sourcePosition",
                     "deterministicLocatorEvidence",
-                    "redactedSafeCandidate"
+                    "redactedSafeCandidate",
+                    "outcome"
                 ],
                 persistedQueueItem.EnumerateObject().Select(property => property.Name));
             JsonElement persistedLocatorEvidence =
@@ -908,6 +995,11 @@ public sealed class CaptureRuntimeStateTests
                 CaptureFidelityPolicy.TransportLimitReason,
                 claim.RedactedSafeCandidate,
                 StringComparison.Ordinal);
+            Assert.Equal("healthy", claim.Outcome.CaptureHealth);
+            Assert.Equal("degraded", claim.Outcome.CaptureFidelity);
+            Assert.Equal(
+                CaptureFidelityPolicy.TransportLimitReason,
+                Assert.Single(claim.Outcome.Counters).Reason);
             Assert.DoesNotContain(
                 new string('p', 256),
                 claim.RedactedSafeCandidate,
@@ -1082,6 +1174,7 @@ public sealed class CaptureRuntimeStateTests
         clock.Stop();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.True(selected.WasOmitted);
+        Assert.Equal([8L * 1024 * 1024], selected.OriginalByteCounts);
         Assert.True(
             allocated < 4L * 1024 * 1024,
             $"Bounded binary rewriting allocated {allocated:N0} bytes.");
@@ -1139,6 +1232,9 @@ public sealed class CaptureRuntimeStateTests
             CaptureFidelityPolicy.UnsupportedBinaryReason,
             omission.GetProperty("reason").GetString());
         Assert.Equal(
+            omission.GetProperty("originalByteCount").GetInt64(),
+            Assert.Single(selected.OriginalByteCounts));
+        Assert.Equal(
             "expansion-session",
             omission.GetProperty("sourceIdentity")
                 .GetProperty("externalSessionId").GetString());
@@ -1164,6 +1260,7 @@ public sealed class CaptureRuntimeStateTests
 
         SafetyScanException failure = Assert.Throws<SafetyScanException>(
             deadline.AssertWithinDeadline);
+        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
         Assert.Contains("30-second deadline", failure.Message, StringComparison.Ordinal);
     }
 
@@ -1216,19 +1313,19 @@ public sealed class CaptureRuntimeStateTests
             string childId,
             long sourcePosition,
             string locatorKind) => new
-        {
-            reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
-            category = "image",
-            originalByteCount = 2,
-            policyVersion = CaptureFidelityPolicy.CurrentVersion,
-            sourceIdentity = new
             {
-                externalSessionId,
-                childId,
-                sourcePosition,
-                locatorKind
-            }
-        };
+                reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+                category = "image",
+                originalByteCount = 2,
+                policyVersion = CaptureFidelityPolicy.CurrentVersion,
+                sourceIdentity = new
+                {
+                    externalSessionId,
+                    childId,
+                    sourcePosition,
+                    locatorKind
+                }
+            };
         object omission = Omission(
             "recognition-session",
             "recognition-child",
@@ -1558,7 +1655,19 @@ public sealed class CaptureRuntimeStateTests
             CaptureRuntimeStreamState persisted = Assert.Single(
                 (await inner.ReadAsync()).Streams);
             Assert.Equal(0, persisted.EnqueuedThrough);
-            Assert.Equal(claim, Assert.Single(persisted.Queue));
+            CaptureRuntimeQueueItem persistedClaim = Assert.Single(persisted.Queue);
+            Assert.Equal(claim.SourceStream, persistedClaim.SourceStream);
+            Assert.Equal(
+                claim.DeterministicLocatorEvidence,
+                persistedClaim.DeterministicLocatorEvidence);
+            Assert.Equal(
+                claim.RedactedSafeCandidate,
+                persistedClaim.RedactedSafeCandidate);
+            Assert.Equal(
+                JsonSerializer.Serialize(claim.Outcome, CaptureLedger.JsonOptions),
+                JsonSerializer.Serialize(
+                    persistedClaim.Outcome,
+                    CaptureLedger.JsonOptions));
         }
         finally
         {
@@ -2498,6 +2607,247 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task ScannerPolicyFailureReportsBlockedHealthAndClaimsNothing()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-scanner-outcome-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":"safe"}}""" +
+            "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            var missingGate = new NeverStoreGate(
+                Path.Combine(directory, "missing-never-store.yaml"));
+
+            SafetyConfigurationException failure =
+                await Assert.ThrowsAsync<SafetyConfigurationException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new CodexJsonlAdapter(),
+                        transcript,
+                        "scanner-outcome-stream",
+                        state,
+                        missingGate));
+
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal("complete", failure.Outcome?.CaptureFidelity);
+            Assert.Equal(
+                CaptureOutcomeReason.ScannerPolicyUnavailable,
+                Assert.Single(failure.Outcome!.Counters).Reason);
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScannerInternalFailureReportsBlockedHealthAndClaimsNothing()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-scanner-internal-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":"safe"}}""" +
+            "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            SafetyScannerInternalException failure =
+                await Assert.ThrowsAsync<SafetyScannerInternalException>(
+                    () => CodexCaptureClaimer.ClaimCompletedAsync(
+                        new CodexJsonlAdapter(),
+                        transcript,
+                        "scanner-internal-stream",
+                        state,
+                        new NeverStoreGate(new ThrowingSafetyScanner())));
+
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
+            Assert.Equal(
+                CaptureOutcomeReason.ScannerInternalFailure,
+                Assert.Single(failure.Outcome!.Counters).Reason);
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AdapterFidelityFailureReportsBlockedHealthAndClaimsNothing()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-adapter-fidelity-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            """{"type":"response_item","payload":{"type":"message","role":"user","content":"safe"}}""" +
+            "\n",
+            new UTF8Encoding(false));
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+
+            SafetyScanException failure = await Assert.ThrowsAsync<SafetyScanException>(
+                () => CodexCaptureClaimer.ClaimCompletedAsync(
+                    new AdapterFidelityFailureAdapter(),
+                    transcript,
+                    "adapter-fidelity-stream",
+                    state,
+                    new NeverStoreGate(Path.Combine(
+                        TestProcessRunner.RepoRoot,
+                        "config/never_store.yaml"))));
+
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+            CaptureOutcomeCounter counter = Assert.Single(failure.Outcome!.Counters);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, counter.Reason);
+            Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TransportSerializationFailureReportsBlockedHealthAndSendsNothing()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string fixture = Path.Combine(root, "fixtures/codex-synthetic.jsonl");
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-delivery-transport-fidelity-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            const string sourceStream = "delivery-transport-fidelity-stream";
+            IReadOnlyList<CaptureRuntimeQueueItem> claims =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new CodexJsonlAdapter(),
+                    fixture,
+                    sourceStream,
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    terminalAtEndOfFile: true);
+            Assert.NotEmpty(claims);
+            CaptureRuntimeStreamState beforeDelivery =
+                Assert.Single((await state.ReadAsync()).Streams);
+            bool persistedReceipt = false;
+
+            SafetyScanException failure = await Assert.ThrowsAsync<SafetyScanException>(
+                () => DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                    new TransportSerializationFailureAdapter(),
+                    fixture,
+                    sourceStream,
+                    claims,
+                    new Uri("http://127.0.0.1:1"),
+                    "unused",
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    (_, _, _) =>
+                    {
+                        persistedReceipt = true;
+                        return Task.CompletedTask;
+                    },
+                    terminalAtEndOfFile: true));
+
+            Assert.False(persistedReceipt);
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+            CaptureOutcomeCounter counter = Assert.Single(failure.Outcome!.Counters);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, counter.Reason);
+            Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+            CaptureRuntimeStreamState afterDelivery =
+                Assert.Single((await state.ReadAsync()).Streams);
+            Assert.Equal(beforeDelivery.EnqueuedThrough, afterDelivery.EnqueuedThrough);
+            Assert.Equal(
+                beforeDelivery.Queue.Select(item =>
+                    (item.DeterministicLocatorEvidence.Identity,
+                        item.RedactedSafeCandidate)),
+                afterDelivery.Queue.Select(item =>
+                    (item.DeterministicLocatorEvidence.Identity,
+                        item.RedactedSafeCandidate)));
+            Assert.Null(afterDelivery.LastServerReceipt);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DeliveryScannerInternalFailureSendsNothingAndPersistsNoReceipt()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string fixture = Path.Combine(root, "fixtures/codex-synthetic.jsonl");
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-delivery-scanner-internal-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            const string sourceStream = "delivery-scanner-internal-stream";
+            IReadOnlyList<CaptureRuntimeQueueItem> claims =
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new CodexJsonlAdapter(),
+                    fixture,
+                    sourceStream,
+                    state,
+                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    terminalAtEndOfFile: true);
+            Assert.NotEmpty(claims);
+            bool persistedReceipt = false;
+
+            SafetyScannerInternalException failure =
+                await Assert.ThrowsAsync<SafetyScannerInternalException>(
+                    () => DisabledCaptureRuntime.RunClaimedFixtureAsync(
+                        new CodexJsonlAdapter(),
+                        fixture,
+                        sourceStream,
+                        claims,
+                        new Uri("http://127.0.0.1:1"),
+                        "unused",
+                        new NeverStoreGate(new ThrowingSafetyScanner()),
+                        (_, _, _) =>
+                        {
+                            persistedReceipt = true;
+                            return Task.CompletedTask;
+                        },
+                        terminalAtEndOfFile: true));
+
+            Assert.False(persistedReceipt);
+            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
+            Assert.Equal(
+                CaptureOutcomeReason.ScannerInternalFailure,
+                Assert.Single(failure.Outcome!.Counters).Reason);
+            Assert.NotEmpty(Assert.Single((await state.ReadAsync()).Streams).Queue);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerDoesNotDeliverAnUnterminatedFinalRecord()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -3118,6 +3468,89 @@ public sealed class CaptureRuntimeStateTests
                 sourceStream, queued, deliverAsync, cancellationToken);
     }
 
+    [Fact]
+    public async Task ClaimerQueuesEveryScannerOmissionAndAdvancesEnqueuedThrough()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-omissions-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            transcript,
+            "{\"type\":\"synthetic\"}\n",
+            new UTF8Encoding(false));
+        try
+        {
+            var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
+            CaptureRuntimeQueueItem claim = Assert.Single(
+                await CodexCaptureClaimer.ClaimCompletedAsync(
+                    new ScannerOmissionAdapter(),
+                    transcript,
+                    "scanner-omission-stream",
+                    state,
+                    new NeverStoreGate(new SelectiveOmissionScanner())));
+
+            CaptureOutcomeCounter counter = Assert.Single(claim.Outcome.Counters);
+            Assert.Equal(CaptureOutcomeReason.LeafExceedsLimit, counter.Reason);
+            Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
+            Assert.Equal(2, counter.Count);
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await state.ReadAsync()).Streams);
+            Assert.Equal(0, stream.EnqueuedThrough);
+            Assert.Single(stream.Queue);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private sealed class ScannerOmissionAdapter : ICaptureSourceAdapter
+    {
+        public string Harness => "codex";
+        public CaptureAdapter Identity { get; } = new("scanner-omission-test", "1");
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var locator = Assert.IsType<CaptureSourceLocator.ByteRange>(source.Locator);
+            JsonElement payload = JsonSerializer.SerializeToElement(new { value = "omit-me" });
+            return new CaptureSourcePositionOutcome.Terminal(
+                source.SourcePosition,
+                new CaptureObservationRequest(
+                    1,
+                    source.SourceIdentity.ExternalSessionId,
+                    source.SourcePosition,
+                    new CaptureLocator(
+                        locator.Kind,
+                        null,
+                        locator.Offset,
+                        locator.Length,
+                        locator.SourceContentSha256),
+                    null,
+                    new CaptureSource(Harness, null, "synthetic"),
+                    Identity,
+                    payload,
+                    [new CaptureEvent(
+                        "event/0", 0, "opaque", "harness", payload, null, [])],
+                    SourceIdentity: source.SourceIdentity));
+        }
+    }
+
+    private sealed class SelectiveOmissionScanner : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            value == "omit-me"
+                ? LeafOutcome.Omitted(
+                    CaptureOutcomeReason.LeafExceedsLimit,
+                    Encoding.UTF8.GetByteCount(value))
+                : LeafOutcome.Scanned(value, [], [], 0, null);
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) => false;
+    }
+
     private sealed class RetainedMetadataAdapter(string rawSentinel) : ICaptureSourceAdapter
     {
         private readonly string _oversized = string.Concat(
@@ -3342,6 +3775,67 @@ public sealed class CaptureRuntimeStateTests
         }
     }
 
+    private sealed class AdapterFidelityFailureAdapter : ICaptureSourceAdapter
+    {
+        private readonly CodexJsonlAdapter _inner = new();
+
+        public string Harness => _inner.Harness;
+        public CaptureAdapter Identity => _inner.Identity;
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                _inner.Adapt(source));
+            CaptureObservationCommand command =
+                CaptureObservationCommand.FromRequest(terminal.Observation);
+            _ = CaptureFidelityPolicy.SerializeForContent(command, 1);
+            return terminal;
+        }
+    }
+
+    private sealed class TransportSerializationFailureAdapter : ICaptureSourceAdapter
+    {
+        private readonly CodexJsonlAdapter _inner = new();
+
+        public string Harness => _inner.Harness;
+        public CaptureAdapter Identity => _inner.Identity;
+
+        public CaptureSourcePositionOutcome Adapt(TrustedSourceObservation source)
+        {
+            var terminal = Assert.IsType<CaptureSourcePositionOutcome.Terminal>(
+                _inner.Adapt(source));
+            return terminal with
+            {
+                Observation = terminal.Observation with
+                {
+                    Events = new TransportSerializationFailureEventList(
+                        terminal.Observation.Events[0])
+                }
+            };
+        }
+    }
+
+    private sealed class TransportSerializationFailureEventList(CaptureEvent item)
+        : IReadOnlyList<CaptureEvent>
+    {
+        public int Count => 1;
+        public CaptureEvent this[int index] => index == 0
+            ? item
+            : throw new ArgumentOutOfRangeException(nameof(index));
+
+        public IEnumerator<CaptureEvent> GetEnumerator()
+        {
+            var time = new ManualTimeProvider();
+            var deadline = new GovernedDeadline(TimeSpan.FromSeconds(30), time);
+            time.Advance(TimeSpan.FromSeconds(31));
+            deadline.AssertWithinDeadline();
+            return Enumerable.Repeat(item, 1).GetEnumerator();
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
+    }
+
     private static CaptureObservationRequest ResourceBoundObservation(
         JsonElement payload,
         string identity,
@@ -3454,5 +3948,17 @@ public sealed class CaptureRuntimeStateTests
 
         public void Advance(TimeSpan elapsed) =>
             _timestamp = checked(_timestamp + elapsed.Ticks);
+    }
+
+    private sealed class ThrowingSafetyScanner : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            throw new InvalidOperationException("scanner implementation detail");
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) =>
+            throw new InvalidOperationException("scanner implementation detail");
     }
 }

@@ -71,14 +71,61 @@ public sealed class SafetyConfigurationException(string reason)
     : InvalidOperationException($"Capture safety rules are not usable: {reason}.")
 {
     public string Reason { get; } = reason;
+    public CaptureOutcomeSummary? Outcome { get; private set; }
+
+    public void ReportCaptureOutcome(string harness, long? inspectedByteCount = null) =>
+        Outcome = CaptureOutcomeAggregation.Summarize(
+        [
+            CaptureOutcomeAggregation.SafetyFailure(
+                harness,
+                CaptureOutcomeReason.ScannerPolicyUnavailable,
+                inspectedByteCount)
+        ]);
 }
 
 /// <summary>
 /// A scan could not complete within its bounds, or a required value could not
 /// be inspected completely. Callers must persist nothing and advance nothing.
 /// </summary>
-public sealed class SafetyScanException(string reason)
-    : InvalidOperationException($"Capture safety scan failed closed: {reason}.")
+public class SafetyScanException : InvalidOperationException
 {
-    public string Reason { get; } = reason;
+    public SafetyScanException(string outcomeReason, string reason)
+        : base($"Capture safety scan failed closed: {reason}.")
+    {
+        if (outcomeReason is not (
+                CaptureOutcomeReason.MatcherTimeout
+                or CaptureOutcomeReason.ScanBudgetExhausted
+                or CaptureOutcomeReason.RequiredInspectionIncomplete
+                or CaptureOutcomeReason.ScannerInternalFailure))
+        {
+            throw new ArgumentException(
+                "Capture safety scan outcome reason is not recognized.",
+                nameof(outcomeReason));
+        }
+        OutcomeReason = outcomeReason;
+        Reason = reason;
+    }
+
+    public string OutcomeReason { get; }
+    public string Reason { get; }
+    public CaptureOutcomeSummary? Outcome { get; private set; }
+
+    public void ReportCaptureOutcome(string harness, long? inspectedByteCount = null) =>
+        Outcome = CaptureOutcomeAggregation.Summarize(
+        [
+            CaptureOutcomeAggregation.SafetyFailure(
+                harness,
+                OutcomeReason,
+                inspectedByteCount)
+        ]);
 }
+
+/// <summary>
+/// An unexpected failure thrown by the scanner implementation itself. The
+/// original exception and candidate content deliberately do not cross the
+/// safety boundary.
+/// </summary>
+public sealed class SafetyScannerInternalException()
+    : SafetyScanException(
+        CaptureOutcomeReason.ScannerInternalFailure,
+        "the scanner failed internally");

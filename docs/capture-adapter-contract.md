@@ -131,7 +131,11 @@ Adapters are versioned tolerant tagged unions:
   and capture selects a content-free whole-observation
   `unsupported_binary_content` omission; the smaller raw representation never
   regains eligibility. Untagged values and malformed byte representations are
-  not classified by this union. Only direct `signature`
+  not classified by this union. The rewrite result returns the exact original
+  byte count for every omission it created; adapter/runtime/server outcome
+  projections carry those typed counts and never rediscover them by traversing
+  the rewritten JSON. A source-owned field that collides with the marker name
+  remains ordinary evidence and cannot create an outcome counter. Only direct `signature`
   and `encrypted_content` children reached from the root known Codex reasoning
   payload or the root adapter-owned opaque envelope remain ordinary metadata.
   These are separate closed traversal contexts: a raw source record can earn

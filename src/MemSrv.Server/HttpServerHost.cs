@@ -134,6 +134,14 @@ public static class HttpServerHost
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
+            catch (SafetyConfigurationException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, outcome = ex.Outcome });
+            }
+            catch (SafetyScanException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, outcome = ex.Outcome });
+            }
             catch (InvalidOperationException ex)
             {
                 return Results.BadRequest(new { error = ex.Message });

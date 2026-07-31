@@ -166,6 +166,20 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         JsonElement receipt = await accepted.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("new", receipt.GetProperty("status").GetString());
+        JsonElement importOutcome = receipt.GetProperty("outcome");
+        Assert.Equal("degraded", importOutcome.GetProperty("captureFidelity").GetString());
+        JsonElement importCounter = importOutcome.GetProperty("counters")[0];
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            importCounter.GetProperty("reason").GetString());
+        Assert.Equal(
+            CaptureSizeBand.UpTo1MiB,
+            importCounter.GetProperty("sizeBand").GetString());
+        Assert.Equal(3, importCounter.GetProperty("count").GetInt64());
+        Assert.DoesNotContain(
+            "originalByteCount",
+            importOutcome.GetRawText(),
+            StringComparison.Ordinal);
         JsonElement safeBlock = receipt.GetProperty("observation")
             .GetProperty("safeSourcePayload").GetProperty("payload")
             .GetProperty("content")[0];
@@ -230,6 +244,9 @@ public sealed class CaptureTests : HttpSeamTestBase
         JsonElement envelope = JsonDocument.Parse(
             shown.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0])
             .RootElement;
+        Assert.True(JsonElement.DeepEquals(
+            importOutcome,
+            envelope.GetProperty("outcome")));
         JsonElement replayed = envelope.GetProperty("observation")
             .GetProperty("safeSourcePayload").GetProperty("payload")
             .GetProperty("content")[0];
@@ -485,10 +502,17 @@ public sealed class CaptureTests : HttpSeamTestBase
                 spoofedRootShown,
                 StringComparison.Ordinal);
             Assert.Equal(
-                4,
+                5,
                 spoofedRootShown.Split(
                     $"\"reason\":\"{CaptureFidelityPolicy.UnsupportedBinaryReason}\"",
                     StringSplitOptions.None).Length - 1);
+            JsonElement spoofedRootOutcome = receipts[11].GetProperty("outcome");
+            JsonElement spoofedRootCounter = Assert.Single(
+                spoofedRootOutcome.GetProperty("counters").EnumerateArray());
+            Assert.Equal(4, spoofedRootCounter.GetProperty("count").GetInt64());
+            Assert.Equal(
+                CaptureSizeBand.UpTo1MiB,
+                spoofedRootCounter.GetProperty("sizeBand").GetString());
             string spoofedRootApi = receipts[11].GetRawText();
             Assert.DoesNotContain("[71,72]", spoofedRootApi, StringComparison.Ordinal);
             Assert.DoesNotContain("[73,74]", spoofedRootApi, StringComparison.Ordinal);
@@ -594,12 +618,15 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.All(envelopes, envelope =>
             {
                 Assert.Equal(
-                    ["contractVersion", "observation", "event", "relationships"],
+                    ["contractVersion", "observation", "event", "relationships", "outcome"],
                     envelope.EnumerateObject().Select(property => property.Name));
                 Assert.Equal(1, envelope.GetProperty("contractVersion").GetInt32());
                 Assert.Equal(
                     observationUuid,
                     envelope.GetProperty("observation").GetProperty("observationUuid").GetGuid());
+                Assert.Equal(
+                    "healthy",
+                    envelope.GetProperty("outcome").GetProperty("captureHealth").GetString());
                 Assert.Equal(
                     [
                         "observationUuid", "sourceStreamUuid", "sourceIdentity", "source", "locator",
@@ -1748,6 +1775,9 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         JsonElement acceptedReceipt =
             await accepted.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement acceptedOutcome = acceptedReceipt.GetProperty("outcome");
+        Assert.Equal("complete", acceptedOutcome.GetProperty("captureFidelity").GetString());
+        Assert.Empty(acceptedOutcome.GetProperty("counters").EnumerateArray());
 
         using HttpResponseMessage upgradedRetry = await client.PostAsJsonAsync(
             "/capture/v1/observations",
@@ -1768,6 +1798,17 @@ public sealed class CaptureTests : HttpSeamTestBase
         Assert.Equal(
             acceptedReceipt.GetProperty("observationUuid").GetGuid(),
             retryReceipt.GetProperty("observationUuid").GetGuid());
+        Assert.True(JsonElement.DeepEquals(
+            acceptedOutcome,
+            retryReceipt.GetProperty("outcome")));
+        JsonElement operatorEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
+            "capture",
+            "receipt",
+            acceptedReceipt.GetProperty("observationUuid").GetGuid().ToString()))
+            .RootElement;
+        Assert.True(JsonElement.DeepEquals(
+            acceptedOutcome,
+            operatorEnvelope.GetProperty("outcome")));
     }
 
     [Fact]
@@ -2231,7 +2272,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 "capture", "receipt", receipts[0].GetProperty("observationUuid").GetGuid().ToString()))
                 .RootElement;
             Assert.Equal(
-                ["contractVersion", "observation", "event", "relationships"],
+                ["contractVersion", "observation", "event", "relationships", "outcome"],
                 messageEnvelope.EnumerateObject().Select(property => property.Name));
             Assert.Equal("message", messageEnvelope.GetProperty("event").GetProperty("kind").GetString());
             Assert.Equal("user", messageEnvelope.GetProperty("event").GetProperty("actor").GetString());
@@ -2728,6 +2769,25 @@ public sealed class CaptureTests : HttpSeamTestBase
                 CaptureFidelityPolicy.CurrentVersion,
                 omittedShown,
                 StringComparison.Ordinal);
+            JsonElement apiOutcome = omitted.GetProperty("outcome");
+            Assert.Equal("healthy", apiOutcome.GetProperty("captureHealth").GetString());
+            Assert.Equal("degraded", apiOutcome.GetProperty("captureFidelity").GetString());
+            JsonElement counter = Assert.Single(
+                apiOutcome.GetProperty("counters").EnumerateArray());
+            Assert.Equal(
+                CaptureFidelityPolicy.TransportLimitReason,
+                counter.GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureSizeBand.UpTo1MiB,
+                counter.GetProperty("sizeBand").GetString());
+            Assert.Equal(1, counter.GetProperty("count").GetInt64());
+            JsonElement operatorEnvelope = JsonDocument.Parse(
+                omittedShown.Split(
+                    Environment.NewLine,
+                    StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
+            Assert.True(JsonElement.DeepEquals(
+                apiOutcome,
+                operatorEnvelope.GetProperty("outcome")));
 
             Guid omissionUuid = omitted.GetProperty("observationUuid").GetGuid();
             DeleteRuntimeState(overPath);
@@ -2740,6 +2800,9 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Equal(
                 omissionUuid,
                 retriedOmission.GetProperty("observationUuid").GetGuid());
+            Assert.True(JsonElement.DeepEquals(
+                apiOutcome,
+                retriedOmission.GetProperty("outcome")));
         }
         finally
         {
@@ -4618,6 +4681,15 @@ public sealed class CaptureTests : HttpSeamTestBase
                 "json_parse_error",
                 readableObservation.GetProperty("safeSourcePayload")
                     .GetProperty("parseError").GetProperty("reason").GetString());
+            JsonElement readableOutcome = accepted[1].GetProperty("outcome");
+            Assert.Equal(
+                CaptureFidelityPolicy.MalformedJsonReason,
+                readableOutcome.GetProperty("counters")[0]
+                    .GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureSizeBand.UpTo1MiB,
+                readableOutcome.GetProperty("counters")[0]
+                    .GetProperty("sizeBand").GetString());
 
             JsonElement invalidObservation = accepted[2].GetProperty("observation");
             Assert.Equal(
@@ -4634,6 +4706,15 @@ public sealed class CaptureTests : HttpSeamTestBase
                 CaptureFidelityPolicy.CurrentVersion,
                 apiOmission.GetProperty("policyVersion").GetString());
             Assert.Equal("invalid_utf8", apiOmission.GetProperty("contentPolicy").GetString());
+            JsonElement invalidOutcome = accepted[2].GetProperty("outcome");
+            Assert.Equal(
+                CaptureOutcomeReason.InvalidEncoding,
+                invalidOutcome.GetProperty("counters")[0]
+                    .GetProperty("reason").GetString());
+            Assert.Equal(
+                CaptureSizeBand.UpTo1MiB,
+                invalidOutcome.GetProperty("counters")[0]
+                    .GetProperty("sizeBand").GetString());
             string invalidApi = invalidObservation.GetRawText();
             Assert.DoesNotContain('\uFFFD', invalidApi);
             Assert.DoesNotContain("\"typ", invalidApi, StringComparison.Ordinal);
@@ -4673,6 +4754,9 @@ public sealed class CaptureTests : HttpSeamTestBase
                 readableEvent.GetProperty("payload").GetProperty("source")
                     .GetProperty("opaqueText").GetString());
             Assert.DoesNotContain(seededSyntheticSecret, readableEnvelope.GetRawText());
+            Assert.True(JsonElement.DeepEquals(
+                readableOutcome,
+                readableEnvelope.GetProperty("outcome")));
 
             JsonElement invalidEnvelope = JsonDocument.Parse(await RunMemCtlAsync(
                 "capture",
@@ -4698,6 +4782,9 @@ public sealed class CaptureTests : HttpSeamTestBase
             string operatorInvalid = invalidEnvelope.GetRawText();
             Assert.DoesNotContain('\uFFFD', operatorInvalid);
             Assert.DoesNotContain("\"typ", operatorInvalid, StringComparison.Ordinal);
+            Assert.True(JsonElement.DeepEquals(
+                invalidOutcome,
+                invalidEnvelope.GetProperty("outcome")));
 
             JsonElement[] retries = new JsonElement[3];
             using (var retry =

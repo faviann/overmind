@@ -52,6 +52,9 @@ public abstract record CaptureSourcePositionOutcome(long SourcePosition)
     public sealed record Incomplete(long Position, string Reason)
         : CaptureSourcePositionOutcome(Position);
 
-    public sealed record Terminal(long Position, CaptureObservationRequest Observation)
+    public sealed record Terminal(
+        long Position,
+        CaptureObservationRequest Observation,
+        CaptureOutcomeSummary? Outcome = null)
         : CaptureSourcePositionOutcome(Position);
 }

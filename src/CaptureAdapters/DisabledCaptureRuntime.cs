@@ -90,20 +90,8 @@ public static class DisabledCaptureRuntime
                         queued.SourcePosition));
             }
 
-            var outcome = adapter.Adapt(sourceRecord);
-            if (outcome is CaptureSourcePositionOutcome.Incomplete)
-            {
-                throw new CaptureRuntimeConflictException(
-                    CaptureRuntimeConflictClassifier.QueuedSourceEvidenceChanged(
-                        queued.SourcePosition));
-            }
-
-            var terminal = (CaptureSourcePositionOutcome.Terminal)outcome;
-            BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
-                CaptureFidelityPolicy.SerializeForTransport(
-                    terminal.Observation,
-                    maxTransportBytes);
-            string observationJson = bounded.Serialized;
+            CaptureSourcePositionOutcome.Terminal terminal;
+            string observationJson;
             // Fail closed before the observation leaves the process: the scan
             // runs here, and a scan FAILURE — an exhausted budget, a matcher
             // timeout, an internal scanner error, or an unusable rule set —
@@ -115,8 +103,40 @@ public static class DisabledCaptureRuntime
             // on the wire; observations already compacted for the transport
             // limit carry that omission instead. The server remains the sole
             // author of canonical scan provenance in either case.
-            safetyGate.AssertObservationWithinBudget(observationJson);
-            string candidateJson = safetyGate.ScanJson(observationJson).Redacted;
+            string candidateJson;
+            try
+            {
+                var outcome = adapter.Adapt(sourceRecord);
+                if (outcome is CaptureSourcePositionOutcome.Incomplete)
+                {
+                    throw new CaptureRuntimeConflictException(
+                        CaptureRuntimeConflictClassifier.QueuedSourceEvidenceChanged(
+                            queued.SourcePosition));
+                }
+
+                terminal = (CaptureSourcePositionOutcome.Terminal)outcome;
+                BoundedCaptureRepresentation<CaptureObservationRequest> bounded =
+                    CaptureFidelityPolicy.SerializeForTransport(
+                        terminal.Observation,
+                        maxTransportBytes);
+                observationJson = bounded.Serialized;
+                safetyGate.AssertObservationWithinBudget(observationJson);
+                candidateJson = safetyGate.ScanJson(observationJson).Redacted;
+            }
+            catch (SafetyConfigurationException failure)
+            {
+                failure.ReportCaptureOutcome(
+                    adapter.Harness,
+                    evidence.ByteLength);
+                throw;
+            }
+            catch (SafetyScanException failure)
+            {
+                failure.ReportCaptureOutcome(
+                    adapter.Harness,
+                    evidence.ByteLength);
+                throw;
+            }
             if (!string.Equals(
                     candidateJson, queued.RedactedSafeCandidate, StringComparison.Ordinal))
             {

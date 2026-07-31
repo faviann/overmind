@@ -37,20 +37,20 @@ internal static class SafetyMarkers
 internal static class OmissionReasons
 {
     /// <summary>The leaf is larger than the versioned per-leaf byte budget.</summary>
-    public const string LeafExceedsLimit = "leaf_exceeds_limit";
+    public const string LeafExceedsLimit = CaptureOutcomeReason.LeafExceedsLimit;
 
     /// <summary>A sensitive property name carried a non-string scalar; there is no span to map.</summary>
-    public const string SensitiveFieldScalar = "sensitive_field_scalar";
+    public const string SensitiveFieldScalar = CaptureOutcomeReason.SensitiveFieldScalar;
 
     /// <summary>A sensitive property name carried an object or array; a subtree has no exact span.</summary>
-    public const string SensitiveFieldSubtree = "sensitive_field_subtree";
+    public const string SensitiveFieldSubtree = CaptureOutcomeReason.SensitiveFieldSubtree;
 
     /// <summary>
     /// Two sibling property names became the same text after redaction. Writing
     /// both would emit a duplicate JSON key and silently lose one value on
     /// re-parse, so the whole object is dropped instead.
     /// </summary>
-    public const string RedactedNameCollision = "redacted_name_collision";
+    public const string RedactedNameCollision = CaptureOutcomeReason.RedactedNameCollision;
 }
 
 /// <summary>
@@ -104,7 +104,13 @@ internal static class MatchRanking
 /// <see cref="ScanBudgetState"/> that fails the whole scan closed when a budget
 /// is exhausted.
 /// </summary>
-internal sealed class SecretScanner
+internal interface ISafetyScanner
+{
+    LeafOutcome ScanLeaf(string value, string? propertyName, ScanBudgetState state);
+    bool IsSensitiveField(string propertyName, ScanBudgetState state);
+}
+
+internal sealed class SecretScanner : ISafetyScanner
 {
     private const string LiteralRuleId = "operator-literal";
 
@@ -139,9 +145,10 @@ internal sealed class SecretScanner
     public LeafOutcome ScanLeaf(string value, string? propertyName, ScanBudgetState state)
     {
         state.CheckDeadline();
-        if (Encoding.UTF8.GetByteCount(value) > _budgets.MaxLeafBytes)
+        long byteCount = Encoding.UTF8.GetByteCount(value);
+        if (byteCount > _budgets.MaxLeafBytes)
         {
-            return LeafOutcome.Omitted(OmissionReasons.LeafExceedsLimit);
+            return LeafOutcome.Omitted(OmissionReasons.LeafExceedsLimit, byteCount);
         }
 
         var matches = new List<SpanMatch>();
@@ -433,7 +440,9 @@ internal sealed class SecretScanner
     }
 
     private static SafetyScanException MatcherTimedOut(string subject) =>
-        new($"{subject} exceeded its matcher timeout");
+        new(
+            CaptureOutcomeReason.MatcherTimeout,
+            $"{subject} exceeded its matcher timeout");
 
     /// <summary>
     /// The decodings of one candidate: one for percent and Base64, and for an
@@ -609,6 +618,7 @@ internal sealed class SecretScanner
 internal sealed record LeafOutcome(
     string? Value,
     string? OmissionReason,
+    long? OmittedByteCount,
     IReadOnlyCollection<string> RuleIds,
     IReadOnlyCollection<string> Categories,
     int RedactionCount,
@@ -621,9 +631,10 @@ internal sealed record LeafOutcome(
         IReadOnlyCollection<string> ruleIds,
         IReadOnlyCollection<string> categories,
         int redactionCount,
-        PrimaryMatch? primary) => new(value, null, ruleIds, categories, redactionCount, primary);
+        PrimaryMatch? primary) => new(value, null, null, ruleIds, categories, redactionCount, primary);
 
-    public static LeafOutcome Omitted(string reason) => new(null, reason, [], [], 0, null);
+    public static LeafOutcome Omitted(string reason, long? originalByteCount = null) =>
+        new(null, reason, originalByteCount, [], [], 0, null);
 }
 
 /// <summary>
@@ -642,6 +653,7 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         if (_clock.Elapsed > budgets.MaxScanTime)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the total scan-time budget of {budgets.MaxScanTime.TotalMilliseconds:0}ms was exceeded");
         }
     }
@@ -651,6 +663,7 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         if (++_matches > budgets.MaxMatches)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the match-count budget of {budgets.MaxMatches} was exceeded");
         }
     }
@@ -660,6 +673,7 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         if (++_decoderCandidates > budgets.MaxDecoderCandidates)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the decoder-candidate budget of {budgets.MaxDecoderCandidates} was exceeded");
         }
     }
@@ -670,6 +684,7 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         if (_decodedBytes > budgets.MaxDecodedBytes)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 $"the total-decoded-byte budget of {budgets.MaxDecodedBytes} was exceeded");
         }
     }

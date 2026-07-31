@@ -25,6 +25,31 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureObservationCommand command,
         CancellationToken cancellationToken = default)
     {
+        try
+        {
+            return await ImportCoreAsync(binding, command, cancellationToken);
+        }
+        catch (SafetyConfigurationException failure)
+        {
+            failure.ReportCaptureOutcome(
+                command.Source.Harness,
+                SourceByteCountOrUnknown(command));
+            throw;
+        }
+        catch (SafetyScanException failure)
+        {
+            failure.ReportCaptureOutcome(
+                command.Source.Harness,
+                SourceByteCountOrUnknown(command));
+            throw;
+        }
+    }
+
+    private async Task<CaptureImportReceipt> ImportCoreAsync(
+        CaptureBindingContext binding,
+        CaptureObservationCommand command,
+        CancellationToken cancellationToken)
+    {
         CaptureLedger.RequireSafetyConfigured(neverStore);
         ValidateMandatory(binding, command);
         CaptureObservationCommand originalCommand = command;
@@ -40,6 +65,38 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         string inputJson = bounded.Serialized;
         long originalByteCount = bounded.OriginalByteCount;
         command = bounded.Observation;
+        var captureOutcomes = new List<CaptureOutcomeRecord>();
+        string? compatiblePreclassifiedReason = null;
+        bool canCarryCompatiblePreclassification =
+            string.Equals(
+                originalCommand.Adapter.Name,
+                "capture-fidelity-policy",
+                StringComparison.Ordinal)
+            || originalCommand.Source.RecordType is
+                "malformed_json" or "source_record_omission";
+        if (originalCommand.AdapterOutcome is null
+            && canCarryCompatiblePreclassification
+            && CaptureFidelityPolicy.ClassifyDeterministicFidelity(originalCommand)
+                is { } compatiblePreclassified)
+        {
+            compatiblePreclassifiedReason = compatiblePreclassified.Reason;
+            captureOutcomes.Add(CaptureOutcomeAggregation.FidelityOmission(
+                originalCommand.Source.Harness,
+                compatiblePreclassified.Reason,
+                compatiblePreclassified.OriginalByteCount));
+        }
+        if (bounded.WasOmitted)
+        {
+            captureOutcomes.Add(CaptureOutcomeAggregation.FidelityOmission(
+                command.Source.Harness,
+                CaptureFidelityPolicy.ContentLimitReason,
+                originalByteCount));
+        }
+        captureOutcomes.AddRange(binaryFidelity.OriginalByteCounts.Select(binaryByteCount =>
+                CaptureOutcomeAggregation.FidelityOmission(
+                    command.Source.Harness,
+                    CaptureFidelityPolicy.UnsupportedBinaryReason,
+                    binaryByteCount)));
         ValidateSemantic(command);
         CaptureObservationCommand signatureCommand =
             bounded.WasOmitted || binaryFidelity.WasOmitted
@@ -71,6 +128,10 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (binaryFidelity.WasOmitted)
         {
             scan.Omit(CaptureFidelityPolicy.UnsupportedBinaryReason);
+        }
+        if (compatiblePreclassifiedReason is not null)
+        {
+            scan.Omit(compatiblePreclassifiedReason);
         }
         AssertSafe(command.SourceIdentity.ExternalSessionId, scan);
         if (command.SourceIdentity.ChildId is not null)
@@ -125,6 +186,14 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                     ? null
                     : Redact(relationship.Target.Kind, scan))).ToArray()
         )).ToArray();
+        captureOutcomes.AddRange(scan.OmissionOccurrences.Select(omission =>
+            CaptureOutcomeAggregation.FidelityOmission(
+                command.Source.Harness,
+                omission.Reason,
+                omission.OriginalByteCount)));
+        CaptureOutcomeSummary captureOutcome = CaptureOutcomeAggregation.Merge(
+            command.AdapterOutcome ?? CaptureOutcomeAggregation.Empty,
+            [.. captureOutcomes]);
 
         var locator = command.Locator.ToColumns();
         await using var connection = new NpgsqlConnection(connectionString);
@@ -253,10 +322,13 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                     connection, locatorMatch.ObservationUuid, transaction);
                 var oldEvents = await CaptureLedger.LoadEventsAsync(
                     connection, locatorMatch.ObservationUuid, transaction);
+                CaptureOutcomeSummary oldOutcome = await CaptureLedger.LoadOutcomeAsync(
+                    connection, locatorMatch.ObservationUuid, transaction);
                 await transaction.CommitAsync(cancellationToken);
                 return new CaptureImportReceipt(
                     locatorMatch.ObservationUuid, "already_accepted", locatorMatch.SourcePosition,
-                    stream.EffectiveNamespace, "established", oldObservation!, oldEvents);
+                    stream.EffectiveNamespace, "established", oldObservation!, oldEvents,
+                    oldOutcome);
             }
 
             await transaction.RollbackAsync(cancellationToken);
@@ -281,7 +353,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                source_timestamp_raw, source_timestamp_parsed, content_signature,
                effective_namespace, route_basis, source, route_evidence, adapter, safe_source_payload,
                scan_status, scan_rule_set_version, scan_rule_ids, scan_categories,
-               scan_redaction_count)
+               scan_redaction_count, capture_outcome)
             VALUES
               (@StreamUuid, @SourcePosition, @Kind, @NativeId,
                @ByteOffset, @ByteLength, @SourceTimestampRaw, @SourceTimestampParsed,
@@ -289,7 +361,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                @EffectiveNamespace, @RouteBasis, CAST(@source AS jsonb),
                CAST(@routeEvidence AS jsonb), CAST(@adapter AS jsonb),
                CAST(@safePayload AS jsonb), @ScanStatus, @RuleSetVersion, @RuleIds,
-               @Categories, @RedactionCount)
+               @Categories, @RedactionCount, CAST(@captureOutcome AS jsonb))
             RETURNING observation_uuid
             """,
             new
@@ -313,7 +385,9 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 scan.RuleSetVersion,
                 RuleIds = scan.RuleIds.ToArray(),
                 Categories = scan.Categories.ToArray(),
-                scan.RedactionCount
+                scan.RedactionCount,
+                captureOutcome = JsonSerializer.Serialize(
+                    captureOutcome, CaptureLedger.JsonOptions)
             }, transaction);
 
         foreach (var safeEvent in safeEvents)
@@ -378,8 +452,14 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         await transaction.CommitAsync(cancellationToken);
         return new CaptureImportReceipt(
             observationUuid, "new", command.SourcePosition,
-            stream.EffectiveNamespace, publicRouteBasis, observation!, receipts);
+            stream.EffectiveNamespace, publicRouteBasis, observation!, receipts,
+            captureOutcome);
     }
+
+    private static long? SourceByteCountOrUnknown(CaptureObservationCommand command) =>
+        command.Locator is CaptureSourceLocator.ByteRange range
+            ? range.Length
+            : null;
 
     private static CaptureConflictException ConflictAt(CaptureObservationCommand command) =>
         new("accepted_source_conflict",
@@ -404,6 +484,24 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         if (!string.Equals(binding.Harness, command.Source.Harness, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Source harness does not match the authenticated binding.");
+        }
+        if (command.AdapterOutcome is { } adapterOutcome)
+        {
+            string outcomeHarness = command.Source.Harness switch
+            {
+                "codex" => "codex",
+                "claude" or "claude_code" => "claude_code",
+                _ => "other"
+            };
+            if (adapterOutcome.CaptureHealth != "healthy"
+                || adapterOutcome.Counters.Any(counter =>
+                    counter.Class != CaptureOutcomeAggregation.FidelityOmissionClass
+                    || counter.Harness != outcomeHarness
+                    || !CaptureOutcomeReason.IsAdapterFidelity(counter.Reason)))
+            {
+                throw new ArgumentException(
+                    "Adapter outcome is not a valid deterministic fidelity projection.");
+            }
         }
         if (command.SourcePosition < 0)
         {
@@ -648,6 +746,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         public SortedSet<string> Categories { get; } = new(StringComparer.Ordinal);
         public int RedactionCount { get; private set; }
         public SortedSet<string> Omissions { get; } = new(StringComparer.Ordinal);
+        public List<CaptureScanOmission> OmissionOccurrences { get; } = [];
 
         // Provenance only: rule ids, categories, counts, and omission reasons.
         // Never the matched value, an unsafe excerpt, or a content digest.
@@ -665,6 +764,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 Omissions.Add(reason);
                 RuleIds.Add($"omission:{reason}");
             }
+            OmissionOccurrences.AddRange(scan.Omissions);
         }
 
         public void Omit(string reason)

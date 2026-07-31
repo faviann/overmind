@@ -25,6 +25,7 @@ internal sealed class GovernedDeadline
         if (_timeProvider.GetElapsedTime(_startedAt) > _budget)
         {
             throw new SafetyScanException(
+                CaptureOutcomeReason.ScanBudgetExhausted,
                 "capture serialization exceeded the governed " +
                 $"{_budget.TotalSeconds:0}-second deadline");
         }

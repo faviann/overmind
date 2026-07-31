@@ -16,7 +16,7 @@ Source interpretation before this spine is described by the
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
-| `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
+| `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement + trusted source provenance\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `ContainsUnsupportedBinaryOmission(command)`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>`; `ReplaySourceStreamAsync(sourceStreamUuid)` → `CapturedSourceStreamReplay`; `NavigateCapturedSessionAsync(sourceStreamUuid, allowedNamespaces)` → `CapturedSessionNavigation` | `memctl capture receipt`; `memctl capture replay`; `memctl capture navigate` |
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
@@ -71,10 +71,16 @@ replay evidence under `capture_fidelity_omission`, adding the lowest numeric
 suffix when that name is already source-owned, so a source-stated `omission`
 and every other safe sibling remain unchanged. Operator replay therefore
 distinguishes source evidence from the policy-owned omission explicitly.
-Only direct `signature` and `encrypted_content` children of the known Codex
-`response_item` reasoning payload (including its adapter-owned opaque event
-envelope) remain ordinary opaque evidence; the same property names elsewhere
-grant no exemption.
+Every such omission repeats the trusted observation's external session,
+optional child, source position, and locator kind. Optional block-local path
+and identity evidence remains separately replayable. The policy's
+`ContainsUnsupportedBinaryOmission` outcome is the only compatibility
+recognizer: it accepts the exact base field or the lowest occupied numeric
+suffix with the complete current policy shape, never a broad name prefix.
+Only direct `signature` and `encrypted_content` children reached from the root
+Codex `response_item` reasoning payload or the root adapter-owned opaque event
+envelope remain ordinary opaque evidence; nested source objects cannot mint
+either root context for themselves.
 
 **`NeverStoreGate`** — the single governed policy point every write path
 crosses, and the only type that knows rules exist. It hides the rule-set schema

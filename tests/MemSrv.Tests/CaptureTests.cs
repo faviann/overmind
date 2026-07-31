@@ -166,6 +166,16 @@ public sealed class CaptureTests : HttpSeamTestBase
                 .GetProperty("reason").GetString());
         Assert.Equal(4, safeBlock.GetProperty("capture_fidelity_omission")
             .GetProperty("originalByteCount").GetInt64());
+        JsonElement omissionIdentity = safeBlock
+            .GetProperty("capture_fidelity_omission")
+            .GetProperty("sourceIdentity");
+        Assert.Equal(
+            sourceSessionId,
+            omissionIdentity.GetProperty("externalSessionId").GetString());
+        Assert.Equal(0, omissionIdentity.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal(
+            "native_id",
+            omissionIdentity.GetProperty("locatorKind").GetString());
         Assert.Equal("Visible image alt text.", safeBlock.GetProperty("text").GetString());
         Assert.Contains(
             $"omission:{CaptureFidelityPolicy.UnsupportedBinaryReason}",
@@ -206,6 +216,20 @@ public sealed class CaptureTests : HttpSeamTestBase
             "authenticated-api",
             replayed.GetProperty("capture_provenance").GetProperty("origin").GetString());
         Assert.Equal("Visible image alt text.", replayed.GetProperty("text").GetString());
+        JsonElement replayedIdentity = replayed
+            .GetProperty("capture_fidelity_omission")
+            .GetProperty("sourceIdentity");
+        Assert.Equal(
+            sourceSessionId,
+            replayedIdentity.GetProperty("externalSessionId").GetString());
+        Assert.Equal(0, replayedIdentity.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal(
+            "native_id",
+            replayedIdentity.GetProperty("locatorKind").GetString());
+        Assert.Equal(
+            "image-api-1",
+            replayed.GetProperty("capture_fidelity_omission")
+                .GetProperty("localSourceIdentity").GetString());
     }
 
     [Fact]
@@ -213,43 +237,68 @@ public sealed class CaptureTests : HttpSeamTestBase
     {
         string captureKey = CaptureCredential();
         await EnrollAsync($"binary-media-fixture-{Guid.NewGuid():N}", captureKey);
-        string fixture = Path.Combine(
-            _root,
-            "fixtures/adapter-conformance/codex-cli-0.146.binary-media.synthetic.jsonl");
-        string stateDirectory = Path.Combine(
+        string directory = Path.Combine(
             Path.GetTempPath(), $"binary-media-fixture-{Guid.NewGuid():N}");
+        string transcriptRoot = Path.Combine(directory, "transcripts");
+        string archive = Path.Combine(transcriptRoot, "archived_sessions");
+        string fixture = Path.Combine(archive, "binary-media.jsonl");
+        string firstStateDirectory = Path.Combine(directory, "state-first");
+        string retryStateDirectory = Path.Combine(directory, "state-retry");
+        Directory.CreateDirectory(archive);
+        File.Copy(
+            Path.Combine(
+                _root,
+                "fixtures/adapter-conformance/codex-cli-0.146.binary-media.synthetic.jsonl"),
+            fixture);
+
+        Dictionary<string, string> EnvironmentFor(string stateDirectory) => new()
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = _baseUrl,
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = transcriptRoot,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory,
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        async Task<JsonElement[]> CaptureAsync(
+            string stateDirectory,
+            string expectedStatus)
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(
+                EnvironmentFor(stateDirectory));
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            try
+            {
+                var receipts = new JsonElement[11];
+                for (int index = 0; index < receipts.Length; index++)
+                {
+                    receipts[index] = await ReadTracerReceiptAsync(process);
+                }
+                Assert.All(
+                    receipts,
+                    receipt => Assert.Equal(
+                        expectedStatus,
+                        receipt.GetProperty("status").GetString()));
+                return receipts;
+            }
+            finally
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+                await stderr;
+            }
+        }
 
         try
         {
-            var adapter = new CodexJsonlAdapter();
-            var state = new FileCaptureRuntimeState(stateDirectory);
-            const string sourceStream = "codex-0.146-binary-media-fixture";
-            IReadOnlyList<CaptureRuntimeQueueItem> claims =
-                await CodexCaptureClaimer.ClaimCompletedAsync(
-                    adapter,
-                    fixture,
-                    sourceStream,
-                    state,
-                    SafetyGate(),
-                    terminalAtEndOfFile: true);
-            IReadOnlyList<string> responseLines =
-                await DisabledCaptureRuntime.RunClaimedFixtureAsync(
-                    adapter,
-                    fixture,
-                    sourceStream,
-                    claims,
-                    new Uri(_baseUrl),
-                    captureKey,
-                    SafetyGate(),
-                    (_, _, _) => Task.CompletedTask,
-                    terminalAtEndOfFile: true);
-            JsonElement[] receipts = responseLines.Select(
-                    line => JsonDocument.Parse(line).RootElement.Clone())
-                .ToArray();
-
-            Assert.Equal(10, receipts.Length);
-            Assert.All(receipts, receipt =>
-                Assert.Equal("new", receipt.GetProperty("status").GetString()));
+            JsonElement[] receipts = await CaptureAsync(
+                firstStateDirectory,
+                "new");
             for (int index = 0; index < 5; index++)
             {
                 JsonElement block = receipts[index].GetProperty("observation")
@@ -260,6 +309,17 @@ public sealed class CaptureTests : HttpSeamTestBase
                     CaptureFidelityPolicy.UnsupportedBinaryReason,
                     block.GetProperty("capture_fidelity_omission")
                         .GetProperty("reason").GetString());
+                JsonElement sourceIdentity = block
+                    .GetProperty("capture_fidelity_omission")
+                    .GetProperty("sourceIdentity");
+                Assert.False(string.IsNullOrWhiteSpace(
+                    sourceIdentity.GetProperty("externalSessionId").GetString()));
+                Assert.Equal(
+                    index,
+                    sourceIdentity.GetProperty("sourcePosition").GetInt64());
+                Assert.Equal(
+                    "byte_range",
+                    sourceIdentity.GetProperty("locatorKind").GetString());
                 string shown = await RunMemCtlAsync(
                     "capture",
                     "receipt",
@@ -275,14 +335,64 @@ public sealed class CaptureTests : HttpSeamTestBase
             Assert.Contains("\"signature\"", signatureShown, StringComparison.Ordinal);
             Assert.Contains("\"byte_payload\":[11,22,33]", signatureShown, StringComparison.Ordinal);
             Assert.Contains("\"value\":\"synthetic-signature-only\"", signatureShown);
+            Assert.Contains(
+                "\"encrypted_content\"",
+                signatureShown,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "\"byte_payload\":[44,55]",
+                signatureShown,
+                StringComparison.Ordinal);
             Assert.DoesNotContain(
                 $"\"reason\":\"{CaptureFidelityPolicy.UnsupportedBinaryReason}\"",
                 signatureShown,
                 StringComparison.Ordinal);
+
+            string spoofedShown = await RunMemCtlAsync(
+                "capture",
+                "receipt",
+                receipts[10].GetProperty("observationUuid").GetGuid().ToString());
+            Assert.DoesNotContain("[61,62]", spoofedShown, StringComparison.Ordinal);
+            Assert.Contains(
+                $"\"reason\":\"{CaptureFidelityPolicy.UnsupportedBinaryReason}\"",
+                spoofedShown,
+                StringComparison.Ordinal);
+
+            CaptureRuntimeStreamState firstState = Assert.Single(
+                (await new FileCaptureRuntimeState(firstStateDirectory).ReadAsync()).Streams);
+            Assert.Equal(10, firstState.EnqueuedThrough);
+            Assert.Empty(firstState.Queue);
+            Assert.Equal(10, firstState.LastServerReceipt?.SourcePosition);
+            string durableRuntimeState = await File.ReadAllTextAsync(
+                Path.Combine(firstStateDirectory, "capture-state.json"));
+            foreach (string omittedBytes in new[]
+                {
+                    "[1,2,3,4]",
+                    "[5,6,7]",
+                    "[77,90]",
+                    "[137,80,78,71]",
+                    "[82,73,70,70,1]",
+                    "[61,62]"
+                })
+            {
+                Assert.DoesNotContain(
+                    omittedBytes,
+                    durableRuntimeState,
+                    StringComparison.Ordinal);
+            }
+
+            JsonElement[] retried = await CaptureAsync(
+                retryStateDirectory,
+                "already_accepted");
+            Assert.Equal(
+                receipts.Select(item =>
+                    item.GetProperty("observationUuid").GetGuid()),
+                retried.Select(item =>
+                    item.GetProperty("observationUuid").GetGuid()));
         }
         finally
         {
-            Directory.Delete(stateDirectory, recursive: true);
+            Directory.Delete(directory, recursive: true);
         }
     }
 

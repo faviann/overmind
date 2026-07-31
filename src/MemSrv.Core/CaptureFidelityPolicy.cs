@@ -9,7 +9,7 @@ namespace MemSrv.Core;
 /// </summary>
 public static class CaptureFidelityPolicy
 {
-    public const string CurrentVersion = "capture-fidelity/2026-07-31.6";
+    public const string CurrentVersion = "capture-fidelity/2026-07-31.7";
     public const int ProductionTransportBytes = 1_000_000;
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
@@ -36,6 +36,9 @@ public static class CaptureFidelityPolicy
         OmitUnsupportedBinaryContent(
             JsonElement sourcePayload,
             string harness,
+            CaptureSourceIdentity sourceIdentity,
+            long sourcePosition,
+            string? locatorKind,
             long maxBytes)
     {
         if (maxBytes <= 0)
@@ -50,6 +53,9 @@ public static class CaptureFidelityPolicy
         RewrittenJson rewritten = RewriteUnsupportedBinaryContent(
             sourcePayload,
             harness,
+            sourceIdentity,
+            sourcePosition,
+            locatorKind,
             effectiveBound);
         if (rewritten.ExceededBound)
         {
@@ -77,6 +83,9 @@ public static class CaptureFidelityPolicy
         RewrittenJson rewrittenSource = RewriteUnsupportedBinaryContent(
             observation.SourcePayload,
             observation.Source.Harness,
+            observation.SourceIdentity,
+            observation.SourcePosition,
+            observation.Locator.Kind,
             remaining);
         if (rewrittenSource.ExceededBound)
         {
@@ -96,6 +105,9 @@ public static class CaptureFidelityPolicy
             RewrittenJson rewrittenPayload = RewriteUnsupportedBinaryContent(
                 item.Payload,
                 observation.Source.Harness,
+                observation.SourceIdentity,
+                observation.SourcePosition,
+                observation.Locator.Kind,
                 remaining);
             if (rewrittenPayload.ExceededBound)
             {
@@ -114,6 +126,16 @@ public static class CaptureFidelityPolicy
             },
             omissionCount);
     }
+
+    /// <summary>
+    /// Reports whether a command contains this policy's exact unsupported-binary
+    /// omission representation. Callers do not interpret policy-owned JSON.
+    /// </summary>
+    public static bool ContainsUnsupportedBinaryOmission(
+        CaptureObservationCommand observation) =>
+        ContainsUnsupportedBinaryOmission(observation.SourcePayload)
+        || observation.Events.Any(
+            item => ContainsUnsupportedBinaryOmission(item.Payload));
 
     public static BoundedCaptureRepresentation<CaptureObservationRequest>
         SerializeForTransport(
@@ -297,6 +319,9 @@ public static class CaptureFidelityPolicy
     private static RewrittenJson RewriteUnsupportedBinaryContent(
         JsonElement source,
         string harness,
+        CaptureSourceIdentity sourceIdentity,
+        long sourcePosition,
+        string? locatorKind,
         long maxBytes)
     {
         using (var deadline = new CountingSerializationStream(
@@ -306,7 +331,8 @@ public static class CaptureFidelityPolicy
                 source,
                 harness,
                 deadline,
-                inKnownCodexReasoningPayload: false);
+                inKnownCodexReasoningPayload: false,
+                isRoot: true);
             deadline.AssertWithinDeadline();
             if (candidates == 0)
             {
@@ -325,7 +351,12 @@ public static class CaptureFidelityPolicy
                 SafetyBudgets.Default.MaxScanTime);
             using (var writer = new Utf8JsonWriter(stream))
             {
-                var state = new BinaryRewriteState(stream, harness);
+                var state = new BinaryRewriteState(
+                    stream,
+                    harness,
+                    sourceIdentity,
+                    sourcePosition,
+                    locatorKind);
                 WriteRewritten(source, writer, state, knownOpaqueMetadata: false);
                 writer.Flush();
                 stream.AssertWithinDeadline();
@@ -353,7 +384,8 @@ public static class CaptureFidelityPolicy
         JsonElement value,
         string harness,
         GovernedSerializationStream deadline,
-        bool inKnownCodexReasoningPayload)
+        bool inKnownCodexReasoningPayload,
+        bool isRoot)
     {
         deadline.AssertWithinDeadline();
         if (value.ValueKind == JsonValueKind.Array)
@@ -365,7 +397,8 @@ public static class CaptureFidelityPolicy
                     item,
                     harness,
                     deadline,
-                    inKnownCodexReasoningPayload: false);
+                    inKnownCodexReasoningPayload: false,
+                    isRoot: false);
             }
             return arrayCount;
         }
@@ -381,9 +414,11 @@ public static class CaptureFidelityPolicy
             out _);
         bool isCodexResponseItem = string.Equals(
                 harness, "codex", StringComparison.Ordinal)
+            && isRoot
             && HasString(value, "type", "response_item");
         bool isCodexReasoningOpaqueEnvelope = string.Equals(
                 harness, "codex", StringComparison.Ordinal)
+            && isRoot
             && HasString(value, "recordType", "response_item")
             && HasString(value, "payloadType", "reasoning");
         bool isCodexReasoningPayload = HasString(value, "type", "reasoning");
@@ -411,7 +446,8 @@ public static class CaptureFidelityPolicy
                 property.Value,
                 harness,
                 deadline,
-                childIsKnownReasoning);
+                childIsKnownReasoning,
+                isRoot: false);
         }
         return count;
     }
@@ -438,7 +474,9 @@ public static class CaptureFidelityPolicy
                 writer.WriteStartArray();
                 foreach (JsonElement item in value.EnumerateArray())
                 {
+                    state.Depth++;
                     WriteRewritten(item, writer, state, knownOpaqueMetadata: false);
+                    state.Depth--;
                 }
                 writer.WriteEndArray();
                 break;
@@ -460,9 +498,11 @@ public static class CaptureFidelityPolicy
             out long originalByteCount);
         bool isCodexResponseItem = string.Equals(
                 state.Harness, "codex", StringComparison.Ordinal)
+            && state.Depth == 0
             && HasString(value, "type", "response_item");
         bool isCodexReasoningOpaqueEnvelope = string.Equals(
                 state.Harness, "codex", StringComparison.Ordinal)
+            && state.Depth == 0
             && HasString(value, "recordType", "response_item")
             && HasString(value, "payloadType", "reasoning");
         bool isCodexReasoningPayload = HasString(value, "type", "reasoning");
@@ -487,11 +527,13 @@ public static class CaptureFidelityPolicy
                         && property.NameEquals("source")))
                 && property.Value.ValueKind == JsonValueKind.Object
                 && HasString(property.Value, "type", "reasoning");
+            state.Depth++;
             WriteRewritten(
                 property.Value,
                 writer,
                 state,
                 knownOpaqueMetadata);
+            state.Depth--;
             state.InCodexResponsePayload = priorContext;
         }
 
@@ -503,7 +545,10 @@ public static class CaptureFidelityPolicy
                 writer,
                 state.Stream,
                 category!,
-                originalByteCount);
+                originalByteCount,
+                state.SourceIdentity,
+                state.SourcePosition,
+                state.LocatorKind);
             state.OmissionCount++;
         }
         writer.WriteEndObject();
@@ -546,16 +591,34 @@ public static class CaptureFidelityPolicy
         Utf8JsonWriter writer,
         GovernedSerializationStream stream,
         string category,
-        long originalByteCount)
+        long originalByteCount,
+        CaptureSourceIdentity sourceIdentity,
+        long sourcePosition,
+        string? locatorKind)
     {
         writer.WriteStartObject();
         writer.WriteString("reason", UnsupportedBinaryReason);
         writer.WriteString("category", category);
         writer.WriteNumber("originalByteCount", originalByteCount);
         writer.WriteString("policyVersion", CurrentVersion);
+        writer.WritePropertyName("sourceIdentity");
+        writer.WriteStartObject();
+        writer.WriteString(
+            "externalSessionId",
+            sourceIdentity.ExternalSessionId);
+        if (sourceIdentity.ChildId is not null)
+        {
+            writer.WriteString("childId", sourceIdentity.ChildId);
+        }
+        writer.WriteNumber("sourcePosition", sourcePosition);
+        if (locatorKind is not null)
+        {
+            writer.WriteString("locatorKind", locatorKind);
+        }
+        writer.WriteEndObject();
         CopySafeProvenance(source, writer, "media_type", "mediaType");
         CopySafeProvenance(source, writer, "source_path", "sourcePath");
-        CopySafeProvenance(source, writer, "source_identity", "sourceIdentity");
+        CopySafeProvenance(source, writer, "source_identity", "localSourceIdentity");
         if (source.TryGetProperty(
                 "capture_provenance",
                 out JsonElement captureProvenance)
@@ -591,6 +654,92 @@ public static class CaptureFidelityPolicy
         }
         return candidate;
     }
+
+    private static bool ContainsUnsupportedBinaryOmission(JsonElement value)
+    {
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (JsonProperty property in value.EnumerateObject())
+                {
+                    if (IsPolicyOwnedBinaryOmissionField(
+                            value,
+                            property.Name,
+                            property.Value)
+                        || ContainsUnsupportedBinaryOmission(property.Value))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            case JsonValueKind.Array:
+                foreach (JsonElement item in value.EnumerateArray())
+                {
+                    if (ContainsUnsupportedBinaryOmission(item))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    private static bool IsPolicyOwnedBinaryOmissionField(
+        JsonElement parent,
+        string name,
+        JsonElement value)
+    {
+        if (!IsUnsupportedBinaryOmission(value))
+        {
+            return false;
+        }
+        if (string.Equals(name, BinaryOmissionField, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        string prefix = BinaryOmissionField + "_";
+        if (!name.StartsWith(prefix, StringComparison.Ordinal)
+            || !int.TryParse(
+                name.AsSpan(prefix.Length),
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out int suffix)
+            || suffix <= 0
+            || !string.Equals(
+                suffix.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                name[prefix.Length..],
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        for (int index = 0; index < suffix; index++)
+        {
+            string occupied = index == 0
+                ? BinaryOmissionField
+                : $"{BinaryOmissionField}_{index}";
+            if (!parent.TryGetProperty(occupied, out _))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool IsUnsupportedBinaryOmission(JsonElement value) =>
+        value.ValueKind == JsonValueKind.Object
+        && HasString(value, "reason", UnsupportedBinaryReason)
+        && value.TryGetProperty("category", out JsonElement category)
+        && category.ValueKind == JsonValueKind.String
+        && category.GetString() is { } categoryName
+        && UnsupportedBinaryCategories.Contains(categoryName)
+        && value.TryGetProperty("originalByteCount", out JsonElement byteCount)
+        && byteCount.TryGetInt64(out long count)
+        && count >= 0
+        && HasString(value, "policyVersion", CurrentVersion);
 
     private static bool HasString(
         JsonElement value,
@@ -634,10 +783,17 @@ public static class CaptureFidelityPolicy
 
     private sealed class BinaryRewriteState(
         GovernedSerializationStream stream,
-        string harness)
+        string harness,
+        CaptureSourceIdentity sourceIdentity,
+        long sourcePosition,
+        string? locatorKind)
     {
         public GovernedSerializationStream Stream { get; } = stream;
         public string Harness { get; } = harness;
+        public CaptureSourceIdentity SourceIdentity { get; } = sourceIdentity;
+        public long SourcePosition { get; } = sourcePosition;
+        public string? LocatorKind { get; } = locatorKind;
+        public int Depth { get; set; }
         public bool InCodexResponsePayload { get; set; }
         public int OmissionCount { get; set; }
     }

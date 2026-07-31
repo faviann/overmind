@@ -414,11 +414,11 @@ public sealed class CaptureRuntimeStateTests
                     gate,
                     terminalAtEndOfFile: true);
 
-            Assert.Equal(10, first.Count);
+            Assert.Equal(11, first.Count);
             Assert.Empty(retry);
             CaptureRuntimeStreamState durable = Assert.Single(
                 (await state.ReadAsync()).Streams);
-            Assert.Equal(10, durable.Queue.Count);
+            Assert.Equal(11, durable.Queue.Count);
             using JsonDocument queued = JsonDocument.Parse(
                 durable.Queue[0].RedactedSafeCandidate);
             JsonElement block = queued.RootElement.GetProperty("sourcePayload")
@@ -430,6 +430,16 @@ public sealed class CaptureRuntimeStateTests
                     .GetProperty("reason").GetString());
             Assert.Equal(4, block.GetProperty("capture_fidelity_omission")
                 .GetProperty("originalByteCount").GetInt64());
+            JsonElement sourceIdentity = block
+                .GetProperty("capture_fidelity_omission")
+                .GetProperty("sourceIdentity");
+            Assert.Equal(
+                "binary-media-runtime",
+                sourceIdentity.GetProperty("externalSessionId").GetString());
+            Assert.Equal(0, sourceIdentity.GetProperty("sourcePosition").GetInt64());
+            Assert.Equal(
+                "byte_range",
+                sourceIdentity.GetProperty("locatorKind").GetString());
             Assert.Equal("Visible attachment caption.", block.GetProperty("text").GetString());
 
             string durableJson = await File.ReadAllTextAsync(
@@ -727,6 +737,9 @@ public sealed class CaptureRuntimeStateTests
         CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
             JsonSerializer.SerializeToElement(new { type = "warm" }),
             "codex",
+            new CaptureSourceIdentity("warm-session"),
+            0,
+            "byte_range",
             CaptureFidelityPolicy.ProductionTransportBytes);
         long before = GC.GetAllocatedBytesForCurrentThread();
         var clock = Stopwatch.StartNew();
@@ -735,6 +748,9 @@ public sealed class CaptureRuntimeStateTests
             CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
                 payload,
                 "codex",
+                new CaptureSourceIdentity("pathological-session", "child-1"),
+                17,
+                "byte_range",
                 CaptureFidelityPolicy.ProductionTransportBytes);
 
         clock.Stop();
@@ -754,6 +770,68 @@ public sealed class CaptureRuntimeStateTests
             8L * 1024 * 1024,
             block.GetProperty("capture_fidelity_omission")
                 .GetProperty("originalByteCount").GetInt64());
+        JsonElement sourceIdentity = block.GetProperty("capture_fidelity_omission")
+            .GetProperty("sourceIdentity");
+        Assert.Equal(
+            "pathological-session",
+            sourceIdentity.GetProperty("externalSessionId").GetString());
+        Assert.Equal("child-1", sourceIdentity.GetProperty("childId").GetString());
+        Assert.Equal(17, sourceIdentity.GetProperty("sourcePosition").GetInt64());
+        Assert.Equal("byte_range", sourceIdentity.GetProperty("locatorKind").GetString());
+    }
+
+    [Fact]
+    public void BinaryOmissionRecognitionAcceptsOnlyPolicyOwnedFieldNames()
+    {
+        CaptureObservationCommand Command(JsonElement payload) => new(
+            1,
+            new CaptureSourceIdentity("recognition-session"),
+            0,
+            new CaptureSourceLocator.NativeId("recognition-record"),
+            null,
+            new CaptureSource("codex", "0.146.synthetic", "response_item"),
+            new CaptureAdapter("codex-synthetic-jsonl", "9"),
+            payload,
+            [
+                new CaptureEvent(
+                    "opaque/0",
+                    0,
+                    "opaque",
+                    "unknown",
+                    JsonSerializer.SerializeToElement(new { }),
+                    null,
+                    [])
+            ],
+            null);
+
+        object omission = new
+        {
+            reason = CaptureFidelityPolicy.UnsupportedBinaryReason,
+            category = "image",
+            originalByteCount = 2,
+            policyVersion = CaptureFidelityPolicy.CurrentVersion
+        };
+        Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission_note = omission
+            }))));
+        Assert.True(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission = omission
+            }))));
+        Assert.True(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission = new { source = "collision" },
+                capture_fidelity_omission_1 = omission
+            }))));
+        Assert.False(CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(
+            Command(JsonSerializer.SerializeToElement(new
+            {
+                capture_fidelity_omission_2 = omission
+            }))));
     }
 
     [Fact]

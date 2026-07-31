@@ -793,7 +793,7 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             .Select(Assert.IsType<CaptureSourcePositionOutcome.Terminal>)
             .ToArray();
 
-        Assert.Equal(10, terminal.Length);
+        Assert.Equal(11, terminal.Length);
         string[] categories = ["attachment", "archive", "executable", "image", "audio"];
         long[] byteCounts = [4, 3, 2, 4, 5];
         string[] provenanceOrigins =
@@ -839,6 +839,18 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             Assert.Equal(
                 CaptureFidelityPolicy.CurrentVersion,
                 omission.GetProperty("policyVersion").GetString());
+            JsonElement sourceIdentity = omission.GetProperty("sourceIdentity");
+            Assert.Equal(
+                "synthetic-codex-binary-media",
+                sourceIdentity.GetProperty("externalSessionId").GetString());
+            Assert.False(sourceIdentity.TryGetProperty("childId", out _));
+            Assert.Equal(index, sourceIdentity.GetProperty("sourcePosition").GetInt64());
+            Assert.Equal(
+                "byte_range",
+                sourceIdentity.GetProperty("locatorKind").GetString());
+            Assert.Equal(
+                block.GetProperty("source_identity").GetString(),
+                omission.GetProperty("localSourceIdentity").GetString());
             Assert.False(omission.TryGetProperty("excerpt", out _));
             Assert.False(omission.TryGetProperty("digest", out _));
         }
@@ -899,6 +911,15 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
             2,
             sourceOmission.GetProperty("capture_fidelity_omission_1")
                 .GetProperty("originalByteCount").GetInt64());
+
+        JsonElement spoofedNestedSignature = terminal[10].Observation.SourcePayload
+            .GetProperty("payload").GetProperty("content")[0]
+            .GetProperty("payload").GetProperty("signature");
+        Assert.False(spoofedNestedSignature.TryGetProperty("byte_payload", out _));
+        Assert.Equal(
+            CaptureFidelityPolicy.UnsupportedBinaryReason,
+            spoofedNestedSignature.GetProperty("capture_fidelity_omission")
+                .GetProperty("reason").GetString());
     }
 
     [Fact]

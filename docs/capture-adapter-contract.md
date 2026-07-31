@@ -97,14 +97,17 @@ Adapters are versioned tolerant tagged unions:
   local durable queue, capture removes only `byte_payload` and adds the
   content-free `unsupported_binary_content` fidelity omission under the
   non-colliding policy-owned `capture_fidelity_omission` field (or its lowest
-  numeric suffix) with the exact array length, category, policy version, and
-  available source-stated media type, path, identity, and capture provenance.
+  numeric suffix) with the exact array length, category, policy version, the
+  trusted external session, optional child, source position and locator kind,
+  plus available source-stated media type, local path, local identity, and
+  capture provenance.
   Safe sibling metadata, a source-stated `omission`, and model-visible `text`
   remain ordinary replayable evidence. Untagged values and malformed byte
   representations are not classified by this union. Only direct `signature`
-  and `encrypted_content` children of the known Codex reasoning payload and
-  its adapter-owned opaque envelope remain ordinary metadata; the same names
-  in arbitrary objects do not exempt a nested valid `binary_content`;
+  and `encrypted_content` children reached from the root known Codex reasoning
+  payload or the root adapter-owned opaque envelope remain ordinary metadata;
+  nested objects cannot self-assert either wrapper, and the same names in
+  arbitrary objects do not exempt a nested valid `binary_content`;
   there is no extension, entropy, or generic string classifier;
 - Codex response items explicitly tagged `reasoning` preserve explicitly tagged
   `summary_text` and `reasoning_text` blocks as canonical `reasoning`; encrypted
@@ -236,8 +239,12 @@ boundary view paired with canonical `compacted` summary/history evidence. The
 parallel and out-of-order native identities, missing names, string and
 structured values, explicit canonical outcomes, and visible turn abort/error
 records. The 0.146 binary/media family covers all five closed unsupported-byte
-categories, safe metadata and model-visible text retention, content-free
-original-byte-count omissions, and an opaque signature-shaped negative control.
+categories, mandatory trusted source identity, safe metadata and model-visible
+text retention, content-free original-byte-count omissions, root opaque
+signature/encrypted negative controls, and a spoofed nested-wrapper regression.
+The built `CodexCaptureTracer` consumes this family through scheduled transcript
+discovery, authenticated capture, deterministic retry, and `memctl` operator
+receipt reads; the legacy three-record compatibility fixture remains unchanged.
 
 The five version-labelled relationship families cover parent-only, fork-only,
 combined parent/fork, nested spawn, and no-parent shapes. They assert the

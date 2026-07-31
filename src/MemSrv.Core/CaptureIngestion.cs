@@ -488,7 +488,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             "7" => PreVersion7CodexAdapterVersions,
             "8" => [.. PreVersion7CodexAdapterVersions, "7"],
             "9" when binaryFidelityWasOmitted
-                || HasBinaryFidelityRepresentation(command) => [],
+                || CaptureFidelityPolicy.ContainsUnsupportedBinaryOmission(command) => [],
             "9" => [.. PreVersion7CodexAdapterVersions, "7", "8"],
             _ => []
         };
@@ -523,59 +523,6 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         }
 
         return signatures;
-    }
-
-    private static bool HasBinaryFidelityRepresentation(
-        CaptureObservationCommand command)
-    {
-        if (ContainsBinaryFidelityRepresentation(command.SourcePayload))
-        {
-            return true;
-        }
-        return command.Events.Any(
-            item => ContainsBinaryFidelityRepresentation(item.Payload));
-    }
-
-    private static bool ContainsBinaryFidelityRepresentation(JsonElement value)
-    {
-        switch (value.ValueKind)
-        {
-            case JsonValueKind.Object:
-                foreach (JsonProperty property in value.EnumerateObject())
-                {
-                    if (property.Name.StartsWith(
-                            CaptureFidelityPolicy.BinaryOmissionField,
-                            StringComparison.Ordinal)
-                        && property.Value.ValueKind == JsonValueKind.Object
-                        && property.Value.TryGetProperty(
-                            "reason",
-                            out JsonElement reason)
-                        && reason.ValueKind == JsonValueKind.String
-                        && string.Equals(
-                            reason.GetString(),
-                            CaptureFidelityPolicy.UnsupportedBinaryReason,
-                            StringComparison.Ordinal))
-                    {
-                        return true;
-                    }
-                    if (ContainsBinaryFidelityRepresentation(property.Value))
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            case JsonValueKind.Array:
-                foreach (JsonElement item in value.EnumerateArray())
-                {
-                    if (ContainsBinaryFidelityRepresentation(item))
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            default:
-                return false;
-        }
     }
 
     private static string CanonicalSessionId(

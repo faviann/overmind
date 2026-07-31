@@ -24,6 +24,9 @@ public sealed class CodexJsonlAdapter : ICaptureSourceAdapter
             .OmitUnsupportedBinaryContent(
                 source.SourcePayload,
                 Harness,
+                source.SourceIdentity,
+                source.SourcePosition,
+                source.Locator.Kind,
                 CaptureFidelityPolicy.ProductionTransportBytes)
             .Observation;
         bool isObjectRecord = record.ValueKind == JsonValueKind.Object;

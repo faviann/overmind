@@ -63,6 +63,10 @@ applicable effective fidelity ceiling. It walks already-parsed JSON without
 constructing a raw string or mutable JSON tree. A record with no valid binary
 candidate is returned unchanged; a record with a candidate is streamed into a
 byte-capped rewritten representation while its validated byte array is skipped.
+The compact record repeats the trusted source identity and position (plus
+locator kind) from the adapter or authenticated ingestion command; it never
+depends on optional block-local identity. Root-only Codex reasoning envelope
+recognition prevents a nested object from exempting its bytes.
 If that rewritten representation crosses the effective ceiling, the ordinary
 transport/content serializer owns the deterministic whole-observation omission.
 Tests exercise a multi-megabyte valid byte array at the documented

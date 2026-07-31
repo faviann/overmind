@@ -4475,14 +4475,24 @@ public sealed class CaptureTests : HttpSeamTestBase
                 cli_version = "0.154.synthetic"
             }
         });
-        string readableMalformed = (await File.ReadAllTextAsync(Path.Combine(
+        string checkedInReadableMalformed = (await File.ReadAllTextAsync(Path.Combine(
             _root,
             "fixtures/adapter-conformance/codex-terminal-malformed-readable.synthetic.txt")))
             .TrimEnd('\r', '\n');
+        const string syntheticSecretPlaceholder = "__SYNTHETIC_AWS_KEY_ID__";
         const string seededSyntheticSecret = "AKIA" + "SYNTHETICFIXTURE";
-        string safeReadableMalformed = readableMalformed.Replace(
+        const string redactionMarker = "[REDACTED:aws-access-key-id]";
+        Assert.Contains(
+            syntheticSecretPlaceholder,
+            checkedInReadableMalformed,
+            StringComparison.Ordinal);
+        string readableMalformed = checkedInReadableMalformed.Replace(
+            syntheticSecretPlaceholder,
             seededSyntheticSecret,
-            "[REDACTED:aws-access-key-id]",
+            StringComparison.Ordinal);
+        string safeReadableMalformed = checkedInReadableMalformed.Replace(
+            syntheticSecretPlaceholder,
+            redactionMarker,
             StringComparison.Ordinal);
         byte[] invalid = Convert.FromHexString(
             (await File.ReadAllTextAsync(Path.Combine(

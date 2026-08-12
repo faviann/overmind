@@ -316,6 +316,47 @@ public sealed class CaptureScheduleTests
         }
     }
 
+    [Fact]
+    public void DistinctRolloutBasenamesWithTheSameObservedIdentityFailDiscoveryClosed()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-source-stream-collision-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string first = Path.Combine(sessions, "2026", "08", "11", "rollout-first.jsonl");
+        string second = Path.Combine(sessions, "2026", "08", "12", "rollout-second.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(first)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(second)!);
+        Directory.CreateDirectory(archive);
+        const string privateSession = "same-private-session";
+        string sessionMetadata = JsonSerializer.Serialize(new
+        {
+            type = "session_meta",
+            payload = new { session_id = privateSession, id = privateSession }
+        }) + "\n";
+        File.WriteAllText(first, sessionMetadata);
+        File.WriteAllText(second, sessionMetadata);
+
+        try
+        {
+            InvalidDataException failure = Assert.Throws<InvalidDataException>(() =>
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    sessions,
+                    archive,
+                    new HashSet<string>(StringComparer.Ordinal)));
+
+            Assert.Equal(
+                "Configured Codex transcript discovery contains ambiguous duplicate source streams.",
+                failure.Message);
+            Assert.DoesNotContain(privateSession, failure.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(root, failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("80", "40", 80, 40)]
     [InlineData("150", "60", 150, 60)]

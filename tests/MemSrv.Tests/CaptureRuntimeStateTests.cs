@@ -272,6 +272,68 @@ public sealed class CaptureRuntimeStateTests
             exception.Message);
     }
 
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":null}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":-1,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":10,\"byteLength\":2,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":11,\"sha256\":\"prefix\"}}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":9223372036854775807,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}}")]
+    public async Task RuntimeStateRejectsInvalidNestedLocatorEvidenceAsInvalidData(
+        string locatorEvidence)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-invalid-locator-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string durable = """
+            {"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":null,"enqueuedThrough":0,"queue":[{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":LOCATOR_EVIDENCE,"redactedSafeCandidate":"{}","outcome":{"contractVersion":1,"captureHealth":"healthy","captureFidelity":"complete","counters":[]}}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}
+            """.Replace("LOCATOR_EVIDENCE", locatorEvidence, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capture-state.json"), durable);
+
+        try
+        {
+            InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+            Assert.Equal("Capture runtime state has an unsupported contract.", failure.Message);
+            Assert.DoesNotContain("stream", failure.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("transcript", failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("null", "{\"safe\":true}")]
+    [InlineData("{\"sourceStream\":\"stream\",\"sourcePosition\":0,\"deterministicLocatorEvidence\":null,\"redactedSafeCandidate\":\"{}\"}", "{\"safe\":true}")]
+    [InlineData("{\"sourceStream\":\"stream\",\"sourcePosition\":0,\"deterministicLocatorEvidence\":{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}},\"redactedSafeCandidate\":null}", "private-candidate-content")]
+    [InlineData("{\"sourceStream\":\"stream\",\"sourcePosition\":0,\"deterministicLocatorEvidence\":{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}},\"redactedSafeCandidate\":\"null\"}", "private-candidate-content")]
+    [InlineData("{\"sourceStream\":\"stream\",\"sourcePosition\":0,\"deterministicLocatorEvidence\":{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}},\"redactedSafeCandidate\":\"{}\",\"outcome\":{}}", "private-outcome-content")]
+    public async Task RuntimeStateRejectsNullQueueAndCandidateShellsAsInvalidData(
+        string queueItem,
+        string forbidden)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-null-shell-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string durable = """
+            {"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":null,"enqueuedThrough":0,"queue":[QUEUE_ITEM],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}
+            """.Replace("QUEUE_ITEM", queueItem, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capture-state.json"), durable);
+
+        try
+        {
+            InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+            Assert.Equal("Capture runtime state has an unsupported contract.", failure.Message);
+            Assert.DoesNotContain(forbidden, failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public void LegacyQueueItemWithoutOutcomeDefaultsToHealthyComplete()
     {

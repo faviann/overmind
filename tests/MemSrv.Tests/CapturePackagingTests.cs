@@ -6,6 +6,53 @@ namespace MemSrv.Tests;
 public sealed class CapturePackagingTests
 {
     [Fact]
+    public async Task DuplicateObservedSourceStreamFailsBeforeClaimOrDelivery()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-source-stream-process-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        string first = Path.Combine(sessions, "2026", "08", "11", "rollout-alpha.jsonl");
+        string second = Path.Combine(sessions, "2026", "08", "12", "rollout-beta.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(first)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(second)!);
+        Directory.CreateDirectory(archive);
+        const string privateSession = "same-private-session";
+        await File.WriteAllTextAsync(first, Transcript(privateSession));
+        await File.WriteAllTextAsync(second, Transcript(privateSession));
+        using var listener = new System.Net.Sockets.TcpListener(
+            System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, sessions, archive);
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Empty(result.Stdout);
+            Assert.False(listener.Pending());
+            Assert.False(File.Exists(Path.Combine(state, "capture-state.json")));
+            AssertContentFreeJsonDiagnostics(
+                result.Stderr,
+                "invalid_source_or_receipt",
+                root,
+                privateSession,
+                Path.GetFileName(first),
+                Path.GetFileName(second));
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task DuplicateCurrentIdentityIsReportedAsContentFreeJsonAndDoesNotEscape()
     {
         string root = Path.Combine(
@@ -69,6 +116,59 @@ public sealed class CapturePackagingTests
         }
         finally
         {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":-1,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":0,\"sha256\":\"prefix\"}}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":9223372036854775807,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":null}")]
+    public async Task CorruptNestedDurableStateFailsContentFreeBeforeDelivery(
+        string locatorEvidence)
+    {
+        const string privateContent = "private-corrupt-state-content";
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-corrupt-nested-process-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Directory.CreateDirectory(state);
+        string durable = """
+            {"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":null,"enqueuedThrough":0,"queue":[{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":LOCATOR_EVIDENCE,"redactedSafeCandidate":"PRIVATE_CONTENT","outcome":{"contractVersion":1,"captureHealth":"healthy","captureFidelity":"complete","counters":[]}}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}
+            """
+            .Replace("LOCATOR_EVIDENCE", locatorEvidence, StringComparison.Ordinal)
+            .Replace("PRIVATE_CONTENT", privateContent, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(Path.Combine(state, "capture-state.json"), durable);
+        using var listener = new System.Net.Sockets.TcpListener(
+            System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, sessions, archive);
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Empty(result.Stdout);
+            Assert.False(listener.Pending());
+            AssertContentFreeJsonDiagnostics(
+                result.Stderr,
+                "invalid_source_or_receipt",
+                root,
+                privateContent,
+                "transcript",
+                "stream");
+        }
+        finally
+        {
+            listener.Stop();
             Directory.Delete(root, recursive: true);
         }
     }

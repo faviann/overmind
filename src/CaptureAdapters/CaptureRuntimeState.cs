@@ -57,6 +57,25 @@ public sealed record CaptureRuntimeLocatorEvidence
         string recordSha256,
         CapturePrefixEvidence prefixEvidence)
     {
+        if (string.IsNullOrWhiteSpace(transcriptIdentity)
+            || sourcePosition < 0
+            || byteOffset < 0
+            || byteLength <= 0
+            || string.IsNullOrWhiteSpace(recordSha256)
+            || prefixEvidence is null
+            || prefixEvidence.ByteLength < 0
+            || string.IsNullOrWhiteSpace(prefixEvidence.Sha256))
+        {
+            throw UnsupportedState();
+        }
+        try
+        {
+            _ = checked(byteOffset + byteLength);
+        }
+        catch (OverflowException)
+        {
+            throw UnsupportedState();
+        }
         TranscriptIdentity = transcriptIdentity;
         SourcePosition = sourcePosition;
         ByteOffset = byteOffset;
@@ -97,6 +116,9 @@ public sealed record CaptureRuntimeLocatorEvidence
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
             .ToLowerInvariant();
     }
+
+    private static InvalidDataException UnsupportedState() =>
+        new("Capture runtime state has an unsupported contract.");
 }
 
 public sealed record CaptureRuntimeQueueItem
@@ -109,6 +131,13 @@ public sealed record CaptureRuntimeQueueItem
         string redactedSafeCandidate,
         CaptureOutcomeSummary? outcome = null)
     {
+        if (string.IsNullOrWhiteSpace(sourceStream)
+            || deterministicLocatorEvidence is null
+            || string.IsNullOrWhiteSpace(redactedSafeCandidate))
+        {
+            throw new InvalidDataException(
+                "Capture runtime state has an unsupported contract.");
+        }
         if (sourcePosition != deterministicLocatorEvidence.SourcePosition)
         {
             throw new InvalidDataException(
@@ -258,28 +287,83 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         await using var stream = new FileStream(
             _statePath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        CaptureRuntimeSnapshot snapshot =
-            await JsonSerializer.DeserializeAsync<CaptureRuntimeSnapshot>(
-                stream, RuntimeJson.Options, cancellationToken)
-            ?? throw new InvalidDataException("Capture runtime state is empty.");
+        CaptureRuntimeSnapshot snapshot;
+        try
+        {
+            snapshot =
+                await JsonSerializer.DeserializeAsync<CaptureRuntimeSnapshot>(
+                    stream, RuntimeJson.Options, cancellationToken)
+                ?? throw UnsupportedState();
+        }
+        catch (Exception ex) when (
+            ex is InvalidDataException
+                or ArgumentException
+                or NullReferenceException
+                or OverflowException)
+        {
+            throw UnsupportedState();
+        }
         if (snapshot.ContractVersion != CaptureRuntimeSnapshot.Empty.ContractVersion
             || snapshot.Streams is null
             || snapshot.Streams.Any(stream =>
                 stream is null
                 || string.IsNullOrWhiteSpace(stream.SourceStream)
                 || string.IsNullOrWhiteSpace(stream.TranscriptIdentity)
+                || stream.VerifiedPrefix is { ByteLength: < 0 }
+                || stream.VerifiedPrefix is { Sha256: null or "" }
+                || stream.EnqueuedThrough < 0
                 || stream.Queue is null
                 || stream.Queue.Any(item =>
                     item is null
                     || string.IsNullOrWhiteSpace(item.SourceStream)
                     || item.DeterministicLocatorEvidence is null
-                    || string.IsNullOrWhiteSpace(item.RedactedSafeCandidate))))
+                    || !IsValidLocator(item.DeterministicLocatorEvidence)
+                    || item.Outcome is null
+                    || string.IsNullOrWhiteSpace(item.RedactedSafeCandidate)
+                    || !string.Equals(
+                        item.SourceStream, stream.SourceStream, StringComparison.Ordinal)
+                    || !string.Equals(
+                        item.DeterministicLocatorEvidence.TranscriptIdentity,
+                        stream.TranscriptIdentity,
+                        StringComparison.Ordinal)
+                    || !IsJson(item.RedactedSafeCandidate))))
         {
-            throw new InvalidDataException(
-                "Capture runtime state has an unsupported contract.");
+            throw UnsupportedState();
         }
         return snapshot;
     }
+
+    private static bool IsJson(string candidate)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(candidate);
+            return document.RootElement.ValueKind == JsonValueKind.Object;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsValidLocator(CaptureRuntimeLocatorEvidence locator)
+    {
+        try
+        {
+            return locator.SourcePosition >= 0
+                && locator.ByteOffset >= 0
+                && locator.ByteLength > 0
+                && checked(locator.ByteOffset + locator.ByteLength)
+                    <= locator.PrefixEvidence.ByteLength;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
+    private static InvalidDataException UnsupportedState() =>
+        new("Capture runtime state has an unsupported contract.");
 
     public async Task<bool> ClaimAsync(
         CaptureRuntimeQueueItem claim,

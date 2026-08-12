@@ -144,6 +144,16 @@ public static class CodexTranscriptDiscovery
                 "Configured Codex transcript discovery contains ambiguous duplicate " +
                 "logical identities.");
         }
+        if (streams
+            .Where(stream => !string.IsNullOrWhiteSpace(stream.SourceStream)
+                && stream.IdentityFailure is null)
+            .GroupBy(stream => stream.SourceStream, StringComparer.Ordinal)
+            .Any(group => group.Count() > 1))
+        {
+            throw new InvalidDataException(
+                "Configured Codex transcript discovery contains ambiguous duplicate " +
+                "source streams.");
+        }
     }
 
     private static CodexTranscriptStream Describe(string configuredLocation, string path)

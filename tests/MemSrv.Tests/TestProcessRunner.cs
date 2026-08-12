@@ -44,7 +44,7 @@ internal static class TestProcessRunner
 
     public static string CaptureTracerPath => _captureTracerPath.Value;
 
-    public static async Task<(
+    public static Task<(
         int ExitCode,
         string Stdout,
         string Stderr,
@@ -52,10 +52,29 @@ internal static class TestProcessRunner
             string command,
             string stdin,
             TimeSpan timeout,
+            string description) => RunCommandToExitAsync(
+                command,
+                [],
+                stdin,
+                TimeSpan.Zero,
+                new Dictionary<string, string>(),
+                timeout,
+                description);
+
+    public static async Task<(
+        int ExitCode,
+        string Stdout,
+        string Stderr,
+        TimeSpan Elapsed)> RunCommandToExitAsync(
+            string command,
+            IReadOnlyList<string> args,
+            string stdin,
+            TimeSpan stdinCloseDelay,
+            IReadOnlyDictionary<string, string> environment,
+            TimeSpan timeout,
             string description)
     {
-        var startInfo = CreateStartInfo(
-            command, [], new Dictionary<string, string>());
+        var startInfo = CreateStartInfo(command, args, environment);
         startInfo.RedirectStandardInput = true;
         var elapsed = Stopwatch.StartNew();
         using var process = Process.Start(startInfo)
@@ -66,6 +85,8 @@ internal static class TestProcessRunner
         try
         {
             await process.StandardInput.WriteAsync(stdin.AsMemory(), cts.Token);
+            await process.StandardInput.FlushAsync(cts.Token);
+            await Task.Delay(stdinCloseDelay, cts.Token);
             process.StandardInput.Close();
             await process.WaitForExitAsync(cts.Token);
         }
@@ -78,7 +99,6 @@ internal static class TestProcessRunner
                 $"{description} did not exit within {timeout.TotalSeconds:0}s.");
         }
         elapsed.Stop();
-
         return (process.ExitCode, await stdoutPump, await stderrPump, elapsed.Elapsed);
     }
 

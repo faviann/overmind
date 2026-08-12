@@ -270,8 +270,9 @@ reference Linux-first installation beside local Codex. Its container root is
 read-only; the current `~/.codex/sessions` tree, the
 `~/.codex/archived_sessions` retry-locator tree, and repository mounts are
 read-only; durable state is
-the only writable volume. Its sole published port is the Codex wake endpoint,
-fixed to host loopback `127.0.0.1:43191`; it has no remotely reachable or
+the only writable volume. Linux host networking makes the Codex wake endpoint
+available at host loopback `127.0.0.1:43191` without Docker port publication;
+the listener remains loopback-bound and has no remotely reachable or
 general command surface, Docker socket, privileged mode,
 or self-update behavior. Archived files are selected only for an existing
 non-empty durable queue, never as historical import. See

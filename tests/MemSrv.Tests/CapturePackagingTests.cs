@@ -7,7 +7,7 @@ namespace MemSrv.Tests;
 public sealed class CapturePackagingTests
 {
     [Fact]
-    public void Codex01470HookPackageUsesOnlyBoundedAsynchronousWakeCommands()
+    public async Task Codex01470PublicHookLoaderAcceptsEveryBoundedWakeCommand()
     {
         string package = Path.Combine(
             TestProcessRunner.RepoRoot, "packages/codex-capture-hooks/0.147.0");
@@ -33,13 +33,152 @@ public sealed class CapturePackagingTests
         {
             JsonElement command = entry.Value[0].GetProperty("hooks")[0];
             Assert.Equal("command", command.GetProperty("type").GetString());
-            Assert.True(command.GetProperty("async").GetBoolean());
+            Assert.False(command.TryGetProperty("async", out _));
             Assert.Equal(1, command.GetProperty("timeout").GetInt32());
             Assert.Equal(
                 "\"$HOME/.local/bin/overmind-codex-wake-0.147.0\"",
                 command.GetProperty("command").GetString());
         }
+        string root = Path.Combine(Path.GetTempPath(), $"codex-hooks-{Guid.NewGuid():N}");
+        string home = Path.Combine(root, "home");
+        string codexHome = Path.Combine(home, ".codex");
+        Directory.CreateDirectory(codexHome);
+        try
+        {
+            var install = await TestProcessRunner.RunCommandToExitAsync(
+                Path.Combine(package, "install.sh"),
+                [codexHome],
+                "",
+                TimeSpan.Zero,
+                new Dictionary<string, string>
+                {
+                    ["HOME"] = home,
+                    ["CODEX_HOME"] = codexHome
+                },
+                TimeSpan.FromSeconds(5),
+                "Codex hook installer");
+            Assert.Equal(0, install.ExitCode);
+            Assert.Empty(install.Stdout);
+            Assert.DoesNotContain("requires codex-cli", install.Stderr, StringComparison.Ordinal);
+            Assert.Equal(
+                ["home/.codex/hooks.json", "home/.local/bin/overmind-codex-wake-0.147.0"],
+                Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                    .Select(path => Path.GetRelativePath(root, path)).Order());
+
+            string initialize = JsonSerializer.Serialize(new
+            {
+                method = "initialize",
+                id = 1,
+                @params = new
+                {
+                    clientInfo = new { name = "overmind-hook-acceptance", version = "1" },
+                    capabilities = new { experimentalApi = true }
+                }
+            });
+            string initialized = "{\"method\":\"initialized\",\"params\":{}}";
+            string list = JsonSerializer.Serialize(new
+            {
+                method = "hooks/list",
+                id = 2,
+                @params = new { cwds = new[] { TestProcessRunner.RepoRoot } }
+            });
+            var loaded = await TestProcessRunner.RunCommandToExitAsync(
+                "codex",
+                ["app-server", "--stdio"],
+                $"{initialize}\n{initialized}\n{list}\n",
+                TimeSpan.FromMilliseconds(500),
+                new Dictionary<string, string>
+                {
+                    ["HOME"] = home,
+                    ["CODEX_HOME"] = codexHome
+                },
+                TimeSpan.FromSeconds(5),
+                "Codex 0.147.0 public hook loader");
+            Assert.Equal(0, loaded.ExitCode);
+            Assert.DoesNotContain("unsupported", loaded.Stderr, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("skipping", loaded.Stderr, StringComparison.OrdinalIgnoreCase);
+            JsonElement response = loaded.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line => line.TryGetProperty("id", out JsonElement id) && id.GetInt32() == 2)
+                .GetProperty("result").GetProperty("data")[0];
+            Assert.Empty(response.GetProperty("warnings").EnumerateArray());
+            Assert.Empty(response.GetProperty("errors").EnumerateArray());
+            Assert.Equal(
+                expected.Select(ToCodexEventName).Order(),
+                response.GetProperty("hooks").EnumerateArray()
+                    .Select(hook => hook.GetProperty("eventName").GetString()).Order());
+            foreach (JsonElement hook in response.GetProperty("hooks").EnumerateArray())
+            {
+                Assert.Equal("command", hook.GetProperty("handlerType").GetString());
+                Assert.Equal(1, hook.GetProperty("timeoutSec").GetInt32());
+                Assert.True(hook.GetProperty("enabled").GetBoolean());
+                Assert.Equal(
+                    "\"$HOME/.local/bin/overmind-codex-wake-0.147.0\"",
+                    hook.GetProperty("command").GetString());
+            }
+
+            var upgrade = await TestProcessRunner.RunCommandToExitAsync(
+                Path.Combine(package, "upgrade.sh"),
+                [codexHome],
+                "",
+                TimeSpan.Zero,
+                new Dictionary<string, string>
+                {
+                    ["HOME"] = home,
+                    ["CODEX_HOME"] = codexHome
+                },
+                TimeSpan.FromSeconds(5),
+                "same-version Codex hook upgrade");
+            Assert.Equal(0, upgrade.ExitCode);
+            Assert.Empty(upgrade.Stdout);
+            Assert.DoesNotContain("requires codex-cli", upgrade.Stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
+
+    [Fact]
+    public async Task CodexHookInstallerRefusesExistingUnrelatedHooksWithoutChangingThem()
+    {
+        string package = Path.Combine(
+            TestProcessRunner.RepoRoot, "packages/codex-capture-hooks/0.147.0");
+        string root = Path.Combine(Path.GetTempPath(), $"codex-hooks-refusal-{Guid.NewGuid():N}");
+        string home = Path.Combine(root, "home");
+        string codexHome = Path.Combine(home, ".codex");
+        Directory.CreateDirectory(codexHome);
+        string hooks = Path.Combine(codexHome, "hooks.json");
+        const string unrelated = "{\"hooks\":{\"Stop\":[]}}\n";
+        await File.WriteAllTextAsync(hooks, unrelated);
+        try
+        {
+            var install = await TestProcessRunner.RunCommandToExitAsync(
+                Path.Combine(package, "install.sh"),
+                [codexHome],
+                "",
+                TimeSpan.Zero,
+                new Dictionary<string, string>
+                {
+                    ["HOME"] = home,
+                    ["CODEX_HOME"] = codexHome
+                },
+                TimeSpan.FromSeconds(5),
+                "Codex hook installer refusal");
+            Assert.Equal(2, install.ExitCode);
+            Assert.Empty(install.Stdout);
+            Assert.Contains("already exists", install.Stderr, StringComparison.Ordinal);
+            Assert.Equal(unrelated, await File.ReadAllTextAsync(hooks));
+            Assert.False(Directory.Exists(Path.Combine(home, ".local")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static string ToCodexEventName(string name) =>
+        char.ToLowerInvariant(name[0]) + name[1..];
 
     [Fact]
     public async Task PackagedWakeCommandDiscardsInputSendsNoPayloadAndNeverFailsCodex()
@@ -47,6 +186,10 @@ public sealed class CapturePackagingTests
         string command = Path.Combine(
             TestProcessRunner.RepoRoot,
             "packages/codex-capture-hooks/0.147.0/overmind-codex-wake-0.147.0");
+        Assert.Contains(
+            "--max-time 0.25",
+            await File.ReadAllTextAsync(command),
+            StringComparison.Ordinal);
         using var listener = new System.Net.Sockets.TcpListener(
             System.Net.IPAddress.Loopback, 43191);
         listener.Start();
@@ -68,10 +211,10 @@ public sealed class CapturePackagingTests
         {
             Assert.DoesNotContain("Content-Length", line, StringComparison.OrdinalIgnoreCase);
         }
-        await client.GetStream().WriteAsync(
-            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"u8.ToArray());
+        await Task.Delay(TimeSpan.FromMilliseconds(500));
         var result = await execution;
         Assert.Equal(0, result.ExitCode);
+        Assert.True(result.Elapsed < TimeSpan.FromMilliseconds(750), result.Elapsed.ToString());
         Assert.Empty(result.Stdout);
         Assert.Empty(result.Stderr);
 
@@ -302,6 +445,53 @@ public sealed class CapturePackagingTests
         using var tcp = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
         tcp.Start();
         return ((System.Net.IPEndPoint)tcp.LocalEndpoint).Port;
+    }
+
+    [Fact]
+    public async Task WakeBindCollisionLeavesScheduledScanningAuthoritative()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-wake-disabled-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        using var collision = new System.Net.Sockets.TcpListener(
+            System.Net.IPAddress.Loopback, 43191);
+        collision.Start();
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25";
+        environment["OVERMIND_CAPTURE_WAKE_ENABLED"] = "true";
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(150));
+            string transcript = Path.Combine(sessions, "2026", "08", "12", "rollout-scheduled.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(transcript)!);
+            await File.WriteAllTextAsync(transcript, Transcript("scheduled-without-wake"));
+
+            DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            CaptureRuntimeSnapshot? snapshot = null;
+            while ((snapshot is null || snapshot.Streams.Count == 0)
+                && DateTime.UtcNow < deadline)
+            {
+                snapshot = await new FileCaptureRuntimeState(state).ReadAsync();
+                await Task.Delay(25);
+            }
+            Assert.Single(Assert.IsType<CaptureRuntimeSnapshot>(snapshot).Streams);
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Assert.Contains("capture_wake_unavailable", await stderr, StringComparison.Ordinal);
+            collision.Stop();
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]

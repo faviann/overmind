@@ -17,8 +17,9 @@ services:
       OVERMIND_CAPTURE_SCAN_INTERVAL_MS: ${OVERMIND_CAPTURE_SCAN_INTERVAL_MS:-1000}
       OVERMIND_CAPTURE_SCAN_JITTER_MS: ${OVERMIND_CAPTURE_SCAN_JITTER_MS:-250}
       OVERMIND_CAPTURE_WAKE_ENABLED: "true"
-    ports:
-      - "127.0.0.1:43191:43191"
+    # Linux host networking makes the runtime's loopback listener the host's
+    # loopback listener without publishing a container port or widening its bind.
+    network_mode: host
     volumes:
       - type: bind
         source: ${OVERMIND_CODEX_SESSIONS_ROOT:?Set the machine Codex current sessions root}

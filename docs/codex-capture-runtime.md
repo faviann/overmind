@@ -9,8 +9,9 @@ the runtime finds only that durable responsibility there and revalidates the
 same transcript and locator evidence before retrying it.
 There is no Claude production adapter, arbitrary listener, Docker socket,
 database credential, privileged mode, or self-update path. The only inbound
-surface is the fixed `POST /wake` endpoint on port 43191, published by the
-reference Compose file exclusively as host loopback `127.0.0.1:43191`.
+surface is the fixed `POST /wake` endpoint on host loopback `127.0.0.1:43191`.
+The reference Linux Compose service uses host networking so the runtime's
+loopback bind is the host loopback bind; it publishes no Docker port.
 
 ## Install the version-pinned Codex hooks
 
@@ -22,7 +23,7 @@ operator can merge it deliberately. The runtime never edits Codex configuration.
 
 The package registers session start/end, prompt submission, pre/permission/post
 tool use, pre/post compaction, subagent start/stop, and stop. Each native hook
-runs asynchronously with a one-second handler bound. Its command discards
+runs synchronously with a one-second handler bound. Its command discards
 stdin, sends an empty `POST` only to `http://127.0.0.1:43191/wake`, suppresses
 all output, applies a 250 ms client timeout, and exits successfully even when
 the runtime is absent. Disabled or skipped/untrusted hooks affect latency only:
@@ -93,7 +94,8 @@ docker compose --env-file .env.capture -f compose.capture.yaml up -d
 The reference runtime has a read-only container filesystem and exactly four
 declared mounts: the read-only `~/.codex/sessions` tree, the read-only
 `~/.codex/archived_sessions` tree, a read-only repository root, and one writable
-durable-state volume. It publishes only the wake port on host loopback. Restarting either
+durable-state volume. Linux host networking exposes only the runtime's loopback-bound
+wake endpoint and publishes no container port. Restarting either
 side, an outage, or an ambiguous response leaves unresolved responsibility in
 the state volume; later cycles retry the same deterministic locator until the
 server returns a conclusive `new` or `already_accepted` receipt.

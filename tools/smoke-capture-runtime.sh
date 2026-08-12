@@ -27,6 +27,7 @@ readonly state="$scratch/state"
 readonly credential_file="$scratch/capture-key"
 readonly agent_keys="$scratch/agent-keys.yaml"
 readonly credential='mcap_capture_runtime_packaging_smoke_00000001'
+server_host_port=
 mkdir -p "$sessions/2026/08/12" "$archived_sessions" "$repository" "$state"
 chmod 0777 "$state"
 printf '%s\n' "$credential" >"$credential_file"
@@ -112,24 +113,28 @@ run_memctl() {
 }
 start_server() {
   docker run -d --name "$server" --network "$network" \
+    -p 127.0.0.1::8080 \
     -v "$agent_keys:/run/secrets/agent-keys.yaml:ro" \
     -e MEMSRV_CONNECTION_STRING="postgres://memsrv:memsrv_dev@$postgres:5432/memory" \
     -e MEMSRV_AGENT_KEYS_PATH=/run/secrets/agent-keys.yaml \
     -e MEMSRV_HTTP_URL=http://0.0.0.0:8080 \
     "$server_image" >/dev/null
   wait_until 'server health' server_ready
+  server_host_port=$(docker port "$server" 8080/tcp | sed 's/.*://')
+  [[ $server_host_port =~ ^[0-9]+$ ]]
 }
 start_runtime() {
-  docker run -d --name "$runtime" --network "$network" --read-only \
+  docker run -d --name "$runtime" --network host --read-only \
     --cap-drop ALL --security-opt no-new-privileges \
     -v "$sessions:/capture/sessions:ro" \
     -v "$archived_sessions:/capture/archived_sessions:ro" \
     -v "$repository:/capture/repository:ro" \
     -v "$state:/state" \
-    -e OVERMIND_CAPTURE_URL="http://$server:8080" \
+    -e OVERMIND_CAPTURE_URL="http://127.0.0.1:$server_host_port" \
     -e OVERMIND_CAPTURE_CREDENTIAL="$credential" \
     -e OVERMIND_CAPTURE_SCAN_INTERVAL_MS=100 \
     -e OVERMIND_CAPTURE_SCAN_JITTER_MS=0 \
+    -e OVERMIND_CAPTURE_WAKE_ENABLED=true \
     "$capture_image" >/dev/null
 }
 
@@ -146,10 +151,8 @@ verify_packaging_contract() {
     .services["codex-capture"] as $service |
     $service.read_only == true and
     $service.privileged != true and
-    (($service.ports // []) | length == 1) and
-    ($service.ports[0].host_ip == "127.0.0.1") and
-    ($service.ports[0].target == 43191) and
-    (($service.ports[0].published | tostring) == "43191") and
+    $service.network_mode == "host" and
+    (($service.ports // []) | length == 0) and
     (($service.cap_drop // []) | index("ALL") != null) and
     (($service.security_opt // []) | index("no-new-privileges:true") != null) and
     ($service.image | endswith(":latest") | not) and
@@ -164,6 +167,7 @@ verify_packaging_contract() {
   docker image inspect "$capture_image" | jq -e '
     .[0].Config.User == "65532:65532" and
     .[0].Config.Entrypoint == ["dotnet", "/app/CodexCaptureTracer.dll"] and
+    ((.[0].Config.ExposedPorts // {}) | has("43191/tcp") | not) and
     ([.[0].Config.Env[] | select(startswith("OVERMIND_CODEX_ARCHIVE_ROOT="))] | length == 1)
   ' >/dev/null
 }
@@ -216,6 +220,18 @@ write_stream "$sessions/2026/08/12/rollout-startup.jsonl" \
 
 start_server
 start_runtime
+wait_until 'containerized host-loopback wake endpoint' \
+  curl --noproxy '*' --fail --silent --output /dev/null --request POST \
+    http://127.0.0.1:43191/wake
+[[ $(docker inspect -f '{{.HostConfig.NetworkMode}}' "$runtime") == host ]]
+readonly host_non_loopback=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [[ -n $host_non_loopback ]] &&
+   curl --noproxy '*' --connect-timeout 0.25 --max-time 0.5 --silent \
+     --output /dev/null --request POST "http://$host_non_loopback:43191/wake"; then
+  printf 'containerized wake endpoint accepted non-loopback traffic on %s\n' \
+    "$host_non_loopback" >&2
+  exit 1
+fi
 wait_until 'startup-present Codex stream convergence' stream_count_is 1
 readonly startup_uuid=$(jq -r '.streams[0].canonicalSourceStreamUuid' \
   "$state/capture-state.json")

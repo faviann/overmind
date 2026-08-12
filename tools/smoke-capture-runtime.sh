@@ -21,12 +21,13 @@ readonly server="capture-server-$suffix"
 readonly runtime="capture-runtime-$suffix"
 readonly scratch=$(mktemp -d)
 readonly sessions="$scratch/sessions"
+readonly archived_sessions="$scratch/archived_sessions"
 readonly repository="$scratch/repository"
 readonly state="$scratch/state"
 readonly credential_file="$scratch/capture-key"
 readonly agent_keys="$scratch/agent-keys.yaml"
 readonly credential='mcap_capture_runtime_packaging_smoke_00000001'
-mkdir -p "$sessions/2026/08/12" "$repository" "$state"
+mkdir -p "$sessions/2026/08/12" "$archived_sessions" "$repository" "$state"
 chmod 0777 "$state"
 printf '%s\n' "$credential" >"$credential_file"
 chmod 0600 "$credential_file"
@@ -122,6 +123,7 @@ start_runtime() {
   docker run -d --name "$runtime" --network "$network" --read-only \
     --cap-drop ALL --security-opt no-new-privileges \
     -v "$sessions:/capture/sessions:ro" \
+    -v "$archived_sessions:/capture/archived_sessions:ro" \
     -v "$repository:/capture/repository:ro" \
     -v "$state:/state" \
     -e OVERMIND_CAPTURE_URL="http://$server:8080" \
@@ -129,6 +131,38 @@ start_runtime() {
     -e OVERMIND_CAPTURE_SCAN_INTERVAL_MS=100 \
     -e OVERMIND_CAPTURE_SCAN_JITTER_MS=0 \
     "$capture_image" >/dev/null
+}
+
+verify_packaging_contract() {
+  local rendered="$scratch/compose-rendered.json"
+  OVERMIND_CAPTURE_IMAGE="$capture_image" \
+  OVERMIND_CAPTURE_URL=http://capture.invalid \
+  OVERMIND_CAPTURE_CREDENTIAL="$credential" \
+  OVERMIND_CODEX_SESSIONS_ROOT="$sessions" \
+  OVERMIND_CODEX_ARCHIVE_ROOT="$archived_sessions" \
+  OVERMIND_REPOSITORY_ROOT="$repository" \
+    docker compose -f compose.capture.yaml config --format json >"$rendered"
+  jq -e '
+    .services["codex-capture"] as $service |
+    $service.read_only == true and
+    $service.privileged != true and
+    (($service.ports // []) | length == 0) and
+    (($service.cap_drop // []) | index("ALL") != null) and
+    (($service.security_opt // []) | index("no-new-privileges:true") != null) and
+    ($service.image | endswith(":latest") | not) and
+    (($service.environment | keys | map(contains("CONNECTION_STRING")) | any) | not) and
+    ($service.volumes | length == 4) and
+    ([ $service.volumes[] | select(.type == "bind" and .read_only == true) | .target ] |
+      sort == ["/capture/archived_sessions", "/capture/repository", "/capture/sessions"]) and
+    ([ $service.volumes[] | select(.type == "volume" and .read_only != true) | .target ] == ["/state"]) and
+    ([ $service.volumes[].source | contains("docker.sock") ] | any | not)
+  ' "$rendered" >/dev/null
+
+  docker image inspect "$capture_image" | jq -e '
+    .[0].Config.User == "65532:65532" and
+    .[0].Config.Entrypoint == ["dotnet", "/app/CodexCaptureTracer.dll"] and
+    ([.[0].Config.Env[] | select(startswith("OVERMIND_CODEX_ARCHIVE_ROOT="))] | length == 1)
+  ' >/dev/null
 }
 
 assert_replay() {
@@ -150,6 +184,7 @@ assert_replay() {
 }
 
 docker network create "$network" >/dev/null
+verify_packaging_contract
 docker run -d --name "$postgres" --network "$network" \
   -e POSTGRES_USER=overmind -e POSTGRES_PASSWORD=overmind_dev \
   -e POSTGRES_DB=postgres postgres:18 >/dev/null
@@ -170,6 +205,9 @@ docker run --rm --network "$network" \
 readonly startup_session='01980000-0000-7000-8000-000000000001'
 readonly scheduled_session='01980000-0000-7000-8000-000000000002'
 readonly outstanding_session='01980000-0000-7000-8000-000000000003'
+readonly unrelated_archive_session='01980000-0000-7000-8000-000000000004'
+write_stream "$archived_sessions/rollout-unrelated.jsonl" \
+  "$unrelated_archive_session" 'unrelated historical archive event'
 write_stream "$sessions/2026/08/12/rollout-startup.jsonl" \
   "$startup_session" 'startup stream event'
 
@@ -203,6 +241,8 @@ wait_until 'specific outstanding stream position claim' \
   outstanding_stream_is_queued "$outstanding_stream"
 
 docker rm -f "$runtime" >/dev/null
+mv "$sessions/2026/08/12/rollout-outstanding.jsonl" \
+  "$archived_sessions/rollout-outstanding.jsonl"
 start_server
 start_runtime
 wait_until 'specific outstanding stream restart convergence' \
@@ -215,6 +255,7 @@ readonly outstanding_uuid=$(jq -r --arg stream "$outstanding_stream" \
   '.streams[] | select(.sourceStream == $stream) | .canonicalSourceStreamUuid' \
   "$state/capture-state.json")
 assert_replay "$outstanding_uuid" "$outstanding_session" 'durable responsibility event'
+stream_count_is 3
 
 printf 'capture runtime packaging smoke passed: %s + %s\n' \
   "$server_image" "$capture_image"

@@ -21,7 +21,6 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class CaptureTests : HttpSeamTestBase
 {
-    private readonly Dictionary<int, HashSet<Guid>> _seenCaptureReceipts = [];
     [Fact]
     public async Task UnknownCredentialIsRejectedBeforeMalformedBodyOrMissingScannerConfiguration()
     {
@@ -6732,19 +6731,15 @@ public sealed class CaptureTests : HttpSeamTestBase
                 && line.TryGetProperty("reason", out JsonElement reasonElement)
                 && reasonElement.GetString() == reason);
 
-    private async Task<JsonElement> ReadTracerReceiptAsync(Process process)
+    private async Task<JsonElement> ReadTracerReceiptAsync(CaptureTracerProcess process)
     {
-        if (!_seenCaptureReceipts.TryGetValue(process.Id, out HashSet<Guid>? seen))
-        {
-            seen = [];
-            _seenCaptureReceipts[process.Id] = seen;
-        }
-        int initialReceiptCount = TestProcessRunner.InitialCaptureReceiptCount(process);
+        HashSet<Guid> seen = process.SeenReceiptIds;
+        int initialReceiptCount = process.InitialReceiptCount;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         while (true)
         {
             CaptureRuntimeSnapshot snapshot = await new FileCaptureRuntimeState(
-                TestProcessRunner.CaptureStateDirectory(process)).ReadAsync();
+                process.StateDirectory).ReadAsync();
             int durableReceiptCount = snapshot.Streams.Sum(stream =>
                 stream.LastServerReceipt is { } last ? checked((int)last.SourcePosition + 1) : 0);
             if (durableReceiptCount <= seen.Count)
@@ -6759,7 +6754,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 continue;
             }
             JsonElement[] receipts = await ReadPublicCaptureReceiptsAsync(
-                TestProcessRunner.CaptureStateDirectory(process));
+                process.StateDirectory);
             if (seen.Count == 0 && initialReceiptCount > 0)
             {
                 foreach (JsonElement existing in receipts.Take(initialReceiptCount))

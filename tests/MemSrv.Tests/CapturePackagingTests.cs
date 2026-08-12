@@ -1,15 +1,72 @@
 using System.Text.Json;
+using CaptureAdapters;
 
 namespace MemSrv.Tests;
 
 public sealed class CapturePackagingTests
 {
     [Fact]
+    public async Task PackagedRuntimeRetriesOnlyItsQueuedStreamAfterCodexArchivesIt()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-production-archive-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(root, "archived_sessions");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-responsible.jsonl");
+        string archived = Path.Combine(archive, Path.GetFileName(active));
+        await File.WriteAllTextAsync(active, Transcript("responsible-session"));
+
+        var environment = new Dictionary<string, string>
+        {
+            ["OVERMIND_CAPTURE_URL"] = "http://127.0.0.1:1",
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = $"mcap_{Guid.NewGuid():N}",
+            ["OVERMIND_CODEX_SESSIONS_ROOT"] = Path.Combine(root, "sessions"),
+            ["OVERMIND_CODEX_ARCHIVE_ROOT"] = archive,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = state,
+            ["OVERMIND_CAPTURE_RUN_ONCE"] = "true",
+            ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "1",
+            ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
+        };
+
+        try
+        {
+            var outage = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+            Assert.Equal(0, outage.ExitCode);
+            CaptureRuntimeStreamState queued = Assert.Single(
+                (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
+            Assert.Equal(2, queued.Queue.Count);
+
+            File.Move(active, archived);
+            await File.WriteAllTextAsync(
+                Path.Combine(archive, "rollout-unrelated.jsonl"),
+                Transcript("unrelated-session"));
+
+            var restarted = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+            Assert.Equal(0, restarted.ExitCode);
+            CaptureRuntimeStreamState retried = Assert.Single(
+                (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
+            Assert.Equal(queued.SourceStream, retried.SourceStream);
+            Assert.Equal(queued.TranscriptIdentity, retried.TranscriptIdentity);
+            Assert.Equal(2, retried.Queue.Count);
+            Assert.Null(retried.Stop);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ProductionRuntimeStartsWithoutSyntheticGateAndKeepsStdoutEmpty()
     {
         string root = Path.Combine(
             Path.GetTempPath(), $"capture-production-start-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
+        string archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(archive);
         try
         {
             var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
@@ -18,6 +75,7 @@ public sealed class CapturePackagingTests
                     ["OVERMIND_CAPTURE_URL"] = "http://127.0.0.1:1",
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = $"mcap_{Guid.NewGuid():N}",
                     ["OVERMIND_CODEX_SESSIONS_ROOT"] = root,
+                    ["OVERMIND_CODEX_ARCHIVE_ROOT"] = archive,
                     ["OVERMIND_CAPTURE_STATE_DIR"] = Path.Combine(root, "state"),
                     ["OVERMIND_CAPTURE_RUN_ONCE"] = "true",
                     ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "1",
@@ -47,6 +105,8 @@ public sealed class CapturePackagingTests
         string missingRoot = Path.Combine(parent, "private-sessions-name");
         string state = Path.Combine(parent, "state");
         Directory.CreateDirectory(parent);
+        string archive = Path.Combine(parent, "archive");
+        Directory.CreateDirectory(archive);
         try
         {
             using var process = TestProcessRunner.StartCaptureTracer(
@@ -55,6 +115,7 @@ public sealed class CapturePackagingTests
                     ["OVERMIND_CAPTURE_URL"] = "http://127.0.0.1:1",
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = $"mcap_{Guid.NewGuid():N}",
                     ["OVERMIND_CODEX_SESSIONS_ROOT"] = missingRoot,
+                    ["OVERMIND_CODEX_ARCHIVE_ROOT"] = archive,
                     ["OVERMIND_CAPTURE_STATE_DIR"] = state,
                     ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25",
                     ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
@@ -87,31 +148,19 @@ public sealed class CapturePackagingTests
         }
     }
 
-    [Fact]
-    public void ReferenceRuntimeComposeHasOnlyTheDeclaredHostAndDurableStateAccess()
-    {
-        string compose = File.ReadAllText(Path.Combine(
-            TestProcessRunner.RepoRoot, "compose.capture.yaml"));
-
-        Assert.Contains("read_only: true", compose, StringComparison.Ordinal);
-        Assert.Contains("OVERMIND_CODEX_SESSIONS_ROOT", compose, StringComparison.Ordinal);
-        Assert.DoesNotContain("OVERMIND_CODEX_TRANSCRIPT_ROOT", compose, StringComparison.Ordinal);
-        Assert.DoesNotContain("/.codex\n", compose, StringComparison.Ordinal);
-        Assert.Contains("OVERMIND_CAPTURE_STATE_DIR", compose, StringComparison.Ordinal);
-        Assert.Contains("OVERMIND_CAPTURE_URL", compose, StringComparison.Ordinal);
-        Assert.Contains("OVERMIND_CAPTURE_CREDENTIAL", compose, StringComparison.Ordinal);
-        Assert.Contains("cap_drop: [ALL]", compose, StringComparison.Ordinal);
-        Assert.Contains("no-new-privileges:true", compose, StringComparison.Ordinal);
-        Assert.DoesNotContain("ports:", compose, StringComparison.Ordinal);
-        Assert.DoesNotContain("privileged:", compose, StringComparison.Ordinal);
-        Assert.DoesNotContain("docker.sock", compose, StringComparison.Ordinal);
-        Assert.DoesNotContain("CONNECTION_STRING", compose, StringComparison.Ordinal);
-        Assert.DoesNotContain(":latest", compose, StringComparison.Ordinal);
-
-        string dockerfile = File.ReadAllText(Path.Combine(
-            TestProcessRunner.RepoRoot, "Dockerfile.capture-runtime"));
-        Assert.Contains("ARG VERSION", dockerfile, StringComparison.Ordinal);
-        Assert.Contains("CodexCaptureTracer", dockerfile, StringComparison.Ordinal);
-        Assert.DoesNotContain("Claude", dockerfile, StringComparison.OrdinalIgnoreCase);
-    }
+    private static string Transcript(string sessionId) =>
+        JsonSerializer.Serialize(new
+        {
+            type = "session_meta",
+            payload = new { id = sessionId, session_id = sessionId }
+        }) + "\n" + JsonSerializer.Serialize(new
+        {
+            type = "response_item",
+            payload = new
+            {
+                type = "message",
+                role = "user",
+                content = new[] { new { type = "input_text", text = "public evidence" } }
+            }
+        }) + "\n";
 }

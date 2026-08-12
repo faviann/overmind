@@ -20,6 +20,45 @@ public sealed record CodexTranscriptStream(
 /// </summary>
 public static class CodexTranscriptDiscovery
 {
+    public static IReadOnlyList<CodexTranscriptStream>
+        EnumerateCurrentSessionsAndResponsibleArchives(
+            string sessionsRoot,
+            string archiveRoot,
+            IReadOnlySet<string> responsibleTranscriptIdentities)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionsRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(archiveRoot);
+        ArgumentNullException.ThrowIfNull(responsibleTranscriptIdentities);
+        string fullSessionsRoot = Path.GetFullPath(sessionsRoot);
+        string fullArchiveRoot = Path.GetFullPath(archiveRoot);
+        if (!Directory.Exists(fullSessionsRoot))
+        {
+            throw new DirectoryNotFoundException("Configured Codex sessions root is unavailable.");
+        }
+        if (!Directory.Exists(fullArchiveRoot))
+        {
+            throw new DirectoryNotFoundException("Configured Codex archive root is unavailable.");
+        }
+
+        CodexTranscriptStream[] current = Directory.EnumerateFiles(
+                fullSessionsRoot, "rollout-*.jsonl", SearchOption.AllDirectories)
+            .Select(Path.GetFullPath)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .Select(path => DescribeProduction(path, terminalAtEndOfFile: false))
+            .ToArray();
+        CodexTranscriptStream[] responsibleArchives = Directory.EnumerateFiles(
+                fullArchiveRoot, "rollout-*.jsonl", SearchOption.AllDirectories)
+            .Select(Path.GetFullPath)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .Select(path => DescribeProduction(path, terminalAtEndOfFile: true))
+            .Where(stream => stream.TranscriptIdentity is not null
+                && responsibleTranscriptIdentities.Contains(stream.TranscriptIdentity))
+            .ToArray();
+        CodexTranscriptStream[] streams = [.. current, .. responsibleArchives];
+        ThrowIfAmbiguous(streams);
+        return streams;
+    }
+
     public static IReadOnlyList<CodexTranscriptStream> EnumerateCurrentSessions(
         string sessionsRoot)
     {
@@ -68,6 +107,23 @@ public static class CodexTranscriptDiscovery
             .OrderBy(path => path, StringComparer.Ordinal)
             .Select(path => Describe(configuredLocation, path))
             .ToArray();
+        ThrowIfAmbiguous(streams);
+        return streams;
+    }
+
+    private static CodexTranscriptStream DescribeProduction(
+        string path,
+        bool terminalAtEndOfFile)
+    {
+        string logicalIdentityPath = string.Join(
+            "\n",
+            "codex-production-session-basename/v1",
+            Path.GetFileName(path));
+        return Describe(path, logicalIdentityPath, terminalAtEndOfFile);
+    }
+
+    private static void ThrowIfAmbiguous(IReadOnlyList<CodexTranscriptStream> streams)
+    {
         if (streams
             .Where(stream => stream.TranscriptIdentity is not null)
             .GroupBy(stream => stream.TranscriptIdentity, StringComparer.Ordinal)
@@ -77,7 +133,6 @@ public static class CodexTranscriptDiscovery
                 "Configured Codex transcript discovery contains ambiguous duplicate " +
                 "logical identities.");
         }
-        return streams;
     }
 
     private static CodexTranscriptStream Describe(string configuredLocation, string path)
@@ -106,6 +161,14 @@ public static class CodexTranscriptDiscovery
             }
         }
 
+        return Describe(path, identityPath, terminalAtEndOfFile);
+    }
+
+    private static CodexTranscriptStream Describe(
+        string path,
+        string identityPath,
+        bool terminalAtEndOfFile)
+    {
         CaptureSourceIdentity? sourceIdentity;
         try
         {

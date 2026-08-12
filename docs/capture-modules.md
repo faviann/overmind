@@ -22,7 +22,7 @@ Source interpretation before this spine is described by the
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
-| `CodexTranscriptDiscovery` | `EnumerateCurrentSessions(sessionsRoot)` for production current rollouts; `Enumerate(configuredLocation)` for the legacy synthetic fixture seam → streams with explicit Codex source identity | `CodexCaptureTracer` |
+| `CodexTranscriptDiscovery` | `EnumerateCurrentSessionsAndResponsibleArchives(sessionsRoot, archiveRoot, responsibleTranscriptIdentities)` for production current rollouts plus responsibility-filtered archive retries; `Enumerate(configuredLocation)` for the legacy synthetic fixture seam → streams with explicit Codex source identity | `CodexCaptureTracer` |
 | `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
 | `CaptureRescanScheduler` | `RunAsync(scanCycle, schedule, jitterSource, delay)` | `CodexCaptureTracer` |
 | `CaptureRescanConfiguration` | `Load(readEnvironment)` → `CaptureRescanSchedule` | `CodexCaptureTracer` |
@@ -301,11 +301,13 @@ enumeration/claim/delivery cycle, so a slow cycle cannot overlap another. The
 packaged tracer retains per-stream failures for a later cycle rather than
 letting one outage cancel responsibility for other configured streams.
 
-The supported runtime calls `EnumerateCurrentSessions` against an explicitly
-mounted `~/.codex/sessions` root and selects only `rollout-*.jsonl`. The generic
-enumerator and its archive-movement behavior remain a synthetic compatibility
-seam; the production image neither mounts the Codex home/archives nor discovers
-root-level `history.jsonl`.
+The supported runtime calls
+`EnumerateCurrentSessionsAndResponsibleArchives` against separately mounted
+`~/.codex/sessions` and `~/.codex/archived_sessions` roots. It selects every
+current `rollout-*.jsonl`, but returns an archived rollout only when its logical
+transcript identity matches a stream with an existing non-empty durable queue.
+The archive is therefore a retry locator, not a historical discovery surface;
+unrelated archives and root-level `history.jsonl` are not returned.
 
 The server combines the discovered tuple with the authenticated binding,
 persists its components on `capture_source_streams`, and derives a deterministic

@@ -34,6 +34,56 @@ public sealed class CaptureScheduleTests
         }
     }
 
+    [Fact]
+    public async Task ProductionDiscoverySelectsOnlyArchivesWithExistingDurableResponsibility()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-responsible-archive-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions");
+        string archive = Path.Combine(codexHome, "archived_sessions");
+        string current = Path.Combine(sessions, "2026", "08", "12", "rollout-current.jsonl");
+        string responsible = Path.Combine(archive, "rollout-responsible.jsonl");
+        string unrelated = Path.Combine(archive, "rollout-unrelated.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(current)!);
+        Directory.CreateDirectory(archive);
+        await File.WriteAllTextAsync(current, SessionMetadata("current-session"));
+        await File.WriteAllTextAsync(responsible, SessionMetadata("responsible-session"));
+        await File.WriteAllTextAsync(unrelated, SessionMetadata("unrelated-session"));
+
+        try
+        {
+            CodexTranscriptStream responsibleStream = Assert.Single(
+                CodexTranscriptDiscovery.Enumerate(archive),
+                stream => stream.Path == responsible);
+
+            CodexTranscriptStream[] discovered =
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    sessions,
+                    archive,
+                    new HashSet<string>(StringComparer.Ordinal)
+                    {
+                        responsibleStream.TranscriptIdentity!
+                    })
+                .ToArray();
+
+            Assert.Equal([current, responsible], discovered.Select(stream => stream.Path));
+            Assert.False(discovered[0].TerminalAtEndOfFile);
+            Assert.True(discovered[1].TerminalAtEndOfFile);
+            Assert.DoesNotContain(discovered, stream => stream.Path == unrelated);
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    private static string SessionMetadata(string sessionId) =>
+        JsonSerializer.Serialize(new
+        {
+            type = "session_meta",
+            payload = new { id = sessionId, session_id = sessionId }
+        }) + "\n";
+
     [Theory]
     [InlineData(
         "codex-cli-0.77.parent-only.synthetic.jsonl",

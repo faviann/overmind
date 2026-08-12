@@ -26,10 +26,6 @@ namespace MemSrv.Tests;
 // bounded waits with kill-tree on timeout.
 internal static class TestProcessRunner
 {
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, string>
-        _captureStateDirectories = new();
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, int>
-        _initialCaptureReceiptCounts = new();
     private static readonly Lazy<string> _repoRoot = new(FindRepoRoot);
     private static readonly Lazy<string> _memCtlPath = new(() => ResolveApphost("MemCtl"));
     private static readonly Lazy<string> _serverPath = new(() => ResolveApphost("MemSrv.Server"));
@@ -220,7 +216,7 @@ internal static class TestProcessRunner
             stderr.ToString());
     }
 
-    public static Process StartCaptureTracer(
+    public static CaptureTracerProcess StartCaptureTracer(
         IReadOnlyDictionary<string, string> environment)
     {
         string? stateDirectory = environment.GetValueOrDefault("OVERMIND_CAPTURE_STATE_DIR");
@@ -236,22 +232,8 @@ internal static class TestProcessRunner
         }
         Process process = Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
             ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
-        if (stateDirectory is not null)
-        {
-            _captureStateDirectories[process.Id] = stateDirectory;
-            _initialCaptureReceiptCounts[process.Id] = initialReceiptCount;
-        }
-        return process;
+        return new CaptureTracerProcess(process, stateDirectory, initialReceiptCount);
     }
-
-    public static string CaptureStateDirectory(Process process) =>
-        _captureStateDirectories.TryGetValue(process.Id, out string? stateDirectory)
-            ? stateDirectory
-            : throw new InvalidOperationException(
-                "Capture tracer process has no registered durable-state directory.");
-
-    public static int InitialCaptureReceiptCount(Process process) =>
-        _initialCaptureReceiptCounts.GetValueOrDefault(process.Id);
 
     private static ProcessStartInfo CreateStartInfo(
         string apphostPath, IReadOnlyList<string> args, IReadOnlyDictionary<string, string> environment)
@@ -345,4 +327,48 @@ internal static class TestProcessRunner
 
         return directory?.FullName ?? throw new InvalidOperationException("Could not find repo root.");
     }
+}
+
+internal sealed class CaptureTracerProcess : IDisposable
+{
+    private readonly Process _process;
+
+    public CaptureTracerProcess(
+        Process process,
+        string? stateDirectory,
+        int initialReceiptCount)
+    {
+        _process = process;
+        StateDirectory = stateDirectory ?? throw new InvalidOperationException(
+            "Capture tracer process has no durable-state directory.");
+        InitialReceiptCount = initialReceiptCount;
+    }
+
+    public string StateDirectory { get; }
+    public int InitialReceiptCount { get; }
+    public HashSet<Guid> SeenReceiptIds { get; } = [];
+    public StreamReader StandardOutput => _process.StandardOutput;
+    public StreamReader StandardError => _process.StandardError;
+    public bool HasExited => _process.HasExited;
+    public int ExitCode => _process.ExitCode;
+
+    public event DataReceivedEventHandler? OutputDataReceived
+    {
+        add => _process.OutputDataReceived += value;
+        remove => _process.OutputDataReceived -= value;
+    }
+
+    public event DataReceivedEventHandler? ErrorDataReceived
+    {
+        add => _process.ErrorDataReceived += value;
+        remove => _process.ErrorDataReceived -= value;
+    }
+
+    public void BeginOutputReadLine() => _process.BeginOutputReadLine();
+    public void BeginErrorReadLine() => _process.BeginErrorReadLine();
+    public void Kill(bool entireProcessTree) => _process.Kill(entireProcessTree);
+    public Task WaitForExitAsync(CancellationToken cancellationToken = default) =>
+        _process.WaitForExitAsync(cancellationToken);
+    public void WaitForExit() => _process.WaitForExit();
+    public void Dispose() => _process.Dispose();
 }

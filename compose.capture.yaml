@@ -12,6 +12,7 @@ services:
       OVERMIND_CAPTURE_URL: ${OVERMIND_CAPTURE_URL:?Set the central server URL}
       OVERMIND_CAPTURE_CREDENTIAL: ${OVERMIND_CAPTURE_CREDENTIAL:?Set the restricted capture credential}
       OVERMIND_CODEX_SESSIONS_ROOT: /capture/sessions
+      OVERMIND_CODEX_ARCHIVE_ROOT: /capture/archived_sessions
       OVERMIND_CAPTURE_STATE_DIR: /state
       OVERMIND_CAPTURE_SCAN_INTERVAL_MS: ${OVERMIND_CAPTURE_SCAN_INTERVAL_MS:-1000}
       OVERMIND_CAPTURE_SCAN_JITTER_MS: ${OVERMIND_CAPTURE_SCAN_JITTER_MS:-250}
@@ -19,6 +20,12 @@ services:
       - type: bind
         source: ${OVERMIND_CODEX_SESSIONS_ROOT:?Set the machine Codex current sessions root}
         target: /capture/sessions
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OVERMIND_CODEX_ARCHIVE_ROOT:?Set the machine Codex archived sessions root}
+        target: /capture/archived_sessions
         read_only: true
         bind:
           create_host_path: false

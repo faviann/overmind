@@ -15,6 +15,7 @@ bool runOnce = string.Equals(
 string endpoint;
 string credential;
 string transcriptRoot;
+string? archiveRoot;
 string stateDirectory;
 bool useLegacySyntheticDiscovery;
 try
@@ -25,7 +26,7 @@ try
         throw new InvalidOperationException("OVERMIND_CAPTURE_URL must be an absolute URL.");
     }
     credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
-    if (!IsRestrictedCaptureCredential(credential))
+    if (!CaptureCredential.IsCaptureForm(credential))
     {
         throw new InvalidOperationException(
             "OVERMIND_CAPTURE_CREDENTIAL must be a restricted capture credential.");
@@ -37,6 +38,9 @@ try
         useLegacySyntheticDiscovery
             ? "OVERMIND_CODEX_TRANSCRIPT_ROOT"
             : "OVERMIND_CODEX_SESSIONS_ROOT"));
+    archiveRoot = useLegacySyntheticDiscovery
+        ? null
+        : Path.GetFullPath(Required("OVERMIND_CODEX_ARCHIVE_ROOT"));
     stateDirectory = Path.GetFullPath(
         Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_STATE_DIR")
         ?? transcriptRoot + ".overmind-state");
@@ -159,9 +163,24 @@ try
         IReadOnlyList<CodexTranscriptStream> streams;
         try
         {
-            streams = useLegacySyntheticDiscovery
-                ? CodexTranscriptDiscovery.Enumerate(transcriptRoot)
-                : CodexTranscriptDiscovery.EnumerateCurrentSessions(transcriptRoot);
+            if (useLegacySyntheticDiscovery)
+            {
+                streams = CodexTranscriptDiscovery.Enumerate(transcriptRoot);
+            }
+            else
+            {
+                CaptureRuntimeSnapshot snapshot =
+                    await runtimeState.ReadAsync(cancellationToken);
+                var responsibleTranscriptIdentities = snapshot.Streams
+                    .Where(stream => stream.Queue.Count > 0)
+                    .Select(stream => stream.TranscriptIdentity)
+                    .ToHashSet(StringComparer.Ordinal);
+                streams = CodexTranscriptDiscovery
+                    .EnumerateCurrentSessionsAndResponsibleArchives(
+                        transcriptRoot,
+                        archiveRoot!,
+                        responsibleTranscriptIdentities);
+            }
         }
         catch (Exception ex) when (IsExpectedFilesystemFailure(ex))
         {
@@ -321,9 +340,3 @@ static string Required(string name) =>
     Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
         ? value
         : throw new InvalidOperationException($"{name} is required.");
-
-static bool IsRestrictedCaptureCredential(string value) =>
-    value.StartsWith("mcap_", StringComparison.Ordinal)
-    && value.Length >= 37
-    && value.AsSpan(5).IndexOfAnyExcept(
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_".AsSpan()) < 0;

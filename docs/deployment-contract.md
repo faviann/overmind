@@ -215,10 +215,13 @@ modes run from the same image.
 the Codex scanner adapter and talks to the server through the capture HTTP API;
 it has no database connection or server role. `compose.capture.yaml` is the
 reference Linux-first installation beside local Codex. Its container root is
-read-only, the current `~/.codex/sessions` rollout tree and repository mounts
-are read-only, durable state is
+read-only; the current `~/.codex/sessions` tree, the
+`~/.codex/archived_sessions` retry-locator tree, and repository mounts are
+read-only; durable state is
 the only writable volume, and it has no ports, Docker socket, privileged mode,
-or self-update behavior. See `docs/codex-capture-runtime.md` for enrollment and
+or self-update behavior. Archived files are selected only for an existing
+non-empty durable queue, never as historical import. See
+`docs/codex-capture-runtime.md` for enrollment and
 the machine-owned/server-owned configuration boundary.
 
 ## Release verification

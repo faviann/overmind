@@ -12,8 +12,42 @@ socket, database credential, privileged mode, or self-update path.
 
 ## Enrollment
 
-Until browser enrollment exists, the operator creates a random capture-only
-credential in a mode-`0600` file and enrolls it with `memctl`:
+The default credentialless startup uses browser-mediated pairing. When no
+`OVERMIND_CAPTURE_CREDENTIAL` is configured and the durable state volume has no
+previously delivered credential, the runtime:
+
+1. creates or reuses a mode-`0600` Codex installation identity in
+   `OVERMIND_CAPTURE_STATE_DIR`;
+2. sends that detected identity and the detected machine name to
+   `POST /capture/v1/pairing-requests`;
+3. writes the returned non-secret verification URL and user code to stderr;
+4. polls `GET /capture/v1/pairing-requests/{requestId}` with the secret polling
+   capability until an operator approves or the request expires; and
+5. stores the capture credential exactly once in the state volume as the
+   mode-`0600` `capture-credential` file.
+
+The operator opens `/capture/console/pair/{userCode}`, signs in through the
+configured OIDC provider, verifies the detected machine and installation, and
+chooses the label, allowed repository route patterns, and special namespace
+mappings, plus any directory routes that select those mappings. The server
+derives the operator identity from the OIDC `sub` claim.
+It derives the capture `agent_id` and binding identity itself; neither is a
+pairing input. A Codex installation can acquire only one binding, including
+when multiple requests or approvals race.
+
+The user code and verification URL are safe to display. The polling token and
+delivered `mcap_…` credential are secrets: neither is put in the URL or logs.
+Only the polling-token hash is persisted long-term. Credential plaintext exists
+in transient delivery state only between approval and its first authenticated
+poll, which atomically returns it once and clears that plaintext. Expiry removes
+authority from a still-pending request. Once approval commits before expiry,
+delivery remains available exactly once across expiry or an outage; cancellation
+cannot revoke that already-created binding.
+
+Pre-provisioned capture credentials remain supported for unattended rollout or
+break-glass operation. When `OVERMIND_CAPTURE_CREDENTIAL` is present, the
+runtime uses it directly and does not pair. An operator can create such a
+capture-only credential in a mode-`0600` file and enroll it with `memctl`:
 
 ```sh
 memctl capture enroll my-codex-runtime \
@@ -22,15 +56,16 @@ memctl capture enroll my-codex-runtime \
   --credential-file /run/secrets/codex-capture-key
 ```
 
-Only the resulting `mcap_…` credential and the server URL cross into the
-runtime. The credential authorizes capture writes only: it is not an MCP agent
-key and provides no captured-content reads or database access.
+In either enrollment mode, the `mcap_…` credential authorizes capture writes
+only: it is not an MCP agent key and provides no console access,
+captured-content reads, or database access.
 
 ## Run the immutable image
 
 Copy `.env.capture.example` to an ignored operator-owned environment file,
-replace every placeholder, restrict it to the operator before starting Compose,
-and use an immutable version or registry digest:
+replace every required placeholder, optionally uncomment a pre-provisioned
+credential (otherwise browser pairing runs), restrict it to the operator before
+starting Compose, and use an immutable version or registry digest:
 
 ```sh
 chmod 0600 .env.capture

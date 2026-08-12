@@ -7,10 +7,10 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     environment:
-      # Machine-owned connection facts. The credential is created by the
-      # temporary memctl enrollment procedure documented for this runtime.
+      # Machine-owned connection facts. Omit the credential for browser
+      # pairing, or provide an existing restricted credential.
       OVERMIND_CAPTURE_URL: ${OVERMIND_CAPTURE_URL:?Set the central server URL}
-      OVERMIND_CAPTURE_CREDENTIAL: ${OVERMIND_CAPTURE_CREDENTIAL:?Set the restricted capture credential}
+      OVERMIND_CAPTURE_CREDENTIAL: ${OVERMIND_CAPTURE_CREDENTIAL:-}
       OVERMIND_CODEX_SESSIONS_ROOT: /capture/sessions
       OVERMIND_CODEX_ARCHIVE_ROOT: /capture/archived_sessions
       OVERMIND_CAPTURE_STATE_DIR: /state

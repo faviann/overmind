@@ -1,9 +1,9 @@
 # Capture modules
 
-The capture spine (issue #74, stabilized by #120 and routed by #77) is six
-public modules in `MemSrv.Core`, plus the never-store gate (#76) that all of
-them cross. No module requires a caller to understand another's rules. This
-note records the shape that exists; it decides nothing new.
+The capture spine (issue #74, stabilized by #120 and routed by #77) comprises
+the public modules listed below. Capture paths cross the never-store gate
+(#76). No module requires a caller to understand another's rules. This note
+records the shape that exists; it decides nothing new.
 
 Source interpretation before this spine is described by the
 [harness-neutral capture adapter contract](capture-adapter-contract.md).
@@ -13,6 +13,7 @@ Source interpretation before this spine is described by the
 | Module | Public interface | Caller |
 | --- | --- | --- |
 | `CaptureEnrollment` | `EnrollAsync(stableName, harness, agentId, credential)` → binding uuid | `memctl capture enroll` |
+| `CapturePairing` | create/poll/cancel plus code-based operator inspection and approval → one installation binding and one-time credential delivery | `/capture/v1/pairing-requests`, `/capture/console/pair/{userCode}` |
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |

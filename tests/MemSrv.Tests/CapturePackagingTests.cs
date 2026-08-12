@@ -1,10 +1,152 @@
 using System.Text.Json;
+using System.Net;
 using CaptureAdapters;
 
 namespace MemSrv.Tests;
 
 public sealed class CapturePackagingTests
 {
+    [Fact]
+    public void ShippedComposeAllowsCredentiallessPairingAndDocumentsOptionalCredential()
+    {
+        string compose = File.ReadAllText(Path.Combine(
+            TestProcessRunner.RepoRoot, "compose.capture.yaml"));
+        string example = File.ReadAllText(Path.Combine(
+            TestProcessRunner.RepoRoot, ".env.capture.example"));
+
+        Assert.Contains(
+            "OVERMIND_CAPTURE_CREDENTIAL: ${OVERMIND_CAPTURE_CREDENTIAL:-}", compose);
+        Assert.DoesNotContain("OVERMIND_CAPTURE_CREDENTIAL:?", compose);
+        Assert.Contains("# OVERMIND_CAPTURE_CREDENTIAL=mcap_", example);
+        Assert.DoesNotContain("OVERMIND_CAPTURE_CREDENTIAL=<", example);
+    }
+
+    [Fact]
+    public async Task MissingCredentialUsesPairingAndPersistsDeliveredCredentialMode0600()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-pairing-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        string deliveredCredential = $"mcap_{Guid.NewGuid():N}";
+        Task server = Task.Run(async () =>
+        {
+            HttpListenerContext create = await listener.GetContextAsync();
+            Assert.Equal("/capture/v1/pairing-requests", create.Request.Url!.AbsolutePath);
+            await JsonSerializer.SerializeAsync(create.Response.OutputStream, new
+            {
+                requestId = Guid.NewGuid(),
+                verificationUri = "https://console.invalid/capture/console/pair/DEADBEEF",
+                userCode = "DEADBEEF",
+                pollingToken = "private-polling-token",
+                expiresAt = DateTimeOffset.UtcNow.AddMinutes(15)
+            });
+            create.Response.StatusCode = 201;
+            create.Response.Close();
+            HttpListenerContext poll = await listener.GetContextAsync();
+            Assert.Equal("Bearer private-polling-token", poll.Request.Headers["Authorization"]);
+            await JsonSerializer.SerializeAsync(poll.Response.OutputStream, new
+            {
+                status = "approved", credential = deliveredCredential
+            });
+            poll.Response.StatusCode = 200;
+            poll.Response.Close();
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment.Remove("OVERMIND_CAPTURE_CREDENTIAL");
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_pairing_completed\"");
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Empty(result.Stdout);
+            Assert.Contains("https://console.invalid/capture/console/pair/DEADBEEF", result.Stderr);
+            Assert.DoesNotContain("private-polling-token", result.Stderr);
+            Assert.DoesNotContain(deliveredCredential, result.Stderr);
+            string path = Path.Combine(state, "capture-credential");
+            Assert.Equal(deliveredCredential, await File.ReadAllTextAsync(path));
+            if (!OperatingSystem.IsWindows())
+                Assert.Equal(
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite,
+                    File.GetUnixFileMode(path));
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerPollsCreatedRequestUntilServerReportsApprovedAfterOriginalExpiry()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-expired-poll-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        string deliveredCredential = $"mcap_{Guid.NewGuid():N}";
+        Task server = Task.Run(async () =>
+        {
+            HttpListenerContext create = await listener.GetContextAsync();
+            await JsonSerializer.SerializeAsync(create.Response.OutputStream, new
+            {
+                requestId = Guid.NewGuid(),
+                verificationUri = "https://console.invalid/capture/console/pair/DEADBEEF",
+                userCode = "DEADBEEF",
+                pollingToken = "private-polling-token",
+                expiresAt = DateTimeOffset.UtcNow.AddMinutes(-1)
+            });
+            create.Response.StatusCode = 201;
+            create.Response.Close();
+            HttpListenerContext poll = await listener.GetContextAsync();
+            await JsonSerializer.SerializeAsync(poll.Response.OutputStream, new
+            {
+                status = "approved", credential = deliveredCredential
+            });
+            poll.Response.StatusCode = 200;
+            poll.Response.Close();
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment.Remove("OVERMIND_CAPTURE_CREDENTIAL");
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_pairing_completed\"");
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Empty(result.Stdout);
+            Assert.Equal(deliveredCredential,
+                await File.ReadAllTextAsync(Path.Combine(state, "capture-credential")));
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static int FreePort()
+    {
+        using var tcp = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        tcp.Start();
+        return ((System.Net.IPEndPoint)tcp.LocalEndpoint).Port;
+    }
+
     [Fact]
     public async Task DuplicateObservedSourceStreamFailsBeforeClaimOrDelivery()
     {

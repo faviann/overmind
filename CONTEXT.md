@@ -49,6 +49,12 @@ it to import captured history. It may receive its own import receipts and, only
 if required, its own operational stream status; it never grants captured-content
 reads.
 
+**Capture pairing request** — short-lived server coordination state connecting
+one runtime-detected machine/installation to an OIDC-authenticated operator's
+approval. Its displayed code locates the request but grants no authority; a
+separate secret polling capability can receive the capture credential once.
+Approval creates at most one durable binding for a Codex installation.
+
 **Agent identity (`agent_id`)** — who is acting. Derived by the server from the
 connection (bearer key over HTTP, process config over stdio), never
 self-asserted in tool arguments. It identifies the provisioned actor, not the

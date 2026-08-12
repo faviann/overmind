@@ -1,5 +1,6 @@
 using CaptureAdapters;
 using MemSrv.Core;
+using System.Net.Http.Json;
 using System.Text.Json;
 
 const string LegacySyntheticEnableValue = "synthetic-non-production";
@@ -21,12 +22,6 @@ try
     {
         throw new InvalidOperationException("OVERMIND_CAPTURE_URL must be an absolute URL.");
     }
-    credential = Required("OVERMIND_CAPTURE_CREDENTIAL");
-    if (!CaptureCredential.IsCaptureForm(credential))
-    {
-        throw new InvalidOperationException(
-            "OVERMIND_CAPTURE_CREDENTIAL must be a restricted capture credential.");
-    }
     useLegacySyntheticDiscovery = legacySyntheticDiagnostics
         && string.IsNullOrWhiteSpace(
             Environment.GetEnvironmentVariable("OVERMIND_CODEX_SESSIONS_ROOT"));
@@ -40,6 +35,7 @@ try
     stateDirectory = Path.GetFullPath(
         Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_STATE_DIR")
         ?? transcriptRoot + ".overmind-state");
+    credential = await ResolveCredentialAsync(endpoint, stateDirectory);
 }
 catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
 {
@@ -417,3 +413,106 @@ static string Required(string name) =>
     Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
         ? value
         : throw new InvalidOperationException($"{name} is required.");
+
+static async Task<string> ResolveCredentialAsync(string endpoint, string stateDirectory)
+{
+    string? configured = Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_CREDENTIAL");
+    if (!string.IsNullOrWhiteSpace(configured))
+    {
+        if (!CaptureCredential.IsCaptureForm(configured))
+            throw new InvalidOperationException(
+                "OVERMIND_CAPTURE_CREDENTIAL must be a restricted capture credential.");
+        return configured;
+    }
+
+    Directory.CreateDirectory(stateDirectory);
+    string credentialPath = Path.Combine(stateDirectory, "capture-credential");
+    if (File.Exists(credentialPath))
+    {
+        string persisted = (await File.ReadAllTextAsync(credentialPath)).Trim();
+        if (!CaptureCredential.IsCaptureForm(persisted))
+            throw new InvalidDataException("Persisted capture credential is invalid.");
+        return persisted;
+    }
+
+    string installationPath = Path.Combine(stateDirectory, "codex-installation-id");
+    string installationId;
+    if (File.Exists(installationPath))
+    {
+        installationId = (await File.ReadAllTextAsync(installationPath)).Trim();
+        if (string.IsNullOrWhiteSpace(installationId))
+            throw new InvalidDataException("Persisted Codex installation identity is invalid.");
+    }
+    else
+    {
+        installationId = Guid.NewGuid().ToString("N");
+        await WritePrivateFileAsync(installationPath, installationId);
+    }
+
+    using var client = new HttpClient { BaseAddress = new Uri(endpoint + "/") };
+    using HttpResponseMessage created = await client.PostAsJsonAsync(
+        "capture/v1/pairing-requests",
+        new { machineName = Environment.MachineName, codexInstallationId = installationId });
+    created.EnsureSuccessStatusCode();
+    PairingCreated? pairing = await created.Content.ReadFromJsonAsync<PairingCreated>();
+    if (pairing is null
+        || pairing.RequestId == Guid.Empty
+        || string.IsNullOrWhiteSpace(pairing.VerificationUri)
+        || string.IsNullOrWhiteSpace(pairing.UserCode)
+        || string.IsNullOrWhiteSpace(pairing.PollingToken))
+        throw new InvalidDataException("Pairing server response is invalid.");
+
+    // The URL and user code are explicitly non-secret. Neither the polling
+    // capability nor the delivered credential enters diagnostics.
+    Console.Error.WriteLine(JsonSerializer.Serialize(new
+    {
+        @event = "capture_pairing_required",
+        adapter = "codex",
+        verificationUri = pairing.VerificationUri,
+        userCode = pairing.UserCode
+    }, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+    while (true)
+    {
+        using var pollRequest = new HttpRequestMessage(
+            HttpMethod.Get, $"capture/v1/pairing-requests/{pairing.RequestId}");
+        pollRequest.Headers.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", pairing.PollingToken);
+        using HttpResponseMessage response = await client.SendAsync(pollRequest);
+        if (response.StatusCode == System.Net.HttpStatusCode.Gone)
+            throw new InvalidOperationException("Capture pairing is no longer available.");
+        response.EnsureSuccessStatusCode();
+        PairingPoll? result = await response.Content.ReadFromJsonAsync<PairingPoll>();
+        if (result?.Status == "approved")
+        {
+            if (!CaptureCredential.IsCaptureForm(result.Credential ?? ""))
+                throw new InvalidDataException("Pairing credential response is invalid.");
+            await WritePrivateFileAsync(credentialPath, result.Credential!);
+            WriteDiagnostic("capture_pairing_completed");
+            return result.Credential!;
+        }
+        if (result?.Status != "pending")
+            throw new InvalidDataException("Pairing poll response is invalid.");
+        await Task.Delay(TimeSpan.FromSeconds(2));
+    }
+}
+
+static async Task WritePrivateFileAsync(string path, string content)
+{
+    await using var stream = new FileStream(path, new FileStreamOptions
+    {
+        Access = FileAccess.Write,
+        Mode = FileMode.CreateNew,
+        Share = FileShare.None,
+        UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
+    });
+    await using var writer = new StreamWriter(stream, leaveOpen: false);
+    await writer.WriteAsync(content);
+    await writer.FlushAsync();
+}
+
+sealed record PairingCreated(
+    Guid RequestId, string VerificationUri, string UserCode,
+    string PollingToken, DateTimeOffset ExpiresAt);
+sealed record PairingPoll(string Status, string? Credential);

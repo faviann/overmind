@@ -24,11 +24,11 @@ public static class CodexTranscriptDiscovery
         EnumerateCurrentSessionsAndResponsibleArchives(
             string sessionsRoot,
             string archiveRoot,
-            IReadOnlySet<string> responsibleTranscriptIdentities)
+            IReadOnlyDictionary<string, string> responsibleSourceStreamsByTranscriptIdentity)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionsRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(archiveRoot);
-        ArgumentNullException.ThrowIfNull(responsibleTranscriptIdentities);
+        ArgumentNullException.ThrowIfNull(responsibleSourceStreamsByTranscriptIdentity);
         string fullSessionsRoot = Path.GetFullPath(sessionsRoot);
         string fullArchiveRoot = Path.GetFullPath(archiveRoot);
         if (!Directory.Exists(fullSessionsRoot))
@@ -50,9 +50,20 @@ public static class CodexTranscriptDiscovery
                 fullArchiveRoot, "rollout-*.jsonl", SearchOption.AllDirectories)
             .Select(Path.GetFullPath)
             .OrderBy(path => path, StringComparer.Ordinal)
-            .Where(path => responsibleTranscriptIdentities.Contains(
-                ProductionTranscriptIdentity(path)))
-            .Select(path => DescribeProduction(path, terminalAtEndOfFile: true))
+            .Select(path => new
+            {
+                Path = path,
+                TranscriptIdentity = ProductionTranscriptIdentity(path)
+            })
+            .Where(candidate => responsibleSourceStreamsByTranscriptIdentity.ContainsKey(
+                candidate.TranscriptIdentity))
+            .Select(candidate => DescribeProduction(
+                candidate.Path, terminalAtEndOfFile: true))
+            .Where(stream => stream.TranscriptIdentity is not null
+                && responsibleSourceStreamsByTranscriptIdentity.TryGetValue(
+                    stream.TranscriptIdentity, out string? responsibleSourceStream)
+                && string.Equals(
+                    stream.SourceStream, responsibleSourceStream, StringComparison.Ordinal))
             .ToArray();
         CodexTranscriptStream[] streams = [.. current, .. responsibleArchives];
         ThrowIfAmbiguous(streams);

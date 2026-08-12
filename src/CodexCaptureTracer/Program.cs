@@ -182,15 +182,17 @@ try
             {
                 CaptureRuntimeSnapshot snapshot =
                     await runtimeState.ReadAsync(cancellationToken);
-                var responsibleTranscriptIdentities = snapshot.Streams
+                var responsibleSourceStreamsByTranscriptIdentity = snapshot.Streams
                     .Where(stream => stream.Queue.Count > 0)
-                    .Select(stream => stream.TranscriptIdentity)
-                    .ToHashSet(StringComparer.Ordinal);
+                    .ToDictionary(
+                        stream => stream.TranscriptIdentity,
+                        stream => stream.SourceStream,
+                        StringComparer.Ordinal);
                 streams = CodexTranscriptDiscovery
                     .EnumerateCurrentSessionsAndResponsibleArchives(
                         transcriptRoot,
                         archiveRoot!,
-                        responsibleTranscriptIdentities);
+                        responsibleSourceStreamsByTranscriptIdentity);
             }
         }
         catch (Exception ex) when (IsExpectedRuntimeFailure(ex))

@@ -22,7 +22,7 @@ Source interpretation before this spine is described by the
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
-| `CodexTranscriptDiscovery` | `EnumerateCurrentSessionsAndResponsibleArchives(sessionsRoot, archiveRoot, responsibleTranscriptIdentities)` for production current rollouts plus responsibility-filtered archive retries; `Enumerate(configuredLocation)` for the legacy synthetic fixture seam → streams with explicit Codex source identity | `CodexCaptureTracer` |
+| `CodexTranscriptDiscovery` | `EnumerateCurrentSessionsAndResponsibleArchives(sessionsRoot, archiveRoot, responsibleSourceStreamsByTranscriptIdentity)` for production current rollouts plus identity-bound responsibility-filtered archive retries; `Enumerate(configuredLocation)` for the legacy synthetic fixture seam → streams with explicit Codex source identity | `CodexCaptureTracer` |
 | `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
 | `CaptureRescanScheduler` | `RunAsync(scanCycle, schedule, jitterSource, delay)` | `CodexCaptureTracer` |
 | `CaptureRescanConfiguration` | `Load(readEnvironment)` → `CaptureRescanSchedule` | `CodexCaptureTracer` |
@@ -305,7 +305,9 @@ The supported runtime calls
 `EnumerateCurrentSessionsAndResponsibleArchives` against separately mounted
 `~/.codex/sessions` and `~/.codex/archived_sessions` roots. It selects every
 current `rollout-*.jsonl`, but returns an archived rollout only when its logical
-transcript identity matches a stream with an existing non-empty durable queue.
+transcript identity and resolved source stream match a stream with an existing
+non-empty durable queue. A same-basename archive with different session metadata
+does not inherit that responsibility.
 The archive is therefore a retry locator, not a historical discovery surface;
 unrelated archives and root-level `history.jsonl` are not returned.
 

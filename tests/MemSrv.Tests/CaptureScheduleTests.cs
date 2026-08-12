@@ -58,7 +58,7 @@ public sealed class CaptureScheduleTests
                 CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
                     sessions,
                     archive,
-                    new HashSet<string>(StringComparer.Ordinal)),
+                    new Dictionary<string, string>(StringComparer.Ordinal)),
                 stream => stream.Path == responsibleActive);
             File.Move(responsibleActive, responsible);
 
@@ -66,9 +66,10 @@ public sealed class CaptureScheduleTests
                 CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
                     sessions,
                     archive,
-                    new HashSet<string>(StringComparer.Ordinal)
+                    new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        responsibleStream.TranscriptIdentity!
+                        [responsibleStream.TranscriptIdentity!] =
+                            responsibleStream.SourceStream
                     })
                 .ToArray();
 
@@ -103,7 +104,7 @@ public sealed class CaptureScheduleTests
                 CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
                     Path.Combine(codexHome, "sessions"),
                     archive,
-                    new HashSet<string>(StringComparer.Ordinal)));
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
             File.Move(active, responsible);
             await File.WriteAllTextAsync(unrelated, "not-json-and-must-not-be-opened\n");
             using var unrelatedLock = new FileStream(
@@ -113,9 +114,9 @@ public sealed class CaptureScheduleTests
                 CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
                     Path.Combine(codexHome, "sessions"),
                     archive,
-                    new HashSet<string>(StringComparer.Ordinal)
+                    new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        current.TranscriptIdentity!
+                        [current.TranscriptIdentity!] = current.SourceStream
                     }));
             var delivered = new List<string>();
             await CodexTranscriptScanCycle.RunAsync(
@@ -133,6 +134,44 @@ public sealed class CaptureScheduleTests
             Assert.Equal(current.SourceStream, selected.SourceStream);
             Assert.Equal([responsible], delivered);
             Assert.DoesNotContain("unrelated", selected.Path, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProductionDiscoveryRejectsResponsibleArchiveWithDifferentSourceIdentity()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-replaced-archive-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(codexHome, "archived_sessions");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-responsible.jsonl");
+        string archived = Path.Combine(archive, Path.GetFileName(active));
+        await File.WriteAllTextAsync(active, SessionMetadata("authorized-session"));
+
+        try
+        {
+            CodexTranscriptStream authorized = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
+            File.Delete(active);
+            await File.WriteAllTextAsync(archived, SessionMetadata("replacement-session"));
+
+            Assert.Empty(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        [authorized.TranscriptIdentity!] = authorized.SourceStream
+                    }));
         }
         finally
         {
@@ -343,7 +382,7 @@ public sealed class CaptureScheduleTests
                 CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
                     sessions,
                     archive,
-                    new HashSet<string>(StringComparer.Ordinal)));
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
 
             Assert.Equal(
                 "Configured Codex transcript discovery contains ambiguous duplicate source streams.",

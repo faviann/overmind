@@ -344,6 +344,57 @@ public sealed class CapturePackagingTests
     }
 
     [Fact]
+    public async Task PackagedRuntimeDoesNotClaimSameBasenameArchiveWithDifferentSourceIdentity()
+    {
+        const string replacementContent = "private replacement archive content";
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-replaced-archive-process-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(root, "archived_sessions");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-responsible.jsonl");
+        string archived = Path.Combine(archive, Path.GetFileName(active));
+        await File.WriteAllTextAsync(active, Transcript("authorized-session"));
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+
+        try
+        {
+            var outage = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+            Assert.Equal(0, outage.ExitCode);
+            CaptureRuntimeStreamState authorized = Assert.Single(
+                (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
+            Assert.Equal(2, authorized.Queue.Count);
+
+            File.Delete(active);
+            await File.WriteAllTextAsync(
+                archived,
+                Transcript("replacement-session").Replace(
+                    "public evidence", replacementContent, StringComparison.Ordinal));
+
+            var restarted = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+
+            Assert.Equal(0, restarted.ExitCode);
+            CaptureRuntimeStreamState retained = Assert.Single(
+                (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
+            Assert.Equal(authorized.SourceStream, retained.SourceStream);
+            Assert.Equal(authorized.TranscriptIdentity, retained.TranscriptIdentity);
+            Assert.Equal(2, retained.Queue.Count);
+            Assert.Null(retained.Stop);
+            Assert.DoesNotContain(
+                replacementContent,
+                await File.ReadAllTextAsync(Path.Combine(state, "capture-state.json")),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ProductionRuntimeStartsWithoutSyntheticGateAndKeepsStdoutEmpty()
     {
         string root = Path.Combine(

@@ -19,6 +19,7 @@ COPY config/ /app/config/
 RUN test -n "$VERSION" && mkdir /state && chown 65532:65532 /state
 USER 65532:65532
 ENV OVERMIND_CODEX_SESSIONS_ROOT=/capture/sessions \
+    OVERMIND_CODEX_ARCHIVE_ROOT=/capture/archived_sessions \
     OVERMIND_CAPTURE_STATE_DIR=/state
 LABEL org.opencontainers.image.title="Overmind Codex capture runtime" \
       org.opencontainers.image.version="$VERSION" \

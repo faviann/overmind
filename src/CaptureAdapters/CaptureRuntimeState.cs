@@ -289,6 +289,10 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
             bufferSize: 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         using JsonDocument document = await JsonDocument.ParseAsync(
             stream, cancellationToken: cancellationToken);
+        if (!JsonAdapterHelpers.HasUniquePropertyNames(document.RootElement))
+        {
+            throw UnsupportedState();
+        }
         CaptureRuntimeSnapshot snapshot;
         try
         {

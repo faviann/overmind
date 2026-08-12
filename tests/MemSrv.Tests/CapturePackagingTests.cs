@@ -121,6 +121,57 @@ public sealed class CapturePackagingTests
     }
 
     [Theory]
+    [MemberData(nameof(DuplicatePackagedRuntimeStateProperties))]
+    public async Task DuplicateDurableStatePropertiesFailContentFreeBeforePackagedCapture(
+        string stateContents)
+    {
+        const string privateValue = "private-packaged-duplicate-value";
+        const string privateApi = "https://private-api.invalid/capture";
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-duplicate-state-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Directory.CreateDirectory(state);
+        await File.WriteAllTextAsync(Path.Combine(state, "capture-state.json"), stateContents);
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_URL"] = privateApi;
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Empty(result.Stdout);
+            AssertContentFreeJsonDiagnostics(
+                result.Stderr,
+                "invalid_source_or_receipt",
+                root,
+                privateValue,
+                privateApi);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static IEnumerable<object[]> DuplicatePackagedRuntimeStateProperties()
+    {
+        const string snapshot = """
+            {"contractVersion":1,"streams":[{"sourceStream":"private-packaged-duplicate-value","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":2,"sha256":"prefix"},"enqueuedThrough":1,"queue":[{"sourceStream":"private-packaged-duplicate-value","sourcePosition":1,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":1,"byteOffset":1,"byteLength":1,"recordSha256":"record","prefixEvidence":{"byteLength":2,"sha256":"prefix"}},"redactedSafeCandidate":"{}","outcome":{"contractVersion":1,"captureHealth":"healthy","captureFidelity":"complete","counters":[]}}],"lastServerReceipt":{"sourcePosition":0,"locatorIdentity":"receipt","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"},"canonicalSourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}]}
+            """;
+
+        yield return [snapshot.Replace("\"streams\":[", "\"streams\":[],\"streams\":[", StringComparison.Ordinal)];
+        yield return [snapshot.Replace("\"queue\":[", "\"queue\":[],\"queue\":[", StringComparison.Ordinal)];
+        yield return [snapshot.Replace("\"sourcePosition\":1,\"byteOffset\"", "\"sourcePosition\":1,\"sourcePosition\":1,\"byteOffset\"", StringComparison.Ordinal)];
+        yield return [snapshot.Replace("\"captureHealth\":\"healthy\"", "\"captureHealth\":\"healthy\",\"captureHealth\":\"healthy\"", StringComparison.Ordinal)];
+        yield return [snapshot.Replace("\"status\":\"new\"", "\"status\":\"new\",\"status\":\"new\"", StringComparison.Ordinal)];
+    }
+
+    [Theory]
     [MemberData(nameof(CorruptSnapshotRelationships))]
     public async Task ContradictoryDurableStateFailsContentFreeBeforePackagedCapture(
         string stateContents)

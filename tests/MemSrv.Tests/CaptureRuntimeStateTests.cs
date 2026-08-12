@@ -32,6 +32,97 @@ public sealed class CaptureRuntimeStateTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(DuplicateRuntimeStateProperties))]
+    public async Task RuntimeStateRejectsDuplicatePropertiesAtEveryDocumentLevel(
+        string durable,
+        string privateValue)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-duplicate-property-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capture-state.json"), durable);
+
+        try
+        {
+            InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+
+            Assert.Equal("Capture runtime state has an unsupported contract.", failure.Message);
+            Assert.DoesNotContain(privateValue, failure.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(directory, failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    public static IEnumerable<object[]> DuplicateRuntimeStateProperties()
+    {
+        const string privateValue = "private-duplicate-state-value";
+        const string snapshot = """
+            {"contractVersion":1,"streams":[{"sourceStream":"private-duplicate-state-value","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":2,"sha256":"prefix"},"enqueuedThrough":1,"queue":[{"sourceStream":"private-duplicate-state-value","sourcePosition":1,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":1,"byteOffset":1,"byteLength":1,"recordSha256":"record","prefixEvidence":{"byteLength":2,"sha256":"prefix"}},"redactedSafeCandidate":"{}","outcome":{"contractVersion":1,"captureHealth":"healthy","captureFidelity":"complete","counters":[]}}],"lastServerReceipt":{"sourcePosition":0,"locatorIdentity":"receipt","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"},"canonicalSourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}]}
+            """;
+
+        yield return
+        [
+            snapshot.Replace(
+                "\"streams\":[",
+                "\"streams\":[],\"streams\":[",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"queue\":[",
+                "\"queue\":[],\"queue\":[",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"sourcePosition\":1,\"deterministicLocatorEvidence\"",
+                "\"sourcePosition\":1,\"sourcePosition\":1,\"deterministicLocatorEvidence\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"sourcePosition\":1,\"byteOffset\"",
+                "\"sourcePosition\":1,\"sourcePosition\":1,\"byteOffset\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"byteLength\":2,\"sha256\":\"prefix\"",
+                "\"byteLength\":2,\"byteLength\":2,\"sha256\":\"prefix\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"captureHealth\":\"healthy\"",
+                "\"captureHealth\":\"healthy\",\"captureHealth\":\"healthy\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"status\":\"new\"",
+                "\"status\":\"new\",\"status\":\"new\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+    }
+
     [Fact]
     public async Task MalformedTailsAdvanceOnlyAfterTerminalEvidenceAndRetriesRestartSafely()
     {

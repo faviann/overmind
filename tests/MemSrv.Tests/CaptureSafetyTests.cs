@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using CaptureAdapters;
 using Dapper;
 using MemSrv.Core;
 using MemSrv.Server;
@@ -118,8 +119,15 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 });
             Assert.False(tracer.Succeeded);
             Assert.Empty(tracer.Stdout);
-            Assert.Contains("refuses to run", tracer.Stderr);
-            Assert.Contains(expectedReason, tracer.Stderr, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(expectedReason, tracer.Stderr, StringComparison.OrdinalIgnoreCase);
+            JsonElement configurationDiagnostic = JsonDocument.Parse(tracer.Stderr.Split(
+                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
+            Assert.Equal(
+                "capture_runtime_configuration_invalid",
+                configurationDiagnostic.GetProperty("event").GetString());
+            Assert.Equal(
+                "safety_policy_unavailable",
+                configurationDiagnostic.GetProperty("reason").GetString());
             JsonElement tracerOutcome = StructuredTracerOutcome(tracer.Stderr);
             Assert.Equal("blocked", tracerOutcome.GetProperty("captureHealth").GetString());
             Assert.Equal("complete", tracerOutcome.GetProperty("captureFidelity").GetString());
@@ -1201,6 +1209,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 $"Rotate {SeededFakeSecret} then show the working directory.",
                 StringComparison.Ordinal);
         await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
+        string stateDirectory = fixturePath + ".overmind-state";
 
         try
         {
@@ -1211,19 +1220,27 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                     ["OVERMIND_CAPTURE_URL"] = _baseUrl,
                     ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
                     ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
-                    ["OVERMIND_CAPTURE_STATE_DIR"] = fixturePath + ".overmind-state"
+                    ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory
                 });
             Assert.True(tracer.Succeeded);
 
             // The runtime crossed the gate before the observation left the
-            // process, but it did not rewrite what it sent: the receipt it
-            // prints is the SERVER's, redacted by the server's own independent
-            // scan, which is what makes the persisted scan provenance real.
+            // process. Verify the server's independent persisted scan through
+            // the public operator receipt seam; tracer stdout stays empty.
             Assert.DoesNotContain(SeededFakeSecret, tracer.Stdout, StringComparison.Ordinal);
-            Assert.Contains("[REDACTED:aws-access-key-id]", tracer.Stdout, StringComparison.Ordinal);
-            var scan = JsonDocument.Parse(tracer.Stdout.Split(
-                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement
-                .GetProperty("observation").GetProperty("scan");
+            Assert.Empty(tracer.Stdout);
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            string replay = await RunMemCtlAsync(
+                "capture", "replay", stream.CanonicalSourceStreamUuid!.Value.ToString());
+            Assert.Contains("[REDACTED:aws-access-key-id]", replay, StringComparison.Ordinal);
+            JsonElement[] scans = JsonDocument.Parse(replay).RootElement
+                .GetProperty("events").EnumerateArray()
+                .Select(item => item.GetProperty("envelope")
+                    .GetProperty("observation").GetProperty("scan"))
+                .Where(scan => scan.GetProperty("status").GetString() == "redacted")
+                .ToArray();
+            JsonElement scan = Assert.Single(scans);
             Assert.Equal("redacted", scan.GetProperty("status").GetString());
             Assert.Contains(
                 "aws-access-key-id",
@@ -1237,11 +1254,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             Assert.DoesNotContain("working directory", tracer.Stderr, StringComparison.Ordinal);
             Assert.DoesNotContain("sourcePayload", tracer.Stderr, StringComparison.Ordinal);
 
-            var first = JsonDocument.Parse(tracer.Stdout.Split(
-                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
             var shown = await RunMemCtlForResultAsync(
-                null, "capture", "receipt",
-                first.GetProperty("observationUuid").GetGuid().ToString());
+                null, "capture", "replay",
+                stream.CanonicalSourceStreamUuid.Value.ToString());
             Assert.Equal(0, shown.ExitCode);
             Assert.DoesNotContain(SeededFakeSecret, shown.Stdout, StringComparison.Ordinal);
             Assert.DoesNotContain(SeededFakeSecret, shown.Stderr, StringComparison.Ordinal);
@@ -1310,8 +1325,10 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             // Nothing was emitted: the independent HTTP probe saw no request.
             Assert.Empty(tracer.Stdout);
             Assert.Equal(0, Volatile.Read(ref requestCount));
-            Assert.Contains("failed closed", tracer.Stderr);
-            Assert.Contains("match-count budget of 10000", tracer.Stderr);
+            JsonElement diagnostic = JsonDocument.Parse(tracer.Stderr.Split(
+                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
+            Assert.Equal("capture_cycle_failed", diagnostic.GetProperty("event").GetString());
+            Assert.Equal("safety_scan_failed", diagnostic.GetProperty("reason").GetString());
             JsonElement outcome = StructuredTracerOutcome(tracer.Stderr);
             Assert.Equal("blocked", outcome.GetProperty("captureHealth").GetString());
             JsonElement counter = Assert.Single(

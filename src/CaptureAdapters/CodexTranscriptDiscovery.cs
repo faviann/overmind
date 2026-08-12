@@ -20,6 +20,22 @@ public sealed record CodexTranscriptStream(
 /// </summary>
 public static class CodexTranscriptDiscovery
 {
+    public static IReadOnlyList<CodexTranscriptStream> EnumerateCurrentSessions(
+        string sessionsRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionsRoot);
+        string fullRoot = Path.GetFullPath(sessionsRoot);
+        if (!Directory.Exists(fullRoot))
+        {
+            throw new DirectoryNotFoundException("Configured Codex sessions root is unavailable.");
+        }
+
+        return DescribeAll(
+            fullRoot,
+            Directory.EnumerateFiles(
+                fullRoot, "rollout-*.jsonl", SearchOption.AllDirectories));
+    }
+
     public static IReadOnlyList<CodexTranscriptStream> Enumerate(string configuredLocation)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(configuredLocation);
@@ -40,10 +56,17 @@ public static class CodexTranscriptDiscovery
                 $"Configured Codex transcript location '{fullLocation}' does not exist.");
         }
 
+        return DescribeAll(fullLocation, paths);
+    }
+
+    private static IReadOnlyList<CodexTranscriptStream> DescribeAll(
+        string configuredLocation,
+        IEnumerable<string> paths)
+    {
         CodexTranscriptStream[] streams = paths
             .Select(Path.GetFullPath)
             .OrderBy(path => path, StringComparer.Ordinal)
-            .Select(path => Describe(fullLocation, path))
+            .Select(path => Describe(configuredLocation, path))
             .ToArray();
         if (streams
             .Where(stream => stream.TranscriptIdentity is not null)

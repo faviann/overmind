@@ -26,6 +26,10 @@ namespace MemSrv.Tests;
 // bounded waits with kill-tree on timeout.
 internal static class TestProcessRunner
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, string>
+        _captureStateDirectories = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, int>
+        _initialCaptureReceiptCounts = new();
     private static readonly Lazy<string> _repoRoot = new(FindRepoRoot);
     private static readonly Lazy<string> _memCtlPath = new(() => ResolveApphost("MemCtl"));
     private static readonly Lazy<string> _serverPath = new(() => ResolveApphost("MemSrv.Server"));
@@ -122,8 +126,9 @@ internal static class TestProcessRunner
         using var process = StartCaptureTracer(scheduledEnvironment);
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
-        int stdoutLines = 0;
         int stderrLines = 0;
+        int failureLines = 0;
+        int deliveryLines = 0;
         process.OutputDataReceived += (_, args) =>
         {
             if (args.Data is not null)
@@ -132,7 +137,6 @@ internal static class TestProcessRunner
                 {
                     stdout.AppendLine(args.Data);
                 }
-                Interlocked.Increment(ref stdoutLines);
             }
         };
         process.ErrorDataReceived += (_, args) =>
@@ -144,6 +148,18 @@ internal static class TestProcessRunner
                     stderr.AppendLine(args.Data);
                 }
                 Interlocked.Increment(ref stderrLines);
+                if (args.Data.Contains(
+                    "\"event\":\"capture_cycle_failed\"",
+                    StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref failureLines);
+                }
+                if (args.Data.Contains(
+                    "\"event\":\"capture_delivery_accepted\"",
+                    StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref deliveryLines);
+                }
             }
         };
         process.BeginOutputReadLine();
@@ -171,17 +187,15 @@ internal static class TestProcessRunner
                         }
                     }
                     else if (stream is not null && stream.EnqueuedThrough >= 0
-                        && stream.Queue.Count == 0)
+                        && stream.Queue.Count == 0
+                        && Volatile.Read(ref deliveryLines) > 0)
                     {
-                        if (Volatile.Read(ref stdoutLines) > 0)
-                        {
-                            inferredExitCode = 0;
-                            break;
-                        }
+                        inferredExitCode = 0;
+                        break;
                     }
                 }
 
-                if (Volatile.Read(ref stderrLines) > 0 && inferredExitCode != 4)
+                if (Volatile.Read(ref failureLines) > 0 && inferredExitCode != 4)
                 {
                     break;
                 }
@@ -207,9 +221,37 @@ internal static class TestProcessRunner
     }
 
     public static Process StartCaptureTracer(
-        IReadOnlyDictionary<string, string> environment) =>
-        Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
-        ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
+        IReadOnlyDictionary<string, string> environment)
+    {
+        string? stateDirectory = environment.GetValueOrDefault("OVERMIND_CAPTURE_STATE_DIR");
+        int initialReceiptCount = 0;
+        if (stateDirectory is not null)
+        {
+            CaptureRuntimeSnapshot initial = new FileCaptureRuntimeState(stateDirectory)
+                .ReadAsync().GetAwaiter().GetResult();
+            initialReceiptCount = initial.Streams.Sum(stream =>
+                stream.LastServerReceipt is { } receipt
+                    ? checked((int)receipt.SourcePosition + 1)
+                    : 0);
+        }
+        Process process = Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
+            ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
+        if (stateDirectory is not null)
+        {
+            _captureStateDirectories[process.Id] = stateDirectory;
+            _initialCaptureReceiptCounts[process.Id] = initialReceiptCount;
+        }
+        return process;
+    }
+
+    public static string CaptureStateDirectory(Process process) =>
+        _captureStateDirectories.TryGetValue(process.Id, out string? stateDirectory)
+            ? stateDirectory
+            : throw new InvalidOperationException(
+                "Capture tracer process has no registered durable-state directory.");
+
+    public static int InitialCaptureReceiptCount(Process process) =>
+        _initialCaptureReceiptCounts.GetValueOrDefault(process.Id);
 
     private static ProcessStartInfo CreateStartInfo(
         string apphostPath, IReadOnlyList<string> args, IReadOnlyDictionary<string, string> environment)

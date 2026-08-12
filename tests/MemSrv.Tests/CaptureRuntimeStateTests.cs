@@ -2862,7 +2862,12 @@ public sealed class CaptureRuntimeStateTests
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Empty(result.Stdout);
-        Assert.Contains("OVERMIND_CODEX_TRANSCRIPT_ROOT is required", result.Stderr);
+        JsonElement diagnostic = JsonDocument.Parse(
+            Assert.Single(result.Stderr.Split(
+                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries))).RootElement;
+        Assert.Equal(
+            "capture_runtime_configuration_invalid",
+            diagnostic.GetProperty("event").GetString());
     }
 
     [Fact]
@@ -3002,15 +3007,14 @@ public sealed class CaptureRuntimeStateTests
 
             Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
-            Assert.Equal(
-                [0L, 1L],
-                result.Stdout.Split(
-                        Environment.NewLine,
-                        StringSplitOptions.RemoveEmptyEntries)
-                    .Select(line => JsonDocument.Parse(line).RootElement
-                        .GetProperty("sourcePosition").GetInt64()));
-            Assert.Contains("queued_source_evidence_changed", result.Stderr);
-            Assert.Contains("source position 2", result.Stderr);
+            Assert.Empty(result.Stdout);
+            JsonElement diagnostic = result.Stderr.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line =>
+                    line.GetProperty("event").GetString() == "capture_cycle_failed");
+            Assert.Equal("capture_cycle_failed", diagnostic.GetProperty("event").GetString());
+            Assert.Equal("stream_stopped", diagnostic.GetProperty("reason").GetString());
 
             var state = new FileCaptureRuntimeState(stateDirectory);
             CaptureRuntimeSnapshot stopped = await state.ReadAsync();
@@ -3070,10 +3074,14 @@ public sealed class CaptureRuntimeStateTests
 
             Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
-            Assert.Contains(
-                "does not match queued sourcePosition 1",
-                result.Stderr,
-                StringComparison.Ordinal);
+            JsonElement diagnostic = result.Stderr.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line =>
+                    line.GetProperty("event").GetString() == "capture_cycle_failed");
+            Assert.Equal(
+                "invalid_source_or_receipt",
+                diagnostic.GetProperty("reason").GetString());
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
             Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);

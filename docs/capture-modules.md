@@ -22,7 +22,7 @@ Source interpretation before this spine is described by the
 | `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
-| `CodexTranscriptDiscovery` | `Enumerate(configuredLocation)` → streams with explicit Codex source identity | `CodexCaptureTracer` |
+| `CodexTranscriptDiscovery` | `EnumerateCurrentSessions(sessionsRoot)` for production current rollouts; `Enumerate(configuredLocation)` for the legacy synthetic fixture seam → streams with explicit Codex source identity | `CodexCaptureTracer` |
 | `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
 | `CaptureRescanScheduler` | `RunAsync(scanCycle, schedule, jitterSource, delay)` | `CodexCaptureTracer` |
 | `CaptureRescanConfiguration` | `Load(readEnvironment)` → `CaptureRescanSchedule` | `CodexCaptureTracer` |
@@ -301,6 +301,12 @@ enumeration/claim/delivery cycle, so a slow cycle cannot overlap another. The
 packaged tracer retains per-stream failures for a later cycle rather than
 letting one outage cancel responsibility for other configured streams.
 
+The supported runtime calls `EnumerateCurrentSessions` against an explicitly
+mounted `~/.codex/sessions` root and selects only `rollout-*.jsonl`. The generic
+enumerator and its archive-movement behavior remain a synthetic compatibility
+seam; the production image neither mounts the Codex home/archives nor discovers
+root-level `history.jsonl`.
+
 The server combines the discovered tuple with the authenticated binding,
 persists its components on `capture_source_streams`, and derives a deterministic
 stream UUID and canonical trace-session ID for a new stream. Migration recovers
@@ -366,7 +372,7 @@ contains no source-content digest or excerpt. A mandatory identity or locator
 that cannot fit is refused rather than truncated or fingerprinted. The claimer
 then scans that bounded representation. An
 observation within the bound retains its original payload and is scanned as
-such. The existing disabled delivery runtime reconstructs the same bounded
+such. The Codex catch-up runtime reconstructs the same bounded
 representation, scans it again before it leaves the tracer process, and the
 server crosses the gate independently before canonical append. All three use
 the same governed rule semantics because they construct the same gate

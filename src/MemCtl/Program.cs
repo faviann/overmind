@@ -294,9 +294,6 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 RequireOption(args, "--agent-id"),
                 credential);
             Console.WriteLine($"enrolled {bindingUuid} stable_name={args[2]}");
-            Console.WriteLine(
-                "LIMITATION: disabled non-production synthetic capture seam only; " +
-                "no supported capture adapter, scheduler, hooks, or scanner product.");
             return 0;
 
         case "receipt":

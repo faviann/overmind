@@ -295,9 +295,11 @@ signature/encrypted negative controls, and a spoofed nested-wrapper regression.
 The terminal-malformed fixtures cover complete readable parse-error evidence
 including local redaction and content-free invalid-UTF-8 omission without
 storing a replacement-decoded prefix.
-The built `CodexCaptureTracer` consumes this family through scheduled transcript
-discovery, authenticated capture, deterministic retry, and `memctl` operator
-receipt reads. The three-record synthetic transcript remains reusable test data.
+The built `CodexCaptureTracer` consumes this family through scheduled
+current-session `rollout-*.jsonl` discovery, authenticated capture,
+deterministic retry, and `memctl` operator receipt/replay reads. The three-record
+synthetic transcript remains reusable legacy test data and does not broaden the
+production mount beyond `~/.codex/sessions`.
 
 The five version-labelled relationship families cover parent-only, fork-only,
 combined parent/fork, nested spawn, and no-parent shapes. They assert the
@@ -305,9 +307,8 @@ explicit stable child identity separately from every typed relationship and
 round-trip dangling native targets without resolution or cross-stream order.
 
 `CodexJsonlAdapter` is the only adapter referenced by the separately built
-disabled tracer image. `DisposableClaudeJsonlAdapter` is defined in the test
+supported catch-up runtime image. `DisposableClaudeJsonlAdapter` is defined in the test
 assembly only. The test invokes the same `DisabledCaptureRuntime` and
 authenticated `/capture/v1/observations` API used by the Codex tracer, then
 reads the canonical result through `memctl`. No release project references the
-Claude spike, and enrollment records a harness identity without selecting an
-adapter.
+Claude spike; the runtime artifact itself fixes adapter selection to Codex.

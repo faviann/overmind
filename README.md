@@ -9,10 +9,10 @@ Not another chatbot memory feature, and not flat vector RAG: the working
 agent is the extractor, and a human is the quality gate. Nothing enters
 shared memory unreviewed.
 
-The repository also contains a disabled, explicitly non-production synthetic
-Codex capture tracer used to exercise one narrow Phase-2 ledger slice. See
-[docs/capture-synthetic-slice.md](docs/capture-synthetic-slice.md); it is not
-part of the supported server deployment.
+The repository also publishes a separate Codex-only catch-up runtime for
+scanner-first capture beside local Codex. See
+[docs/codex-capture-runtime.md](docs/codex-capture-runtime.md). It talks only to
+the central capture API and is not part of the server/database trust boundary.
 
 ## Core commitments
 

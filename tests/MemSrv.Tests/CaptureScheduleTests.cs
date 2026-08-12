@@ -1,10 +1,39 @@
 using CaptureAdapters;
 using MemSrv.Core;
+using System.Text.Json;
 
 namespace MemSrv.Tests;
 
 public sealed class CaptureScheduleTests
 {
+    [Fact]
+    public async Task ProductionDiscoveryOnlySelectsCurrentSessionRollouts()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-current-sessions-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions");
+        string current = Path.Combine(sessions, "2026", "08", "12", "rollout-current.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(current)!);
+        Directory.CreateDirectory(Path.Combine(codexHome, "archived_sessions"));
+        await File.WriteAllTextAsync(current, "{}\n");
+        await File.WriteAllTextAsync(Path.Combine(sessions, "unrelated.jsonl"), "{}\n");
+        await File.WriteAllTextAsync(Path.Combine(codexHome, "history.jsonl"), "{}\n");
+        await File.WriteAllTextAsync(
+            Path.Combine(codexHome, "archived_sessions", "rollout-archive.jsonl"), "{}\n");
+
+        try
+        {
+            CodexTranscriptStream stream = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessions(sessions));
+            Assert.Equal(current, stream.Path);
+            Assert.False(stream.TerminalAtEndOfFile);
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(
         "codex-cli-0.77.parent-only.synthetic.jsonl",
@@ -223,7 +252,17 @@ public sealed class CaptureScheduleTests
 
             Assert.NotEqual(0, result.ExitCode);
             Assert.Empty(result.Stdout);
-            Assert.Contains(invalidName, result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain(invalidName, result.Stderr, StringComparison.Ordinal);
+            JsonElement diagnostic = JsonDocument.Parse(
+                Assert.Single(result.Stderr.Split(
+                    Environment.NewLine,
+                    StringSplitOptions.RemoveEmptyEntries))).RootElement;
+            Assert.Equal(
+                "capture_runtime_configuration_invalid",
+                diagnostic.GetProperty("event").GetString());
+            Assert.Equal(
+                "invalid_scan_schedule",
+                diagnostic.GetProperty("reason").GetString());
         }
         finally
         {

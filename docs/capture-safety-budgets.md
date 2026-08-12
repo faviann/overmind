@@ -261,12 +261,12 @@ extra copy instead of three.
 ## Why the transport cap is below the scanner limit
 
 `POST /capture/v1/observations` rejects a body over 1,000,000 bytes with `413`
-before authentication-independent parsing. That cap is a **denial-of-service
-guard for the disabled tracer**, not the safety limit. It is deliberately three
+before authentication-independent parsing. That cap is a **capture transport
+denial-of-service guard**, not the safety limit. It is deliberately three
 orders of magnitude below `MaxObservationBytes` because:
 
 - the observed maximum source record is 236,273 bytes, so 1 MB is already ample
-  headroom for the only producer that exists;
+  headroom for the supported Codex scanner producer;
 - a small transport cap means an unauthenticated or hostile client cannot make
   the server allocate a 128 MiB buffer;
 - the scanner limit must be sized for the *content* policy (what a future

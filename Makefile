@@ -1,4 +1,4 @@
-.PHONY: afk db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference smoke-image smoke-compose
+.PHONY: afk db-up test test-one benchmark-test test-db-reset test-db-template test-db-sweep migrate-dev accept sdk-reference smoke-image smoke-compose smoke-capture-runtime
 
 DEV_COMPOSE = docker compose --file compose.dev.yaml
 
@@ -51,3 +51,7 @@ smoke-image:
 smoke-compose:
 	@test -n "$(IMAGE)" || { printf 'usage: make smoke-compose IMAGE=ghcr.io/faviann/overmind:<version>\n' >&2; exit 2; }
 	@tools/smoke-compose.sh "$(IMAGE)"
+
+smoke-capture-runtime:
+	@test -n "$(IMAGE)" -a -n "$(CAPTURE_IMAGE)" || { printf 'usage: make smoke-capture-runtime IMAGE=<server-image> CAPTURE_IMAGE=<runtime-image>\n' >&2; exit 2; }
+	@tools/smoke-capture-runtime.sh "$(IMAGE)" "$(CAPTURE_IMAGE)"

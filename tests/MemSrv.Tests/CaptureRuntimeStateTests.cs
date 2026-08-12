@@ -2254,6 +2254,42 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task ExistingTranscriptResponsibilityRejectsAReplacementSourceStream()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-transcript-owner-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem responsible = QueueItem("session-a", 0, 10);
+            CaptureRuntimeQueueItem replacement = QueueItem("session-b", 0, 10);
+
+            Assert.True(await state.ClaimAsync(
+                responsible,
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+            CaptureRuntimeSnapshot beforeReplacement = await state.ReadAsync();
+
+            Assert.False(await state.ClaimAsync(
+                replacement,
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+
+            Assert.Equal(
+                JsonSerializer.Serialize(beforeReplacement),
+                JsonSerializer.Serialize(await state.ReadAsync()));
+            Assert.Equal("session-a", Assert.Single(beforeReplacement.Streams).SourceStream);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task FirstClaimMustBeginAtSourcePositionZero()
     {
         string directory = Path.Combine(

@@ -31,9 +31,9 @@ public sealed class CapturePackagingTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
 
-            Assert.Equal(0, result.ExitCode);
             Assert.Empty(result.Stdout);
             Assert.False(listener.Pending());
             Assert.False(File.Exists(Path.Combine(state, "capture-state.json")));
@@ -69,10 +69,10 @@ public sealed class CapturePackagingTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
-                ProductionEnvironment(root, sessions, archive));
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                ProductionEnvironment(root, sessions, archive),
+                "\"event\":\"capture_cycle_failed\"");
 
-            Assert.Equal(0, result.ExitCode);
             Assert.Empty(result.Stdout);
             AssertContentFreeJsonDiagnostics(
                 result.Stderr,
@@ -107,10 +107,10 @@ public sealed class CapturePackagingTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
-                ProductionEnvironment(root, sessions, archive));
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                ProductionEnvironment(root, sessions, archive),
+                "\"event\":\"capture_cycle_failed\"");
 
-            Assert.Equal(0, result.ExitCode);
             Assert.Empty(result.Stdout);
             AssertContentFreeJsonDiagnostics(result.Stderr, expectedReason, root);
         }
@@ -141,9 +141,9 @@ public sealed class CapturePackagingTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
 
-            Assert.Equal(0, result.ExitCode);
             Assert.Empty(result.Stdout);
             AssertContentFreeJsonDiagnostics(
                 result.Stderr,
@@ -188,10 +188,10 @@ public sealed class CapturePackagingTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
-                ProductionEnvironment(root, sessions, archive));
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                ProductionEnvironment(root, sessions, archive),
+                "\"event\":\"capture_cycle_failed\"");
 
-            Assert.Equal(0, result.ExitCode);
             Assert.Empty(result.Stdout);
             AssertContentFreeJsonDiagnostics(
                 result.Stderr,
@@ -269,9 +269,9 @@ public sealed class CapturePackagingTests
 
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
 
-            Assert.Equal(0, result.ExitCode);
             Assert.Empty(result.Stdout);
             Assert.False(listener.Pending());
             AssertContentFreeJsonDiagnostics(
@@ -310,15 +310,14 @@ public sealed class CapturePackagingTests
             ["OVERMIND_CODEX_SESSIONS_ROOT"] = Path.Combine(root, "sessions"),
             ["OVERMIND_CODEX_ARCHIVE_ROOT"] = archive,
             ["OVERMIND_CAPTURE_STATE_DIR"] = state,
-            ["OVERMIND_CAPTURE_RUN_ONCE"] = "true",
             ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "1",
             ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
         };
 
         try
         {
-            var outage = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
-            Assert.Equal(0, outage.ExitCode);
+            _ = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
             CaptureRuntimeStreamState queued = Assert.Single(
                 (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
             Assert.Equal(2, queued.Queue.Count);
@@ -328,8 +327,8 @@ public sealed class CapturePackagingTests
                 Path.Combine(archive, "rollout-unrelated.jsonl"),
                 Transcript("unrelated-session"));
 
-            var restarted = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
-            Assert.Equal(0, restarted.ExitCode);
+            _ = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
             CaptureRuntimeStreamState retried = Assert.Single(
                 (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
             Assert.Equal(queued.SourceStream, retried.SourceStream);
@@ -362,8 +361,8 @@ public sealed class CapturePackagingTests
 
         try
         {
-            var outage = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
-            Assert.Equal(0, outage.ExitCode);
+            _ = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
             CaptureRuntimeStreamState authorized = Assert.Single(
                 (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
             Assert.Equal(2, authorized.Queue.Count);
@@ -374,9 +373,18 @@ public sealed class CapturePackagingTests
                 Transcript("replacement-session").Replace(
                     "public evidence", replacementContent, StringComparison.Ordinal));
 
-            var restarted = await TestProcessRunner.RunCaptureTracerToExitAsync(environment);
+            using (var replacementScan = TestProcessRunner.StartCaptureTracer(environment))
+            {
+                Task<string> stdout = replacementScan.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = replacementScan.StandardError.ReadToEndAsync();
+                await Task.Delay(TimeSpan.FromMilliseconds(300));
+                Assert.False(replacementScan.HasExited);
+                replacementScan.Kill(entireProcessTree: true);
+                await replacementScan.WaitForExitAsync();
+                Assert.Empty(await stdout);
+                Assert.Empty(await stderr);
+            }
 
-            Assert.Equal(0, restarted.ExitCode);
             CaptureRuntimeStreamState retained = Assert.Single(
                 (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
             Assert.Equal(authorized.SourceStream, retained.SourceStream);
@@ -395,6 +403,88 @@ public sealed class CapturePackagingTests
     }
 
     [Fact]
+    public async Task PackagedSchedulerPreservesOwnerWhenCurrentBasenameIsReused()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-reused-current-process-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(root, "archived_sessions");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-reused.jsonl");
+        string archived = Path.Combine(archive, Path.GetFileName(active));
+        string original = Transcript("session-a");
+        await File.WriteAllTextAsync(active, original);
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+
+        try
+        {
+            _ = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
+            CaptureRuntimeStreamState owner = Assert.Single(
+                (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
+
+            await File.WriteAllTextAsync(active, Transcript("session-b"));
+            using (var replacementScan = TestProcessRunner.StartCaptureTracer(environment))
+            {
+                Task<string> stdout = replacementScan.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = replacementScan.StandardError.ReadToEndAsync();
+                await Task.Delay(TimeSpan.FromMilliseconds(300));
+                Assert.False(replacementScan.HasExited);
+                replacementScan.Kill(entireProcessTree: true);
+                await replacementScan.WaitForExitAsync();
+                Assert.Empty(await stdout);
+                Assert.Empty(await stderr);
+            }
+
+            CaptureRuntimeSnapshot afterReplacement =
+                await new FileCaptureRuntimeState(state).ReadAsync();
+            Assert.Equal(
+                JsonSerializer.Serialize(owner),
+                JsonSerializer.Serialize(Assert.Single(afterReplacement.Streams)));
+
+            await File.WriteAllTextAsync(archived, original);
+            await File.WriteAllTextAsync(
+                Path.Combine(sessions, "rollout-distinct.jsonl"),
+                Transcript("session-c"));
+            using (var convergenceScan = TestProcessRunner.StartCaptureTracer(environment))
+            {
+                Task<string> stdout = convergenceScan.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = convergenceScan.StandardError.ReadToEndAsync();
+                DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+                while ((await new FileCaptureRuntimeState(state).ReadAsync()).Streams.Count < 2
+                    && DateTime.UtcNow < deadline)
+                {
+                    await Task.Delay(25);
+                }
+                convergenceScan.Kill(entireProcessTree: true);
+                await convergenceScan.WaitForExitAsync();
+                Assert.Empty(await stdout);
+                string diagnostics = await stderr;
+                Assert.True(
+                    (await new FileCaptureRuntimeState(state).ReadAsync()).Streams.Count >= 2,
+                    diagnostics);
+            }
+
+            CaptureRuntimeStreamState[] converged =
+                (await new FileCaptureRuntimeState(state).ReadAsync()).Streams.ToArray();
+            Assert.Equal(2, converged.Length);
+            Assert.Equal(
+                2,
+                converged.Select(stream => stream.TranscriptIdentity)
+                    .Distinct(StringComparer.Ordinal)
+                    .Count());
+            Assert.Contains(converged, stream => stream.SourceStream == owner.SourceStream);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ProductionRuntimeStartsWithoutSyntheticGateAndKeepsStdoutEmpty()
     {
         string root = Path.Combine(
@@ -404,7 +494,7 @@ public sealed class CapturePackagingTests
         Directory.CreateDirectory(archive);
         try
         {
-            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            using var process = TestProcessRunner.StartCaptureTracer(
                 new Dictionary<string, string>
                 {
                     ["OVERMIND_CAPTURE_URL"] = "http://127.0.0.1:1",
@@ -412,19 +502,19 @@ public sealed class CapturePackagingTests
                     ["OVERMIND_CODEX_SESSIONS_ROOT"] = root,
                     ["OVERMIND_CODEX_ARCHIVE_ROOT"] = archive,
                     ["OVERMIND_CAPTURE_STATE_DIR"] = Path.Combine(root, "state"),
-                    ["OVERMIND_CAPTURE_RUN_ONCE"] = "true",
                     ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "1",
                     ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
                 });
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
 
-            Assert.Equal(0, result.ExitCode);
-            Assert.Empty(result.Stdout);
-            JsonElement diagnostic = JsonDocument.Parse(
-                Assert.Single(result.Stderr.Split(
-                    Environment.NewLine,
-                    StringSplitOptions.RemoveEmptyEntries))).RootElement;
-            Assert.Equal("capture_runtime_stopped", diagnostic.GetProperty("event").GetString());
-            Assert.Equal("codex", diagnostic.GetProperty("adapter").GetString());
+            await Task.Delay(TimeSpan.FromMilliseconds(500));
+            Assert.False(process.HasExited);
+
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Assert.Empty(await stderr);
         }
         finally
         {
@@ -509,7 +599,6 @@ public sealed class CapturePackagingTests
         ["OVERMIND_CODEX_SESSIONS_ROOT"] = sessions,
         ["OVERMIND_CODEX_ARCHIVE_ROOT"] = archive,
         ["OVERMIND_CAPTURE_STATE_DIR"] = Path.Combine(root, "state"),
-        ["OVERMIND_CAPTURE_RUN_ONCE"] = "true",
         ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "1",
         ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
     };

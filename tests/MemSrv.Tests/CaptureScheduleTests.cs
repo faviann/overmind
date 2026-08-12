@@ -24,7 +24,10 @@ public sealed class CaptureScheduleTests
         try
         {
             CodexTranscriptStream stream = Assert.Single(
-                CodexTranscriptDiscovery.EnumerateCurrentSessions(sessions));
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    sessions,
+                    Path.Combine(codexHome, "archived_sessions"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
             Assert.Equal(current, stream.Path);
             Assert.False(stream.TerminalAtEndOfFile);
         }
@@ -172,6 +175,55 @@ public sealed class CaptureScheduleTests
                     {
                         [authorized.TranscriptIdentity!] = authorized.SourceStream
                     }));
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProductionDiscoveryKeepsQueuedTranscriptOwnershipAcrossCurrentReplacement()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-replaced-current-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(codexHome, "archived_sessions");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-reused.jsonl");
+        string distinct = Path.Combine(sessions, "rollout-distinct.jsonl");
+        string archived = Path.Combine(archive, Path.GetFileName(active));
+        string original = SessionMetadata("session-a");
+        await File.WriteAllTextAsync(active, original);
+
+        try
+        {
+            CodexTranscriptStream responsible = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
+            var ownership = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [responsible.TranscriptIdentity!] = responsible.SourceStream
+            };
+
+            await File.WriteAllTextAsync(active, SessionMetadata("session-b"));
+            Assert.Empty(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"), archive, ownership));
+
+            await File.WriteAllTextAsync(distinct, SessionMetadata("session-c"));
+            await File.WriteAllTextAsync(archived, original);
+            CodexTranscriptStream[] converged =
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"), archive, ownership)
+                .ToArray();
+
+            Assert.Equal([distinct, archived], converged.Select(stream => stream.Path));
+            Assert.False(converged[0].TerminalAtEndOfFile);
+            Assert.True(converged[1].TerminalAtEndOfFile);
         }
         finally
         {

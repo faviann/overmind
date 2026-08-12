@@ -527,6 +527,17 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         CaptureRuntimeStreamState? stream =
             streamIndex >= 0 ? streams[streamIndex] : null;
 
+        if (stream is null
+            && streams.Any(existing =>
+                existing.Queue.Count > 0
+                && string.Equals(
+                    existing.TranscriptIdentity,
+                    claim.DeterministicLocatorEvidence.TranscriptIdentity,
+                    StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
         if (stream?.Stop is { } stop)
         {
             throw new CaptureStreamStoppedException(claim.SourceStream, stop);

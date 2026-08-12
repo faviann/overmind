@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using CaptureAdapters;
 
 namespace MemSrv.Tests;
@@ -108,6 +109,51 @@ internal static class TestProcessRunner
             CreateStartInfo(CaptureTracerPath, [], environment),
             TimeSpan.FromSeconds(60),
             "CodexCaptureTracer");
+
+    public static async Task<(string Stdout, string Stderr)>
+        RunCaptureTracerUntilDiagnosticAsync(
+            IReadOnlyDictionary<string, string> environment,
+            string expectedDiagnostic)
+    {
+        using var process = StartCaptureTracer(environment);
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+        var observed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        process.OutputDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                lock (stdout)
+                {
+                    stdout.AppendLine(args.Data);
+                }
+            }
+        };
+        process.ErrorDataReceived += (_, args) =>
+        {
+            if (args.Data is null)
+            {
+                return;
+            }
+            lock (stderr)
+            {
+                stderr.AppendLine(args.Data);
+            }
+            if (args.Data.Contains(expectedDiagnostic, StringComparison.Ordinal))
+            {
+                observed.TrySetResult();
+            }
+        };
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        await observed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        process.Kill(entireProcessTree: true);
+        await process.WaitForExitAsync();
+        process.WaitForExit();
+        return (stdout.ToString(), stderr.ToString());
+    }
 
     public static async Task<(bool Succeeded, string Stdout, string Stderr)>
         RunSingleStreamCaptureAttemptAsync(IReadOnlyDictionary<string, string> environment)
@@ -223,12 +269,19 @@ internal static class TestProcessRunner
         int initialReceiptCount = 0;
         if (stateDirectory is not null)
         {
-            CaptureRuntimeSnapshot initial = new FileCaptureRuntimeState(stateDirectory)
-                .ReadAsync().GetAwaiter().GetResult();
-            initialReceiptCount = initial.Streams.Sum(stream =>
-                stream.LastServerReceipt is { } receipt
-                    ? checked((int)receipt.SourcePosition + 1)
-                    : 0);
+            try
+            {
+                CaptureRuntimeSnapshot initial = new FileCaptureRuntimeState(stateDirectory)
+                    .ReadAsync().GetAwaiter().GetResult();
+                initialReceiptCount = initial.Streams.Sum(stream =>
+                    stream.LastServerReceipt is { } receipt
+                        ? checked((int)receipt.SourcePosition + 1)
+                        : 0);
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidDataException)
+            {
+                // The packaged child owns fail-closed validation of corrupt state.
+            }
         }
         Process process = Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
             ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");

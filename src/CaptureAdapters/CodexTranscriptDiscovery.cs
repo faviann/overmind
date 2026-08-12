@@ -45,6 +45,11 @@ public static class CodexTranscriptDiscovery
             .Select(Path.GetFullPath)
             .OrderBy(path => path, StringComparer.Ordinal)
             .Select(path => DescribeProduction(path, terminalAtEndOfFile: false))
+            .Where(stream => stream.TranscriptIdentity is null
+                || !responsibleSourceStreamsByTranscriptIdentity.TryGetValue(
+                    stream.TranscriptIdentity, out string? responsibleSourceStream)
+                || string.Equals(
+                    stream.SourceStream, responsibleSourceStream, StringComparison.Ordinal))
             .ToArray();
         CodexTranscriptStream[] responsibleArchives = Directory.EnumerateFiles(
                 fullArchiveRoot, "rollout-*.jsonl", SearchOption.AllDirectories)
@@ -68,22 +73,6 @@ public static class CodexTranscriptDiscovery
         CodexTranscriptStream[] streams = [.. current, .. responsibleArchives];
         ThrowIfAmbiguous(streams);
         return streams;
-    }
-
-    public static IReadOnlyList<CodexTranscriptStream> EnumerateCurrentSessions(
-        string sessionsRoot)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(sessionsRoot);
-        string fullRoot = Path.GetFullPath(sessionsRoot);
-        if (!Directory.Exists(fullRoot))
-        {
-            throw new DirectoryNotFoundException("Configured Codex sessions root is unavailable.");
-        }
-
-        return DescribeAll(
-            fullRoot,
-            Directory.EnumerateFiles(
-                fullRoot, "rollout-*.jsonl", SearchOption.AllDirectories));
     }
 
     public static IReadOnlyList<CodexTranscriptStream> Enumerate(string configuredLocation)

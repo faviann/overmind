@@ -7,10 +7,6 @@ bool legacySyntheticDiagnostics = string.Equals(
     Environment.GetEnvironmentVariable("OVERMIND_CODEX_CAPTURE_ENABLE"),
     LegacySyntheticEnableValue,
     StringComparison.Ordinal);
-bool runOnce = string.Equals(
-    Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_RUN_ONCE"),
-    "true",
-    StringComparison.OrdinalIgnoreCase);
 
 string endpoint;
 string credential;
@@ -219,17 +215,10 @@ try
             cancellationToken);
     }
 
-    if (runOnce)
-    {
-        await ScanCycleAsync(stopping.Token);
-    }
-    else
-    {
-        await CaptureRescanScheduler.RunAsync(
-            ScanCycleAsync,
-            schedule,
-            cancellationToken: stopping.Token);
-    }
+    await CaptureRescanScheduler.RunAsync(
+        ScanCycleAsync,
+        schedule,
+        cancellationToken: stopping.Token);
 }
 catch (OperationCanceledException) when (stopping.IsCancellationRequested)
 {

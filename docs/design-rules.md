@@ -9,21 +9,23 @@ settled here.
 
 Authority order (same as `AGENTS.md`):
 
-1. `docs/memory-server-phase1-spec.md` ("the spec", cited by §) — binding
-   build details, schema, and tool contracts
-2. `docs/agent-memory-handoff-v4.md` ("the handoff") — intent and
-   architecture where the spec is silent
-3. `docs/decisions.md` (dated entries) and `docs/adr/` — decisions that amend
-   or refine the above; the spec's changelogs fold the binding ones in
+1. `docs/conversation-capture-phase2-spec.md` ("the capture spec") — binding
+   for conversation-capture work and its explicit Phase 1 amendments
+2. `docs/memory-server-phase1-spec.md` ("the Phase 1 spec", cited by §) —
+   binding for Phase 1 contracts and every area the capture spec does not amend
+3. `docs/agent-memory-handoff-v4.md` ("the handoff") — intent and
+   architecture where the applicable spec is silent
+4. `docs/decisions.md` (dated entries) and `docs/adr/` — decisions that refine
+   the above; a decision changes binding scope only after an applicable spec
+   records it
 
 ## Scope boundaries
 
-- **The spec's Do Not Build list is binding** (spec §11). Headline: no
-  embeddings/pgvector, no graph storage, no LLM-calling workers, no tiering
-  mechanics, no web UI or dashboard, no additional datastores, no auth beyond
-  static bearer keys, no dispatcher/orchestrator, no harness extensions, no
-  dedup logic, no export commands yet. Read the full list before adding
-  anything.
+- **The Phase 1 Do Not Build list remains binding** (Phase 1 spec §11), except
+  for the capture spec's narrow authorization of a capture runtime, harness
+  hooks, and an OIDC-authenticated capture console. Those exceptions apply only
+  to conversation capture; they do not authorize a general dashboard, a new
+  MCP authentication model, or other Phase 1 expansion.
 - **Forward seams are documented, not built** (spec §13): vector lane,
   `memctl export` projection boundary, nightly reconciliation worker,
   event-date recency, trigram-lane completion, tiering mechanics, dedup,
@@ -156,9 +158,10 @@ Committed — do not re-litigate without the maintainer:
 - **The raw trace store is primary and immutable**; summaries, extractions,
   and compacted views are derived artifacts that point back into it and never
   replace it (handoff "The two paradigm commitments").
-- **Harnesses are thin clients.** Memory logic never lives in harness
-  extensions; every harness hits the same MCP surface, and building harness
-  extensions now is Do-Not-Build (handoff "Harness directive"; spec §11).
+- **Harnesses remain thin clients.** Memory logic stays behind the MCP surface.
+  The capture spec separately permits version-pinned, non-blocking capture
+  hooks that wake the local capture runtime; they do not contain memory logic
+  or replace scheduled transcript catch-up.
 - **Source-of-truth hierarchy resolves conflicts**: Git/IaC > approved memory
   > proposed memory > raw trace inference. Propose the *why*; the *what*
   lives in the repo, where memory would only rot against it (handoff "Update

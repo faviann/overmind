@@ -146,7 +146,10 @@ verify_packaging_contract() {
     .services["codex-capture"] as $service |
     $service.read_only == true and
     $service.privileged != true and
-    (($service.ports // []) | length == 0) and
+    (($service.ports // []) | length == 1) and
+    ($service.ports[0].host_ip == "127.0.0.1") and
+    ($service.ports[0].target == 43191) and
+    (($service.ports[0].published | tostring) == "43191") and
     (($service.cap_drop // []) | index("ALL") != null) and
     (($service.security_opt // []) | index("no-new-privileges:true") != null) and
     ($service.image | endswith(":latest") | not) and

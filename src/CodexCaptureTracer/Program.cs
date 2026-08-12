@@ -153,6 +153,26 @@ catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
     return 2;
 }
 using var stopping = new CancellationTokenSource();
+var wakeup = new CaptureScanWakeup();
+CaptureWakeListener? wakeListener = null;
+if (string.Equals(
+        Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_WAKE_ENABLED"),
+        "true",
+        StringComparison.Ordinal))
+{
+    var candidate = new CaptureWakeListener(wakeup);
+    try
+    {
+        candidate.Start();
+        wakeListener = candidate;
+    }
+    catch (System.Net.Sockets.SocketException)
+    {
+        await candidate.DisposeAsync();
+        WriteDiagnostic("capture_wake_unavailable", "listener_unavailable");
+    }
+}
+await using CaptureWakeListener? wakeListenerScope = wakeListener;
 Console.CancelKeyPress += (_, eventArgs) =>
 {
     eventArgs.Cancel = true;
@@ -214,6 +234,7 @@ try
     await CaptureRescanScheduler.RunAsync(
         ScanCycleAsync,
         schedule,
+        wakeup: wakeup,
         cancellationToken: stopping.Token);
 }
 catch (OperationCanceledException) when (stopping.IsCancellationRequested)

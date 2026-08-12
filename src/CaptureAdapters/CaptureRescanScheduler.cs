@@ -1,6 +1,7 @@
 namespace CaptureAdapters;
 
 using System.Globalization;
+using System.Threading.Channels;
 
 /// <summary>
 /// The configured lower bound and additional random delay between complete
@@ -73,6 +74,44 @@ public static class CaptureRescanConfiguration
     }
 }
 
+/// <summary>A bounded, coalescing request for an early transcript scan.</summary>
+public sealed class CaptureScanWakeup
+{
+    private readonly Channel<bool> _requests = Channel.CreateBounded<bool>(
+        new BoundedChannelOptions(1)
+        {
+            FullMode = BoundedChannelFullMode.DropWrite,
+            SingleReader = true,
+            SingleWriter = false
+        });
+
+    public void Request() => _requests.Writer.TryWrite(true);
+
+    internal async Task WaitAsync(
+        TimeSpan delay,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        CancellationToken cancellationToken)
+    {
+        if (_requests.Reader.TryRead(out _)) return;
+
+        using var delayCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task scheduled = delayAsync(delay, delayCancellation.Token);
+        Task<bool> wake = _requests.Reader.WaitToReadAsync(delayCancellation.Token).AsTask();
+        Task completed = await Task.WhenAny(scheduled, wake);
+        if (completed == wake && await wake)
+        {
+            _requests.Reader.TryRead(out _);
+            delayCancellation.Cancel();
+            try { await scheduled; } catch (OperationCanceledException) { }
+            return;
+        }
+        delayCancellation.Cancel();
+        try { await wake; } catch (OperationCanceledException) { }
+        await scheduled;
+    }
+}
+
 /// <summary>
 /// Runs startup discovery immediately, then waits a freshly jittered configured
 /// delay before each later cycle. A cycle is awaited in full before another
@@ -85,7 +124,8 @@ public static class CaptureRescanScheduler
         CaptureRescanSchedule schedule,
         Func<double>? nextJitterSample = null,
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        CaptureScanWakeup? wakeup = null)
     {
         ArgumentNullException.ThrowIfNull(scanCycle);
         ArgumentNullException.ThrowIfNull(schedule);
@@ -108,7 +148,15 @@ public static class CaptureRescanScheduler
             }
             TimeSpan jitter = TimeSpan.FromTicks(
                 checked((long)(schedule.MaximumJitter.Ticks * sample)));
-            await delayAsync(schedule.Interval + jitter, cancellationToken);
+            if (wakeup is null)
+            {
+                await delayAsync(schedule.Interval + jitter, cancellationToken);
+            }
+            else
+            {
+                await wakeup.WaitAsync(
+                    schedule.Interval + jitter, delayAsync, cancellationToken);
+            }
         }
     }
 }

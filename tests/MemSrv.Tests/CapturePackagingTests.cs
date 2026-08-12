@@ -7,6 +7,163 @@ namespace MemSrv.Tests;
 public sealed class CapturePackagingTests
 {
     [Fact]
+    public void Codex01470HookPackageUsesOnlyBoundedAsynchronousWakeCommands()
+    {
+        string package = Path.Combine(
+            TestProcessRunner.RepoRoot, "packages/codex-capture-hooks/0.147.0");
+        using JsonDocument manifest = JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(package, "manifest.json")));
+        Assert.Equal("0.147.0", manifest.RootElement.GetProperty("codexCliVersion").GetString());
+        Assert.Equal(
+            "http://127.0.0.1:43191/wake",
+            manifest.RootElement.GetProperty("wakeUrl").GetString());
+        using JsonDocument document = JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(package, "hooks.json")));
+
+        Assert.Equal(["hooks"], document.RootElement.EnumerateObject().Select(item => item.Name));
+        string[] expected =
+        [
+            "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
+            "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact",
+            "SubagentStart", "SubagentStop", "Stop"
+        ];
+        JsonElement hooks = document.RootElement.GetProperty("hooks");
+        Assert.Equal(expected.Order(), hooks.EnumerateObject().Select(item => item.Name).Order());
+        foreach (JsonProperty entry in hooks.EnumerateObject())
+        {
+            JsonElement command = entry.Value[0].GetProperty("hooks")[0];
+            Assert.Equal("command", command.GetProperty("type").GetString());
+            Assert.True(command.GetProperty("async").GetBoolean());
+            Assert.Equal(1, command.GetProperty("timeout").GetInt32());
+            Assert.Equal(
+                "\"$HOME/.local/bin/overmind-codex-wake-0.147.0\"",
+                command.GetProperty("command").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task PackagedWakeCommandDiscardsInputSendsNoPayloadAndNeverFailsCodex()
+    {
+        string command = Path.Combine(
+            TestProcessRunner.RepoRoot,
+            "packages/codex-capture-hooks/0.147.0/overmind-codex-wake-0.147.0");
+        using var listener = new System.Net.Sockets.TcpListener(
+            System.Net.IPAddress.Loopback, 43191);
+        listener.Start();
+        Task<System.Net.Sockets.TcpClient> accepted = listener.AcceptTcpClientAsync();
+
+        Task<(int ExitCode, string Stdout, string Stderr, TimeSpan Elapsed)> execution =
+            TestProcessRunner.RunCommandToExitAsync(
+                command,
+                "private hook payload",
+                TimeSpan.FromSeconds(2),
+                "packaged Codex wake command");
+        using System.Net.Sockets.TcpClient client =
+            await accepted.WaitAsync(TimeSpan.FromSeconds(2));
+        using var reader = new StreamReader(client.GetStream());
+        string request = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+        Assert.Equal("POST /wake HTTP/1.1", request);
+        string? line;
+        while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync()))
+        {
+            Assert.DoesNotContain("Content-Length", line, StringComparison.OrdinalIgnoreCase);
+        }
+        await client.GetStream().WriteAsync(
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"u8.ToArray());
+        var result = await execution;
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.Stdout);
+        Assert.Empty(result.Stderr);
+
+        listener.Stop();
+        var absent = await TestProcessRunner.RunCommandToExitAsync(
+            command,
+            "",
+            TimeSpan.FromSeconds(2),
+            "packaged Codex wake command without listener");
+        Assert.Equal(0, absent.ExitCode);
+        Assert.True(absent.Elapsed < TimeSpan.FromSeconds(1));
+        Assert.Empty(absent.Stdout);
+        Assert.Empty(absent.Stderr);
+    }
+
+    [Fact]
+    public async Task PackagedLoopbackWakeStartsCatchUpBeforeLongScheduleExpires()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-wake-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "3600000";
+        environment["OVERMIND_CAPTURE_WAKE_ENABLED"] = "true";
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            using var client = new HttpClient(
+                new SocketsHttpHandler { UseProxy = false })
+            {
+                Timeout = TimeSpan.FromMilliseconds(300)
+            };
+            HttpResponseMessage? readiness = null;
+            var readinessDeadline = System.Diagnostics.Stopwatch.StartNew();
+            while (readiness is null
+                && readinessDeadline.Elapsed < TimeSpan.FromSeconds(15))
+            {
+                try
+                {
+                    readiness = await client.PostAsync(
+                        "http://127.0.0.1:43191/wake", content: null);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+                {
+                    await Task.Delay(100);
+                }
+            }
+            Assert.True(
+                readiness is not null,
+                $"The packaged wake endpoint was not ready within " +
+                $"{readinessDeadline.Elapsed.TotalSeconds:0.0}s.");
+            Assert.Equal(System.Net.HttpStatusCode.NoContent, readiness.StatusCode);
+            readiness.Dispose();
+
+            System.Net.IPAddress? nonLoopback = DiscoverNonLoopbackIpv4Address();
+            if (nonLoopback is not null)
+            {
+                Exception? nonLoopbackFailure = await Record.ExceptionAsync(() =>
+                    client.PostAsync($"http://{nonLoopback}:43191/wake", content: null));
+                Assert.True(
+                    nonLoopbackFailure is HttpRequestException or TaskCanceledException,
+                    $"The wake endpoint was reachable through non-loopback address " +
+                    $"{nonLoopback}.");
+            }
+
+            string first = Path.Combine(sessions, "2026", "08", "11", "rollout-same.jsonl");
+            string second = Path.Combine(sessions, "2026", "08", "12", "rollout-same.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(first)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(second)!);
+            await File.WriteAllTextAsync(first, Transcript("first"));
+            await File.WriteAllTextAsync(second, Transcript("second"));
+
+            using HttpResponseMessage response = await client.PostAsync(
+                "http://127.0.0.1:43191/wake", content: null);
+            Assert.Equal(System.Net.HttpStatusCode.NoContent, response.StatusCode);
+            string diagnostic = await process.StandardError.ReadLineAsync()
+                .WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+            Assert.Contains("capture_cycle_failed", diagnostic, StringComparison.Ordinal);
+        }
+        finally
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ShippedComposeAllowsCredentiallessPairingAndDocumentsOptionalCredential()
     {
         string compose = File.ReadAllText(Path.Combine(
@@ -730,6 +887,21 @@ public sealed class CapturePackagingTests
                 content = new[] { new { type = "input_text", text = "public evidence" } }
             }
         }) + "\n";
+
+    private static System.Net.IPAddress? DiscoverNonLoopbackIpv4Address()
+    {
+        try
+        {
+            return System.Net.Dns.GetHostAddresses(System.Net.Dns.GetHostName())
+                .FirstOrDefault(address =>
+                    address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                    && !System.Net.IPAddress.IsLoopback(address));
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            return null;
+        }
+    }
 
     private static Dictionary<string, string> ProductionEnvironment(
         string root,

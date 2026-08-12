@@ -7,6 +7,46 @@ namespace MemSrv.Tests;
 public sealed class CaptureScheduleTests
 {
     [Fact]
+    public async Task WakeRequestsCoalesceAndWakeDuringScanQueuesOneNonOverlappingFollowUp()
+    {
+        var wakeup = new CaptureScanWakeup();
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        int active = 0;
+        int maximumActive = 0;
+        int cycles = 0;
+
+        Task loop = CaptureRescanScheduler.RunAsync(
+            async token =>
+            {
+                maximumActive = Math.Max(maximumActive, Interlocked.Increment(ref active));
+                int cycle = Interlocked.Increment(ref cycles);
+                if (cycle == 1)
+                {
+                    firstEntered.SetResult();
+                    await releaseFirst.Task.WaitAsync(token);
+                }
+                Interlocked.Decrement(ref active);
+                if (cycle == 2) cancellation.Cancel();
+            },
+            new CaptureRescanSchedule(TimeSpan.FromHours(1), TimeSpan.Zero),
+            nextJitterSample: () => 0,
+            wakeup: wakeup,
+            cancellationToken: cancellation.Token);
+
+        await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        wakeup.Request();
+        wakeup.Request();
+        wakeup.Request();
+        releaseFirst.SetResult();
+        await loop;
+
+        Assert.Equal(2, cycles);
+        Assert.Equal(1, maximumActive);
+    }
+
+    [Fact]
     public async Task ProductionDiscoveryOnlySelectsCurrentSessionRollouts()
     {
         string codexHome = Path.Combine(
@@ -800,7 +840,8 @@ public sealed class CaptureScheduleTests
                 }
                 return Task.CompletedTask;
             },
-            cancellation.Token);
+            cancellation.Token,
+            wakeup: new CaptureScanWakeup());
 
         await startupEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.False(twoDelaysObserved.Task.IsCompleted);

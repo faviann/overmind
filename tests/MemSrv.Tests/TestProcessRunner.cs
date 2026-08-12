@@ -44,6 +44,44 @@ internal static class TestProcessRunner
 
     public static string CaptureTracerPath => _captureTracerPath.Value;
 
+    public static async Task<(
+        int ExitCode,
+        string Stdout,
+        string Stderr,
+        TimeSpan Elapsed)> RunCommandToExitAsync(
+            string command,
+            string stdin,
+            TimeSpan timeout,
+            string description)
+    {
+        var startInfo = CreateStartInfo(
+            command, [], new Dictionary<string, string>());
+        startInfo.RedirectStandardInput = true;
+        var elapsed = Stopwatch.StartNew();
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Failed to start {description}.");
+        var stdoutPump = process.StandardOutput.ReadToEndAsync();
+        var stderrPump = process.StandardError.ReadToEndAsync();
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            await process.StandardInput.WriteAsync(stdin.AsMemory(), cts.Token);
+            process.StandardInput.Close();
+            await process.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            await Task.WhenAll(stdoutPump, stderrPump);
+            throw new Xunit.Sdk.XunitException(
+                $"{description} did not exit within {timeout.TotalSeconds:0}s.");
+        }
+        elapsed.Stop();
+
+        return (process.ExitCode, await stdoutPump, await stderrPump, elapsed.Elapsed);
+    }
+
     // Runs memctl to completion. Failure-tolerant: returns the exit code and
     // both streams so tests can assert on refusals too.
     public static Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlToExitAsync(

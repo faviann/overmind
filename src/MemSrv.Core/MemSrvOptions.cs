@@ -38,21 +38,29 @@ public sealed class CaptureConsoleOidcOptions
     public string ClientId { get; set; } = "";
     public string ClientSecret { get; set; } = "";
 
-    public void Validate()
+    public bool ValidateAndIsEnabled()
     {
+        bool authorityPresent = !string.IsNullOrWhiteSpace(Authority);
+        bool clientIdPresent = !string.IsNullOrWhiteSpace(ClientId);
+        bool clientSecretPresent = !string.IsNullOrWhiteSpace(ClientSecret);
+
+        if (!authorityPresent && !clientIdPresent && !clientSecretPresent)
+        {
+            return false;
+        }
+
+        if (!authorityPresent || !clientIdPresent || !clientSecretPresent)
+        {
+            throw new InvalidOperationException(
+                "Capture-console OIDC configuration must provide authority, client id, and client secret together.");
+        }
+
         if (!Uri.TryCreate(Authority, UriKind.Absolute, out var authority)
             || authority.Scheme != Uri.UriSchemeHttps)
         {
             throw new InvalidOperationException(
                 "Capture-console OIDC authority must be an absolute HTTPS URI.");
         }
-        if (string.IsNullOrWhiteSpace(ClientId))
-        {
-            throw new InvalidOperationException("Capture-console OIDC client id is required.");
-        }
-        if (string.IsNullOrWhiteSpace(ClientSecret))
-        {
-            throw new InvalidOperationException("Capture-console OIDC client secret is required.");
-        }
+        return true;
     }
 }

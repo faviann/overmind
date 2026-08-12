@@ -11,6 +11,7 @@ public static class CaptureConsoleAuthentication
     public const string OidcScheme = "CaptureConsoleOidc";
     public const string OperatorPolicy = "CaptureConsoleOperator";
     public const string McpPolicy = "McpAgentBearer";
+    public static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(8);
 }
 
 public sealed record CaptureConsoleOperator(string ProviderSubject);

@@ -33,7 +33,7 @@ public static class HttpServerHost
 
     public static WebApplication Build(MemSrvOptions options, AgentKeyStore keyStore)
     {
-        options.CaptureConsoleOidc.Validate();
+        bool captureConsoleEnabled = options.CaptureConsoleOidc.ValidateAndIsEnabled();
         var builder = WebApplication.CreateBuilder();
 
         // AGENTS.md: never log to stdout. WebApplication's default console
@@ -67,13 +67,13 @@ public static class HttpServerHost
         builder.Services.AddScoped(provider =>
             provider.GetRequiredService<MemoryContextResolver>().Resolve());
 
-        builder.Services
-            .AddAuthentication(authentication =>
-            {
-                authentication.DefaultAuthenticateScheme = CaptureConsoleAuthentication.CookieScheme;
-                authentication.DefaultChallengeScheme = CaptureConsoleAuthentication.OidcScheme;
-            })
-            .AddCookie(CaptureConsoleAuthentication.CookieScheme, cookie =>
+        AuthenticationBuilder authentication = builder.Services
+            .AddAuthentication()
+            .AddScheme<AuthenticationSchemeOptions, BearerKeyAuthenticationHandler>(
+                BearerKeyAuthenticationHandler.SchemeName, _ => { });
+        if (captureConsoleEnabled)
+        {
+            authentication.AddCookie(CaptureConsoleAuthentication.CookieScheme, cookie =>
             {
                 cookie.ForwardChallenge = CaptureConsoleAuthentication.OidcScheme;
                 cookie.Cookie.Name = "__Secure-MemSrv-CaptureConsole";
@@ -81,6 +81,8 @@ public static class HttpServerHost
                 cookie.Cookie.HttpOnly = true;
                 cookie.Cookie.SameSite = SameSiteMode.Lax;
                 cookie.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                cookie.ExpireTimeSpan = CaptureConsoleAuthentication.SessionLifetime;
+                cookie.SlidingExpiration = false;
             })
             .AddOpenIdConnect(CaptureConsoleAuthentication.OidcScheme, oidc =>
             {
@@ -98,17 +100,19 @@ public static class HttpServerHost
                 };
                 oidc.Scope.Clear();
                 oidc.Scope.Add("openid");
-            })
-            .AddScheme<AuthenticationSchemeOptions, BearerKeyAuthenticationHandler>(
-                BearerKeyAuthenticationHandler.SchemeName, _ => { });
+            });
+        }
         builder.Services.AddAuthorization(authorization =>
         {
-            authorization.AddPolicy(CaptureConsoleAuthentication.OperatorPolicy, policy =>
+            if (captureConsoleEnabled)
             {
-                policy.AuthenticationSchemes.Add(CaptureConsoleAuthentication.CookieScheme);
-                policy.RequireAuthenticatedUser();
-                policy.RequireClaim("sub");
-            });
+                authorization.AddPolicy(CaptureConsoleAuthentication.OperatorPolicy, policy =>
+                {
+                    policy.AuthenticationSchemes.Add(CaptureConsoleAuthentication.CookieScheme);
+                    policy.RequireAuthenticatedUser();
+                    policy.RequireClaim("sub");
+                });
+            }
             authorization.AddPolicy(CaptureConsoleAuthentication.McpPolicy, policy =>
             {
                 policy.AuthenticationSchemes.Add(BearerKeyAuthenticationHandler.SchemeName);
@@ -142,14 +146,17 @@ public static class HttpServerHost
         // The focused console foundation intentionally exposes no business
         // operator actions yet. Even this entry action goes through the one
         // identity seam that derives the provider subject from the OIDC cookie.
-        app.MapGet("/capture/console", (CaptureConsoleOperatorAuthorization authorization) =>
+        if (captureConsoleEnabled)
         {
-            CaptureConsoleOperator @operator = authorization.RequireOperator();
-            string subject = System.Net.WebUtility.HtmlEncode(@operator.ProviderSubject);
-            return Results.Content(
-                $"<main><h1>Capture console</h1><p>Operator: {subject}</p></main>",
-                "text/html");
-        }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+            app.MapGet("/capture/console", (CaptureConsoleOperatorAuthorization authorization) =>
+            {
+                CaptureConsoleOperator @operator = authorization.RequireOperator();
+                string subject = System.Net.WebUtility.HtmlEncode(@operator.ProviderSubject);
+                return Results.Content(
+                    $"<main><h1>Capture console</h1><p>Operator: {subject}</p></main>",
+                    "text/html");
+            }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+        }
 
         // Deliberately outside MCP authentication: capture credentials are a
         // separate capability resolved only by CaptureAuthority. Capture

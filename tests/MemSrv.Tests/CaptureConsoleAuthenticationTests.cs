@@ -18,6 +18,32 @@ namespace MemSrv.Tests;
 public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
 {
     [Fact]
+    public async Task ConsoleIsUnavailableWhenOidcConfigurationIsAbsent()
+    {
+        var options = RuntimeOptions();
+        options.CaptureConsoleOidc = new();
+        var app = HttpServerHost.Build(options, AgentKeyStore.Load(_keysPath));
+        app.Urls.Add("http://127.0.0.1:0");
+        await app.StartAsync();
+        try
+        {
+            string baseUrl = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>()
+                .Features.Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>()!
+                .Addresses.First();
+            using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+
+            using var console = await client.GetAsync($"{baseUrl}/capture/console");
+
+            Assert.Equal(HttpStatusCode.NotFound, console.StatusCode);
+        }
+        finally
+        {
+            await app.StopAsync();
+            await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task UnauthenticatedInteractiveAccessIsChallengedByTheConfiguredOidcProvider()
     {
         var oidc = _app.Services
@@ -38,6 +64,8 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
         Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
         Assert.Equal("authentik.test", response.Headers.Location!.Host);
         Assert.Contains("client_id=capture-console-test", response.Headers.Location.Query);
+        Assert.Contains("response_type=code", response.Headers.Location.Query);
+        Assert.Contains("scope=openid", response.Headers.Location.Query);
         Assert.Contains(
             Uri.EscapeDataString(
                 $"https://{new Uri(_baseUrl).Authority}/capture/console/signin-oidc"),
@@ -93,18 +121,43 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
     }
 
     [Fact]
-    public async Task CaptureImportRemainsAvailableWhenTheOidcAuthorityIsUnavailable()
+    public async Task ProviderOutagePreservesLocalSessionOnlyUntilFixedExpirationAndOtherHttpSurfacesRemainAvailable()
     {
         var oidc = _app.Services
             .GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>()
             .Get(CaptureConsoleAuthentication.OidcScheme);
         oidc.ConfigurationManager = new UnavailableConfigurationManager();
 
+        var cookie = _app.Services
+            .GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
+            .Get(CaptureConsoleAuthentication.CookieScheme);
+        Assert.Equal(TimeSpan.FromHours(8), cookie.ExpireTimeSpan);
+        Assert.False(cookie.SlidingExpiration);
+
         using (var console = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }))
         {
             using var refused = await console.GetAsync($"{_baseUrl}/capture/console");
             Assert.False(refused.IsSuccessStatusCode);
+
+            console.DefaultRequestHeaders.Add("Cookie", ConsoleCookie(
+                cookie, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddHours(7)));
+            using var acceptedSession = await console.GetAsync($"{_baseUrl}/capture/console");
+            Assert.Equal(HttpStatusCode.OK, acceptedSession.StatusCode);
         }
+
+        using (var expiredConsole = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }))
+        {
+            expiredConsole.DefaultRequestHeaders.Add("Cookie", ConsoleCookie(
+                cookie, DateTimeOffset.UtcNow.AddHours(-9), DateTimeOffset.UtcNow.AddHours(-1)));
+            using var expiredSession = await expiredConsole.GetAsync($"{_baseUrl}/capture/console");
+            Assert.False(expiredSession.IsSuccessStatusCode);
+        }
+
+        using var health = new HttpClient();
+        using var healthy = await health.GetAsync($"{_baseUrl}/healthz");
+        Assert.Equal(HttpStatusCode.OK, healthy.StatusCode);
+
+        await using var mcp = await ConnectAsync(AgentAKey);
 
         string captureCredential = $"mcap_{Guid.NewGuid():N}";
         await EnrollCaptureCredentialAsync(captureCredential);
@@ -119,32 +172,17 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
     }
 
     [Fact]
-    public void HttpHostRequiresCompleteOidcConfiguration()
+    public void HttpHostRejectsPartialOidcConfigurationWithoutDisclosingItsSecret()
     {
         var options = RuntimeOptions();
         options.CaptureConsoleOidc.ClientId = "";
+        options.CaptureConsoleOidc.ClientSecret = "secret-that-must-not-appear";
 
         var failure = Assert.Throws<InvalidOperationException>(
             () => HttpServerHost.Build(options, AgentKeyStore.Load(_keysPath)));
 
-        Assert.Contains("client id is required", failure.Message);
-    }
-
-    [Fact]
-    public void HttpHostWiresStandardAuthentikCompatibleOidcCodeFlow()
-    {
-        var oidc = _app.Services
-            .GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>()
-            .Get(CaptureConsoleAuthentication.OidcScheme);
-
-        Assert.Equal(
-            "https://authentik.test/application/o/capture-console/",
-            oidc.Authority);
-        Assert.Equal("capture-console-test", oidc.ClientId);
-        Assert.Equal("code", oidc.ResponseType);
-        Assert.Equal(CaptureConsoleAuthentication.CookieScheme, oidc.SignInScheme);
-        Assert.False(oidc.MapInboundClaims);
-        Assert.Contains("openid", oidc.Scope);
+        Assert.Contains("must provide authority, client id, and client secret together", failure.Message);
+        Assert.DoesNotContain(options.CaptureConsoleOidc.ClientSecret, failure.Message);
     }
 
     private void ConfigureStaticOidcChallenge()
@@ -157,6 +195,24 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
             {
                 AuthorizationEndpoint = "https://authentik.test/application/o/authorize/",
             });
+    }
+
+    private static string ConsoleCookie(
+        CookieAuthenticationOptions cookie, DateTimeOffset issuedUtc, DateTimeOffset expiresUtc)
+    {
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(
+            [new Claim("sub", "authentik|outage-operator")],
+            CaptureConsoleAuthentication.OidcScheme));
+        var ticket = new AuthenticationTicket(
+            principal,
+            new AuthenticationProperties
+            {
+                IssuedUtc = issuedUtc,
+                ExpiresUtc = expiresUtc,
+                AllowRefresh = false,
+            },
+            CaptureConsoleAuthentication.CookieScheme);
+        return $"{cookie.Cookie.Name}={cookie.TicketDataFormat.Protect(ticket)}";
     }
 
     private async Task EnrollCaptureCredentialAsync(string credential)

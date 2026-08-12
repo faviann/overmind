@@ -157,9 +157,15 @@ HTTP transport (default mode):
 | Variable | Purpose |
 | --- | --- |
 | `MEMSRV_AGENT_KEYS_PATH` | Path to the provisioning-owned bearer-key YAML, mounted into the container. Required in HTTP mode; the server fails fast at startup if it is missing. |
-| `MEMSRV_CAPTURE_CONSOLE_OIDC_AUTHORITY` | HTTPS OpenID Connect issuer/authority for interactive capture-console operators. For Authentik, use the provider's application slug authority. Required in HTTP mode. |
-| `MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID` | Confidential OIDC client identifier registered for the capture console. Required in HTTP mode. |
-| `MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET` | Confidential OIDC client secret. Supply it through deployment secret handling; never commit it. Required in HTTP mode. |
+| `MEMSRV_CAPTURE_CONSOLE_OIDC_AUTHORITY` | Optional HTTPS OpenID Connect issuer/authority for interactive capture-console operators. For Authentik, use the provider's application slug authority. |
+| `MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID` | Optional confidential OIDC client identifier registered for the capture console. |
+| `MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET` | Optional confidential OIDC client secret. Supply it through deployment secret handling; never commit it. |
+
+The three capture-console OIDC variables form one optional configuration set.
+When all three are absent, the console is disabled and the existing HTTP
+surface remains available. Supplying only part of the set, or an invalid
+authority, fails server startup with a secret-free configuration error. A
+complete valid set enables the console.
 
 Optional:
 
@@ -214,6 +220,10 @@ modes run from the same image.
   operator identity from the provider's `sub` claim; request parameters, agent
   bearer keys, and capture credentials cannot supply operator identity. The
   console cookie is secure, HTTP-only, and restricted to `/capture/console`.
+  It expires after a fixed eight hours and never uses sliding renewal. A
+  locally validated session therefore continues during an OIDC outage only
+  until that expiration; new sign-ins and renewals fail while the provider is
+  unavailable.
   The server accepts one `X-Forwarded-Proto` hop so Traefik's external HTTPS
   scheme is used in the OIDC callback URI; Traefik remains the TLS owner.
   An unavailable OIDC authority prevents unauthenticated console entry but is

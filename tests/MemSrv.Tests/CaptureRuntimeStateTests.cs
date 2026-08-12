@@ -2838,6 +2838,90 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task EmptyObservationUuidReceiptLeavesResponsibilityAndPersistedStateUnchanged()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-empty-observation-uuid-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem queued = QueueItem("stream", 0, 10);
+            Assert.True(await state.ClaimAsync(
+                queued, expectedPrefix: null, verifiedPrefixMatchesSnapshot: _ => false));
+            CaptureRuntimeSnapshot beforeReceipt = await state.ReadAsync();
+
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                state.RecordServerReceiptAsync(
+                    "stream",
+                    new CaptureServerReceiptState(
+                        queued.SourcePosition,
+                        queued.DeterministicLocatorEvidence.Identity,
+                        "new",
+                        Guid.Empty,
+                        Guid.NewGuid())));
+
+            CaptureRuntimeSnapshot afterReceipt =
+                await new FileCaptureRuntimeState(directory).ReadAsync();
+            Assert.Equal(
+                JsonSerializer.Serialize(beforeReceipt),
+                JsonSerializer.Serialize(afterReceipt));
+            Assert.Equal(
+                JsonSerializer.Serialize(queued),
+                JsonSerializer.Serialize(
+                    Assert.Single(Assert.Single(afterReceipt.Streams).Queue)));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task EmptySourceStreamUuidReceiptLeavesResponsibilityAndPersistedStateUnchanged()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-empty-stream-uuid-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem queued = QueueItem("stream", 0, 10);
+            Assert.True(await state.ClaimAsync(
+                queued, expectedPrefix: null, verifiedPrefixMatchesSnapshot: _ => false));
+            CaptureRuntimeSnapshot beforeReceipt = await state.ReadAsync();
+
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                state.RecordServerReceiptAsync(
+                    "stream",
+                    new CaptureServerReceiptState(
+                        queued.SourcePosition,
+                        queued.DeterministicLocatorEvidence.Identity,
+                        "new",
+                        Guid.NewGuid(),
+                        Guid.Empty)));
+
+            CaptureRuntimeSnapshot afterReceipt =
+                await new FileCaptureRuntimeState(directory).ReadAsync();
+            Assert.Equal(
+                JsonSerializer.Serialize(beforeReceipt),
+                JsonSerializer.Serialize(afterReceipt));
+            Assert.Equal(
+                JsonSerializer.Serialize(queued),
+                JsonSerializer.Serialize(
+                    Assert.Single(Assert.Single(afterReceipt.Streams).Queue)));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task KillingPackagedTracerDuringRealStateTempWriteLeavesAtomicClaimSnapshot()
     {
         string root = TestProcessRunner.RepoRoot;

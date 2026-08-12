@@ -750,6 +750,16 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         CaptureRuntimeStreamState stream,
         CaptureServerReceiptState receipt)
     {
+        if (receipt.ObservationUuid == Guid.Empty)
+        {
+            throw new InvalidDataException(
+                "Capture server receipt observationUuid must not be empty.");
+        }
+        if (receipt.SourceStreamUuid == Guid.Empty)
+        {
+            throw new InvalidDataException(
+                "Capture server receipt sourceStreamUuid must not be empty.");
+        }
         if (stream.Stop is { } stop)
         {
             throw new CaptureStreamStoppedException(sourceStream, stop);

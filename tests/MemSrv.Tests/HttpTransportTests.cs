@@ -496,7 +496,7 @@ public sealed class HttpTransportTests : IAsyncLifetime
         var deadOptions = new MemSrvOptions
         {
             ConnectionString = "Host=127.0.0.1;Port=1;Database=nope;Username=nobody;Password=nope;Timeout=1",
-            NeverStorePath = Path.Combine(_root, "config/never_store.yaml")
+            NeverStorePath = Path.Combine(_root, "config/never_store.yaml"),
         };
         var deadApp = HttpServerHost.Build(deadOptions, AgentKeyStore.Load(_keysPath));
         deadApp.Urls.Add("http://127.0.0.1:0");

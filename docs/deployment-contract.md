@@ -157,6 +157,15 @@ HTTP transport (default mode):
 | Variable | Purpose |
 | --- | --- |
 | `MEMSRV_AGENT_KEYS_PATH` | Path to the provisioning-owned bearer-key YAML, mounted into the container. Required in HTTP mode; the server fails fast at startup if it is missing. |
+| `MEMSRV_CAPTURE_CONSOLE_OIDC_AUTHORITY` | Optional HTTPS OpenID Connect issuer/authority for interactive capture-console operators. For Authentik, use the provider's application slug authority. |
+| `MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID` | Optional confidential OIDC client identifier registered for the capture console. |
+| `MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET` | Optional confidential OIDC client secret. Supply it through deployment secret handling; never commit it. |
+
+The three capture-console OIDC variables form one optional configuration set.
+When all three are absent, the console is disabled and the existing HTTP
+surface remains available. Supplying only part of the set, or an invalid
+authority, fails server startup with a secret-free configuration error. A
+complete valid set enables the console.
 
 Optional:
 
@@ -169,7 +178,7 @@ Optional:
 | `MEMSRV_NEVER_STORE_PATH` | Never-store rule file. Defaults to `config/never_store.yaml`, which ships in the image. A missing, empty, or invalid file makes capture unhealthy: enrollment and ingestion refuse, and the tracer exits non-zero. |
 | `MEMSRV_NEVER_STORE_LITERALS_PATH` | **Operator-owned** file of exact credential values the installation already knows, one per line, mounted read-only. Unset or absent is valid and is not a fail-closed condition. Never commit this file; the tracked rule file must never contain a real credential. |
 
-No other configuration is required; `config/never_store.yaml` ships in the
+No other application configuration is required; `config/never_store.yaml` ships in the
 image. The numeric scan budgets are versioned runtime constants, not
 configuration — see [capture safety budgets](capture-safety-budgets.md).
 
@@ -204,9 +213,24 @@ modes run from the same image.
   Rotation is a redeploy; there is no key CRUD in the app.
   Values beginning with the reserved capture credential prefix `mcap_` are
   invalid agent keys and fail startup rather than acquiring MCP authority.
+- **Capture console:** `GET /capture/console`, interactive OIDC authentication.
+  Register `/capture/console/signin-oidc` as the client's callback path at the
+  provider. The initial supported provider is Authentik using the standard
+  authorization-code flow and `openid` scope. The server derives the audited
+  operator identity from the provider's `sub` claim; request parameters, agent
+  bearer keys, and capture credentials cannot supply operator identity. The
+  console cookie is secure, HTTP-only, and restricted to `/capture/console`.
+  It expires after a fixed eight hours and never uses sliding renewal. A
+  locally validated session therefore continues during an OIDC outage only
+  until that expiration; new sign-ins and renewals fail while the provider is
+  unavailable.
+  The server accepts one `X-Forwarded-Proto` hop so Traefik's external HTTPS
+  scheme is used in the OIDC callback URI; Traefik remains the TLS owner.
+  An unavailable OIDC authority prevents unauthenticated console entry but is
+  not consulted by `/capture/v1/observations`, `/mcp`, or `/healthz`.
 - **Day-1 agent URL:** `http://overmind.faviann.vms:8080/mcp` — DNS name, plain
-  HTTP on the LAN. Traefik/TLS is a later, purely infra-side add-on requiring no
-  app or contract change.
+  HTTP on the LAN. The backend remains plain HTTP; external Traefik/TLS must
+  supply the documented forwarded scheme and OIDC callback configuration.
 
 ## Disabled synthetic capture artifact — NOT A DEPLOYMENT CONTRACT
 

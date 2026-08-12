@@ -1,9 +1,14 @@
 using MemSrv.Core;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
+using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 using System.Text.Json;
 
@@ -28,6 +33,7 @@ public static class HttpServerHost
 
     public static WebApplication Build(MemSrvOptions options, AgentKeyStore keyStore)
     {
+        bool captureConsoleEnabled = options.CaptureConsoleOidc.ValidateAndIsEnabled();
         var builder = WebApplication.CreateBuilder();
 
         // AGENTS.md: never log to stdout. WebApplication's default console
@@ -46,16 +52,73 @@ public static class HttpServerHost
             new CaptureIngestion(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
 
         builder.Services.AddHttpContextAccessor();
+        builder.Services.Configure<ForwardedHeadersOptions>(forwarded =>
+        {
+            // Traefik owns TLS. Trust exactly one forwarded scheme hop so OIDC
+            // generates the external HTTPS callback without changing routing.
+            forwarded.ForwardedHeaders = ForwardedHeaders.XForwardedProto;
+            forwarded.ForwardLimit = 1;
+            forwarded.KnownIPNetworks.Clear();
+            forwarded.KnownProxies.Clear();
+        });
+        builder.Services.AddScoped<CaptureConsoleOperatorAuthorization>();
         builder.Services.AddSingleton<MemoryContextResolver>();
         // Per MCP session: identity from the bearer key, session id from transport.
         builder.Services.AddScoped(provider =>
             provider.GetRequiredService<MemoryContextResolver>().Resolve());
 
-        builder.Services
-            .AddAuthentication(BearerKeyAuthenticationHandler.SchemeName)
+        AuthenticationBuilder authentication = builder.Services
+            .AddAuthentication()
             .AddScheme<AuthenticationSchemeOptions, BearerKeyAuthenticationHandler>(
                 BearerKeyAuthenticationHandler.SchemeName, _ => { });
-        builder.Services.AddAuthorization();
+        if (captureConsoleEnabled)
+        {
+            authentication.AddCookie(CaptureConsoleAuthentication.CookieScheme, cookie =>
+            {
+                cookie.ForwardChallenge = CaptureConsoleAuthentication.OidcScheme;
+                cookie.Cookie.Name = "__Secure-MemSrv-CaptureConsole";
+                cookie.Cookie.Path = "/capture/console";
+                cookie.Cookie.HttpOnly = true;
+                cookie.Cookie.SameSite = SameSiteMode.Lax;
+                cookie.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                cookie.ExpireTimeSpan = CaptureConsoleAuthentication.SessionLifetime;
+                cookie.SlidingExpiration = false;
+            })
+            .AddOpenIdConnect(CaptureConsoleAuthentication.OidcScheme, oidc =>
+            {
+                oidc.Authority = options.CaptureConsoleOidc.Authority;
+                oidc.ClientId = options.CaptureConsoleOidc.ClientId;
+                oidc.ClientSecret = options.CaptureConsoleOidc.ClientSecret;
+                oidc.CallbackPath = "/capture/console/signin-oidc";
+                oidc.ResponseType = OpenIdConnectResponseType.Code;
+                oidc.MapInboundClaims = false;
+                oidc.SaveTokens = false;
+                oidc.SignInScheme = CaptureConsoleAuthentication.CookieScheme;
+                oidc.TokenValidationParameters = new TokenValidationParameters
+                {
+                    NameClaimType = "sub",
+                };
+                oidc.Scope.Clear();
+                oidc.Scope.Add("openid");
+            });
+        }
+        builder.Services.AddAuthorization(authorization =>
+        {
+            if (captureConsoleEnabled)
+            {
+                authorization.AddPolicy(CaptureConsoleAuthentication.OperatorPolicy, policy =>
+                {
+                    policy.AuthenticationSchemes.Add(CaptureConsoleAuthentication.CookieScheme);
+                    policy.RequireAuthenticatedUser();
+                    policy.RequireClaim("sub");
+                });
+            }
+            authorization.AddPolicy(CaptureConsoleAuthentication.McpPolicy, policy =>
+            {
+                policy.AuthenticationSchemes.Add(BearerKeyAuthenticationHandler.SchemeName);
+                policy.RequireAuthenticatedUser();
+            });
+        });
 
         builder.Services
             .AddMcpServer()
@@ -66,6 +129,7 @@ public static class HttpServerHost
 
         var app = builder.Build();
 
+        app.UseForwardedHeaders();
         app.UseAuthentication();
         app.UseAuthorization();
 
@@ -78,6 +142,21 @@ public static class HttpServerHost
             bool healthy = await memory.PingAsync(timeout.Token);
             return healthy ? Results.Ok("ok") : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         });
+
+        // The focused console foundation intentionally exposes no business
+        // operator actions yet. This focused entry route goes through the one
+        // identity seam that derives the provider subject from the OIDC cookie.
+        if (captureConsoleEnabled)
+        {
+            app.MapGet("/capture/console", (CaptureConsoleOperatorAuthorization authorization) =>
+            {
+                CaptureConsoleOperator @operator = authorization.RequireOperator();
+                string subject = System.Net.WebUtility.HtmlEncode(@operator.ProviderSubject);
+                return Results.Content(
+                    $"<main><h1>Capture console</h1><p>Operator: {subject}</p></main>",
+                    "text/html");
+            }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+        }
 
         // Deliberately outside MCP authentication: capture credentials are a
         // separate capability resolved only by CaptureAuthority. Capture
@@ -152,7 +231,7 @@ public static class HttpServerHost
             }
         });
 
-        app.MapMcp("/mcp").RequireAuthorization();
+        app.MapMcp("/mcp").RequireAuthorization(CaptureConsoleAuthentication.McpPolicy);
 
         return app;
     }

@@ -581,7 +581,8 @@ public sealed class CaptureTests : HttpSeamTestBase
                 "--harness", "codex",
                 "--agent-id", "capture:codex-synthetic",
                 "--credential-file", credentialPath);
-            Assert.Contains("non-production", enrollment);
+            Assert.Contains("enrolled ", enrollment, StringComparison.Ordinal);
+            Assert.Contains("stable_name=codex-synthetic", enrollment, StringComparison.Ordinal);
 
             using var agentOnCapture = CaptureClient(AgentAKey);
             var rejectedAgent = await agentOnCapture.PostAsync(
@@ -2162,18 +2163,16 @@ public sealed class CaptureTests : HttpSeamTestBase
 
         try
         {
-            var disabled = await TestProcessRunner.RunCaptureTracerToExitAsync(
+            var unconfigured = await TestProcessRunner.RunCaptureTracerToExitAsync(
                 new Dictionary<string, string>());
-            Assert.Equal(2, disabled.ExitCode);
-            Assert.Empty(disabled.Stdout);
-            Assert.Contains("disabled", disabled.Stderr);
+            Assert.Equal(2, unconfigured.ExitCode);
+            Assert.Empty(unconfigured.Stdout);
+            Assert.Contains("capture_runtime_configuration_invalid", unconfigured.Stderr);
 
             var enabled = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.True(enabled.Succeeded);
-            var receipts = enabled.Stdout.Split(
-                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
-                .ToArray();
+            JsonElement[] receipts = await ReadPublicCaptureReceiptsAsync(
+                RuntimeStateDirectory(fixturePath));
             Assert.Equal(3, receipts.Length);
             Assert.All(receipts, receipt => Assert.Equal("new", receipt.GetProperty("status").GetString()));
             Assert.Equal([0L, 1L, 2L], receipts.Select(receipt => receipt.GetProperty("sourcePosition").GetInt64()));
@@ -2719,7 +2718,8 @@ public sealed class CaptureTests : HttpSeamTestBase
                 new UTF8Encoding(false));
             var result = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.True(result.Succeeded);
-            JsonElement[] receipts = ParseReceiptLines(result.Stdout);
+            JsonElement[] receipts = await ReadPublicCaptureReceiptsAsync(
+                RuntimeStateDirectory(fixturePath));
             Assert.Equal(3, receipts.Length);
             Assert.All(
                 receipts,
@@ -2781,7 +2781,8 @@ public sealed class CaptureTests : HttpSeamTestBase
             DeleteRuntimeState(overPath);
             var retry = await RunEnabledTracerAsync(overCredential, overPath);
             Assert.True(retry.Succeeded);
-            JsonElement retriedOmission = ParseReceiptLines(retry.Stdout)[0];
+            JsonElement retriedOmission = (await ReadPublicCaptureReceiptsAsync(
+                RuntimeStateDirectory(overPath)))[0];
             Assert.Equal(
                 "already_accepted",
                 retriedOmission.GetProperty("status").GetString());
@@ -5114,7 +5115,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                 await process.WaitForExitAsync();
             }
             string diagnostics = await stderr;
-            Assert.Contains("accepted_source_conflict", diagnostics);
+            Assert.True(HasCaptureDiagnostic(diagnostics, "stream_stopped"));
             proxy.Stop();
             Directory.Delete(directory, recursive: true);
         }
@@ -5539,7 +5540,8 @@ public sealed class CaptureTests : HttpSeamTestBase
 
             var resumed = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.True(resumed.Succeeded);
-            JsonElement[] receipts = ParseReceiptLines(resumed.Stdout);
+            JsonElement[] receipts = await ReadPublicCaptureReceiptsAsync(
+                RuntimeStateDirectory(fixturePath));
             Assert.Equal([0L, 1L, 2L], receipts.Select(
                 receipt => receipt.GetProperty("sourcePosition").GetInt64()));
             Assert.All(receipts, receipt =>
@@ -5588,7 +5590,8 @@ public sealed class CaptureTests : HttpSeamTestBase
             JsonElement committedResult = committedReceipts[2];
 
             Assert.False(ambiguous.Succeeded);
-            JsonElement[] deliveredBeforeLoss = ParseReceiptLines(ambiguous.Stdout);
+            JsonElement[] deliveredBeforeLoss = await ReadPublicCaptureReceiptsAsync(
+                RuntimeStateDirectory(fixturePath));
             Assert.Equal([0L, 1L], deliveredBeforeLoss.Select(
                 receipt => receipt.GetProperty("sourcePosition").GetInt64()));
             CaptureRuntimeStreamState retained = Assert.Single(
@@ -5613,7 +5616,10 @@ public sealed class CaptureTests : HttpSeamTestBase
 
             var retry = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.True(retry.Succeeded);
-            JsonElement retryReceipt = Assert.Single(ParseReceiptLines(retry.Stdout));
+            JsonElement retryReceipt = Assert.Single(
+                await ReadPublicCaptureReceiptsAsync(
+                    RuntimeStateDirectory(fixturePath)),
+                receipt => receipt.GetProperty("sourcePosition").GetInt64() == 2);
             Assert.Equal("already_accepted", retryReceipt.GetProperty("status").GetString());
             Assert.Equal(2, retryReceipt.GetProperty("sourcePosition").GetInt64());
             Assert.Equal(
@@ -5684,7 +5690,8 @@ public sealed class CaptureTests : HttpSeamTestBase
                 });
             await forwardFirst;
             Assert.False(first.Succeeded);
-            JsonElement firstReceipt = Assert.Single(ParseReceiptLines(first.Stdout));
+            JsonElement firstReceipt = (await ReadPublicCaptureReceiptsAsync(
+                RuntimeStateDirectory(fixturePath)))[0];
             Guid observationUuid = firstReceipt.GetProperty("observationUuid").GetGuid();
             Guid sourceStreamUuid = firstReceipt.GetProperty("observation")
                 .GetProperty("sourceStreamUuid").GetGuid();
@@ -5712,7 +5719,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.False(conflict.Succeeded);
             Assert.Empty(conflict.Stdout);
-            Assert.Contains("verified_prefix_changed", conflict.Stderr);
+            Assert.True(HasCaptureDiagnostic(conflict.Stderr, "stream_stopped"));
 
             var runtimeState =
                 new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath));
@@ -5736,7 +5743,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             var repeated = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.False(repeated.Succeeded);
             Assert.Empty(repeated.Stdout);
-            Assert.Contains("verified_prefix_changed", repeated.Stderr);
+            Assert.True(HasCaptureDiagnostic(repeated.Stderr, "stream_stopped"));
             Assert.Equal(
                 JsonSerializer.Serialize(stopped),
                 JsonSerializer.Serialize(await runtimeState.ReadAsync()));
@@ -5771,8 +5778,8 @@ public sealed class CaptureTests : HttpSeamTestBase
             await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
             var first = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.True(first.Succeeded);
-            var firstReceipt = JsonDocument.Parse(first.Stdout.Split(
-                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
+            JsonElement firstReceipt = (await ReadPublicCaptureReceiptsAsync(
+                RuntimeStateDirectory(fixturePath)))[0];
             Guid observationUuid = firstReceipt.GetProperty("observationUuid").GetGuid();
             string beforeConflict = await RunMemCtlAsync(
                 "capture", "receipt", observationUuid.ToString());
@@ -5782,7 +5789,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.False(conflict.Succeeded);
             Assert.Empty(conflict.Stdout);
-            Assert.Contains("verified_prefix_changed", conflict.Stderr);
+            Assert.True(HasCaptureDiagnostic(conflict.Stderr, "stream_stopped"));
             CaptureRuntimeStreamState stopped = Assert.Single(
                 (await new FileCaptureRuntimeState(RuntimeStateDirectory(fixturePath))
                     .ReadAsync()).Streams);
@@ -5837,7 +5844,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             var conflict = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.False(conflict.Succeeded);
             Assert.Empty(conflict.Stdout);
-            Assert.Contains("blocked_by_earlier_gap", conflict.Stderr);
+            Assert.True(HasCaptureDiagnostic(conflict.Stderr, "stream_stopped"));
             Assert.DoesNotContain(
                 "response_item",
                 conflict.Stderr,
@@ -5857,7 +5864,7 @@ public sealed class CaptureTests : HttpSeamTestBase
             var repeated = await RunEnabledTracerAsync(captureKey, fixturePath);
             Assert.False(repeated.Succeeded);
             Assert.Empty(repeated.Stdout);
-            Assert.Contains("blocked_by_earlier_gap", repeated.Stderr);
+            Assert.True(HasCaptureDiagnostic(repeated.Stderr, "stream_stopped"));
             Assert.Equal(
                 JsonSerializer.Serialize(stopped),
                 JsonSerializer.Serialize(await state.ReadAsync()));
@@ -6716,22 +6723,104 @@ public sealed class CaptureTests : HttpSeamTestBase
         return JsonDocument.Parse(responseBody).RootElement.Clone();
     }
 
-    private static JsonElement[] ParseReceiptLines(string stdout) =>
-        stdout.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-            .Select(line => JsonDocument.Parse(line).RootElement.Clone())
-            .ToArray();
+    private static bool HasCaptureDiagnostic(string stderr, string reason) =>
+        stderr.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => JsonDocument.Parse(line).RootElement)
+            .Any(line => line.TryGetProperty("event", out JsonElement eventName)
+                && eventName.GetString() == "capture_cycle_failed"
+                && line.TryGetProperty("reason", out JsonElement reasonElement)
+                && reasonElement.GetString() == reason);
 
-    private static async Task<JsonElement> ReadTracerReceiptAsync(Process process)
+    private async Task<JsonElement> ReadTracerReceiptAsync(CaptureTracerProcess process)
     {
-        string? line = await process.StandardOutput.ReadLineAsync()
-            .WaitAsync(TimeSpan.FromSeconds(15));
-        if (string.IsNullOrWhiteSpace(line))
+        HashSet<Guid> seen = process.SeenReceiptIds;
+        int initialReceiptCount = process.InitialReceiptCount;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (true)
         {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2));
-            Assert.Fail(
-                $"Scheduled capture tracer exited before a receipt (exit={process.ExitCode}).");
+            CaptureRuntimeSnapshot snapshot = await new FileCaptureRuntimeState(
+                process.StateDirectory).ReadAsync();
+            int durableReceiptCount = snapshot.Streams.Sum(stream =>
+                stream.LastServerReceipt is { } last ? checked((int)last.SourcePosition + 1) : 0);
+            if (durableReceiptCount <= seen.Count)
+            {
+                if (process.HasExited)
+                {
+                    Assert.Fail(
+                        $"Scheduled capture tracer exited before durable public receipt evidence " +
+                        $"(exit={process.ExitCode}).");
+                }
+                await Task.Delay(50, timeout.Token);
+                continue;
+            }
+            JsonElement[] receipts = await ReadPublicCaptureReceiptsAsync(
+                process.StateDirectory);
+            if (seen.Count == 0 && initialReceiptCount > 0)
+            {
+                foreach (JsonElement existing in receipts.Take(initialReceiptCount))
+                {
+                    seen.Add(existing.GetProperty("observationUuid").GetGuid());
+                }
+            }
+            JsonElement[] unseen = receipts.Where(receipt => !seen.Contains(
+                receipt.GetProperty("observationUuid").GetGuid())).ToArray();
+            if (unseen.Length > 0)
+            {
+                JsonElement receipt = unseen[0];
+                seen.Add(receipt.GetProperty("observationUuid").GetGuid());
+                return receipt;
+            }
+            await Task.Delay(50, timeout.Token);
         }
-        return JsonDocument.Parse(line).RootElement.Clone();
+    }
+
+    private async Task<JsonElement[]> ReadPublicCaptureReceiptsAsync(string stateDirectory)
+    {
+        CaptureRuntimeSnapshot snapshot = await new FileCaptureRuntimeState(
+            stateDirectory).ReadAsync();
+        var receipts = new List<JsonElement>();
+        foreach (CaptureRuntimeStreamState stream in snapshot.Streams)
+        {
+            if (stream.CanonicalSourceStreamUuid is not { } sourceStreamUuid)
+            {
+                continue;
+            }
+            JsonElement replay = JsonDocument.Parse(await RunMemCtlAsync(
+                "capture", "replay", sourceStreamUuid.ToString())).RootElement.Clone();
+            foreach (IGrouping<long, JsonElement> observationEvents in replay
+                .GetProperty("events").EnumerateArray()
+                .GroupBy(item => item.GetProperty("sourcePosition").GetInt64())
+                .Where(group => stream.LastServerReceipt is { } receipt
+                    && group.Key <= receipt.SourcePosition)
+                .OrderBy(group => group.Key))
+            {
+                JsonElement firstEnvelope = observationEvents.First().GetProperty("envelope");
+                JsonElement observation = firstEnvelope.GetProperty("observation");
+                var receipt = new JsonObject
+                {
+                    ["sourcePosition"] = observationEvents.Key,
+                    ["status"] = stream.LastServerReceipt?.Status ?? "accepted",
+                    ["observationUuid"] = observation.GetProperty("observationUuid").GetGuid(),
+                    ["effectiveNamespace"] = firstEnvelope.GetProperty("event")
+                        .GetProperty("namespace").GetString(),
+                    ["observation"] = JsonNode.Parse(observation.GetRawText()),
+                    ["events"] = new JsonArray(observationEvents
+                        .Select(item =>
+                        {
+                            JsonElement envelope = item.GetProperty("envelope");
+                            JsonObject eventNode = JsonNode.Parse(envelope
+                                .GetProperty("event").GetRawText())!.AsObject();
+                            eventNode["relationships"] = JsonNode.Parse(envelope
+                                .GetProperty("relationships").GetRawText());
+                            return eventNode;
+                        })
+                        .ToArray()),
+                    ["outcome"] = JsonNode.Parse(firstEnvelope.GetProperty("outcome").GetRawText())
+                };
+                receipts.Add(JsonDocument.Parse(receipt.ToJsonString()).RootElement.Clone());
+            }
+        }
+        return [.. receipts];
     }
 
     private static async Task WaitUntilAsync(Func<Task<bool>> condition)

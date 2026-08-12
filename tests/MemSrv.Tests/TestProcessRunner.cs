@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using CaptureAdapters;
 
 namespace MemSrv.Tests;
@@ -109,6 +110,51 @@ internal static class TestProcessRunner
             TimeSpan.FromSeconds(60),
             "CodexCaptureTracer");
 
+    public static async Task<(string Stdout, string Stderr)>
+        RunCaptureTracerUntilDiagnosticAsync(
+            IReadOnlyDictionary<string, string> environment,
+            string expectedDiagnostic)
+    {
+        using var process = StartCaptureTracer(environment);
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+        var observed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        process.OutputDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+            {
+                lock (stdout)
+                {
+                    stdout.AppendLine(args.Data);
+                }
+            }
+        };
+        process.ErrorDataReceived += (_, args) =>
+        {
+            if (args.Data is null)
+            {
+                return;
+            }
+            lock (stderr)
+            {
+                stderr.AppendLine(args.Data);
+            }
+            if (args.Data.Contains(expectedDiagnostic, StringComparison.Ordinal))
+            {
+                observed.TrySetResult();
+            }
+        };
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        await observed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        process.Kill(entireProcessTree: true);
+        await process.WaitForExitAsync();
+        process.WaitForExit();
+        return (stdout.ToString(), stderr.ToString());
+    }
+
     public static async Task<(bool Succeeded, string Stdout, string Stderr)>
         RunSingleStreamCaptureAttemptAsync(IReadOnlyDictionary<string, string> environment)
     {
@@ -122,8 +168,9 @@ internal static class TestProcessRunner
         using var process = StartCaptureTracer(scheduledEnvironment);
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
-        int stdoutLines = 0;
         int stderrLines = 0;
+        int failureLines = 0;
+        int deliveryLines = 0;
         process.OutputDataReceived += (_, args) =>
         {
             if (args.Data is not null)
@@ -132,7 +179,6 @@ internal static class TestProcessRunner
                 {
                     stdout.AppendLine(args.Data);
                 }
-                Interlocked.Increment(ref stdoutLines);
             }
         };
         process.ErrorDataReceived += (_, args) =>
@@ -144,6 +190,18 @@ internal static class TestProcessRunner
                     stderr.AppendLine(args.Data);
                 }
                 Interlocked.Increment(ref stderrLines);
+                if (args.Data.Contains(
+                    "\"event\":\"capture_cycle_failed\"",
+                    StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref failureLines);
+                }
+                if (args.Data.Contains(
+                    "\"event\":\"capture_delivery_accepted\"",
+                    StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref deliveryLines);
+                }
             }
         };
         process.BeginOutputReadLine();
@@ -171,17 +229,15 @@ internal static class TestProcessRunner
                         }
                     }
                     else if (stream is not null && stream.EnqueuedThrough >= 0
-                        && stream.Queue.Count == 0)
+                        && stream.Queue.Count == 0
+                        && Volatile.Read(ref deliveryLines) > 0)
                     {
-                        if (Volatile.Read(ref stdoutLines) > 0)
-                        {
-                            inferredExitCode = 0;
-                            break;
-                        }
+                        inferredExitCode = 0;
+                        break;
                     }
                 }
 
-                if (Volatile.Read(ref stderrLines) > 0 && inferredExitCode != 4)
+                if (Volatile.Read(ref failureLines) > 0 && inferredExitCode != 4)
                 {
                     break;
                 }
@@ -206,10 +262,31 @@ internal static class TestProcessRunner
             stderr.ToString());
     }
 
-    public static Process StartCaptureTracer(
-        IReadOnlyDictionary<string, string> environment) =>
-        Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
-        ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
+    public static CaptureTracerProcess StartCaptureTracer(
+        IReadOnlyDictionary<string, string> environment)
+    {
+        string? stateDirectory = environment.GetValueOrDefault("OVERMIND_CAPTURE_STATE_DIR");
+        int initialReceiptCount = 0;
+        if (stateDirectory is not null)
+        {
+            try
+            {
+                CaptureRuntimeSnapshot initial = new FileCaptureRuntimeState(stateDirectory)
+                    .ReadAsync().GetAwaiter().GetResult();
+                initialReceiptCount = initial.Streams.Sum(stream =>
+                    stream.LastServerReceipt is { } receipt
+                        ? checked((int)receipt.SourcePosition + 1)
+                        : 0);
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidDataException)
+            {
+                // The packaged child owns fail-closed validation of corrupt state.
+            }
+        }
+        Process process = Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
+            ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
+        return new CaptureTracerProcess(process, stateDirectory, initialReceiptCount);
+    }
 
     private static ProcessStartInfo CreateStartInfo(
         string apphostPath, IReadOnlyList<string> args, IReadOnlyDictionary<string, string> environment)
@@ -303,4 +380,50 @@ internal static class TestProcessRunner
 
         return directory?.FullName ?? throw new InvalidOperationException("Could not find repo root.");
     }
+}
+
+internal sealed class CaptureTracerProcess : IDisposable
+{
+    private readonly Process _process;
+    private readonly string? _stateDirectory;
+
+    public CaptureTracerProcess(
+        Process process,
+        string? stateDirectory,
+        int initialReceiptCount)
+    {
+        _process = process;
+        _stateDirectory = stateDirectory;
+        InitialReceiptCount = initialReceiptCount;
+    }
+
+    public string StateDirectory => _stateDirectory
+        ?? throw new InvalidOperationException(
+            "Capture tracer process has no durable-state directory.");
+    public int InitialReceiptCount { get; }
+    public HashSet<Guid> SeenReceiptIds { get; } = [];
+    public StreamReader StandardOutput => _process.StandardOutput;
+    public StreamReader StandardError => _process.StandardError;
+    public bool HasExited => _process.HasExited;
+    public int ExitCode => _process.ExitCode;
+
+    public event DataReceivedEventHandler? OutputDataReceived
+    {
+        add => _process.OutputDataReceived += value;
+        remove => _process.OutputDataReceived -= value;
+    }
+
+    public event DataReceivedEventHandler? ErrorDataReceived
+    {
+        add => _process.ErrorDataReceived += value;
+        remove => _process.ErrorDataReceived -= value;
+    }
+
+    public void BeginOutputReadLine() => _process.BeginOutputReadLine();
+    public void BeginErrorReadLine() => _process.BeginErrorReadLine();
+    public void Kill(bool entireProcessTree) => _process.Kill(entireProcessTree);
+    public Task WaitForExitAsync(CancellationToken cancellationToken = default) =>
+        _process.WaitForExitAsync(cancellationToken);
+    public void WaitForExit() => _process.WaitForExit();
+    public void Dispose() => _process.Dispose();
 }

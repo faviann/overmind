@@ -11,6 +11,28 @@ internal static class JsonAdapterHelpers
     public static JsonElement Json(object? value) =>
         JsonSerializer.SerializeToElement(value, JsonDefaults.Options);
 
+    public static bool HasUniquePropertyNames(JsonElement value)
+    {
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                foreach (JsonProperty property in value.EnumerateObject())
+                {
+                    if (!names.Add(property.Name)
+                        || !HasUniquePropertyNames(property.Value))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            case JsonValueKind.Array:
+                return value.EnumerateArray().All(HasUniquePropertyNames);
+            default:
+                return true;
+        }
+    }
+
     public static CaptureSourceTimestamp? SourceTimestamp(JsonElement record)
     {
         if (!TryGetString(record, "timestamp", out var raw))

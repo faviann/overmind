@@ -12,6 +12,118 @@ namespace MemSrv.Tests;
 public sealed class CaptureRuntimeStateTests
 {
     [Fact]
+    public async Task UnsupportedDurableStateContractFailsClosed()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-contract-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory, "capture-state.json"),
+            "{\"contractVersion\":2,\"streams\":[]}");
+
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(DuplicateRuntimeStateProperties))]
+    public async Task RuntimeStateRejectsDuplicatePropertiesAtEveryDocumentLevel(
+        string durable,
+        string privateValue)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-duplicate-property-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capture-state.json"), durable);
+
+        try
+        {
+            InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+
+            Assert.Equal("Capture runtime state has an unsupported contract.", failure.Message);
+            Assert.DoesNotContain(privateValue, failure.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(directory, failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    public static IEnumerable<object[]> DuplicateRuntimeStateProperties()
+    {
+        const string privateValue = "private-duplicate-state-value";
+        const string snapshot = """
+            {"contractVersion":1,"streams":[{"sourceStream":"private-duplicate-state-value","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":2,"sha256":"prefix"},"enqueuedThrough":1,"queue":[{"sourceStream":"private-duplicate-state-value","sourcePosition":1,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":1,"byteOffset":1,"byteLength":1,"recordSha256":"record","prefixEvidence":{"byteLength":2,"sha256":"prefix"}},"redactedSafeCandidate":"{}","outcome":{"contractVersion":1,"captureHealth":"healthy","captureFidelity":"complete","counters":[]}}],"lastServerReceipt":{"sourcePosition":0,"locatorIdentity":"receipt","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"},"canonicalSourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}]}
+            """;
+
+        yield return
+        [
+            snapshot.Replace(
+                "\"streams\":[",
+                "\"streams\":[],\"streams\":[",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"queue\":[",
+                "\"queue\":[],\"queue\":[",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"sourcePosition\":1,\"deterministicLocatorEvidence\"",
+                "\"sourcePosition\":1,\"sourcePosition\":1,\"deterministicLocatorEvidence\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"sourcePosition\":1,\"byteOffset\"",
+                "\"sourcePosition\":1,\"sourcePosition\":1,\"byteOffset\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"byteLength\":2,\"sha256\":\"prefix\"",
+                "\"byteLength\":2,\"byteLength\":2,\"sha256\":\"prefix\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"captureHealth\":\"healthy\"",
+                "\"captureHealth\":\"healthy\",\"captureHealth\":\"healthy\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+        yield return
+        [
+            snapshot.Replace(
+                "\"status\":\"new\"",
+                "\"status\":\"new\",\"status\":\"new\"",
+                StringComparison.Ordinal),
+            privateValue
+        ];
+    }
+
+    [Fact]
     public async Task MalformedTailsAdvanceOnlyAfterTerminalEvidenceAndRetriesRestartSafely()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -249,6 +361,126 @@ public sealed class CaptureRuntimeStateTests
         Assert.Equal(
             "Queued sourcePosition must match deterministic locator evidence.",
             exception.Message);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":null}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":-1,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":10,\"byteLength\":2,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":11,\"sha256\":\"prefix\"}}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":2,\"sha256\":\"prefix\"}}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":9223372036854775807,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}}")]
+    public async Task RuntimeStateRejectsInvalidNestedLocatorEvidenceAsInvalidData(
+        string locatorEvidence)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-invalid-locator-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string durable = """
+            {"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":null,"enqueuedThrough":0,"queue":[{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":LOCATOR_EVIDENCE,"redactedSafeCandidate":"{}","outcome":{"contractVersion":1,"captureHealth":"healthy","captureFidelity":"complete","counters":[]}}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}
+            """.Replace("LOCATOR_EVIDENCE", locatorEvidence, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capture-state.json"), durable);
+
+        try
+        {
+            InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+            Assert.Equal("Capture runtime state has an unsupported contract.", failure.Message);
+            Assert.DoesNotContain("stream", failure.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("transcript", failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("null", "{\"safe\":true}")]
+    [InlineData("{\"sourceStream\":\"stream\",\"sourcePosition\":0,\"deterministicLocatorEvidence\":null,\"redactedSafeCandidate\":\"{}\"}", "{\"safe\":true}")]
+    [InlineData("{\"sourceStream\":\"stream\",\"sourcePosition\":0,\"deterministicLocatorEvidence\":{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}},\"redactedSafeCandidate\":null}", "private-candidate-content")]
+    [InlineData("{\"sourceStream\":\"stream\",\"sourcePosition\":0,\"deterministicLocatorEvidence\":{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}},\"redactedSafeCandidate\":\"null\"}", "private-candidate-content")]
+    [InlineData("{\"sourceStream\":\"stream\",\"sourcePosition\":0,\"deterministicLocatorEvidence\":{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}},\"redactedSafeCandidate\":\"{}\",\"outcome\":{}}", "private-outcome-content")]
+    public async Task RuntimeStateRejectsNullQueueAndCandidateShellsAsInvalidData(
+        string queueItem,
+        string forbidden)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-null-shell-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string durable = """
+            {"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":null,"enqueuedThrough":0,"queue":[QUEUE_ITEM],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}
+            """.Replace("QUEUE_ITEM", queueItem, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capture-state.json"), durable);
+
+        try
+        {
+            InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+            Assert.Equal("Capture runtime state has an unsupported contract.", failure.Message);
+            Assert.DoesNotContain(forbidden, failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidRuntimeSnapshotRelationships))]
+    public async Task RuntimeStateRejectsContradictorySnapshotRelationshipsAsInvalidData(
+        string durable)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-relationship-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capture-state.json"), durable);
+
+        try
+        {
+            InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+            Assert.Equal("Capture runtime state has an unsupported contract.", failure.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    public static TheoryData<string> InvalidRuntimeSnapshotRelationships
+    {
+        get
+        {
+            const string stream = """
+                {"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":2,"sha256":"prefix-1"},"enqueuedThrough":1,"queue":[{"sourceStream":"stream","sourcePosition":1,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":1,"byteOffset":1,"byteLength":1,"recordSha256":"record-1","prefixEvidence":{"byteLength":2,"sha256":"prefix-1"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":{"sourcePosition":0,"locatorIdentity":"receipt-0","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"},"canonicalSourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}
+                """;
+            const string secondQueue = """
+                ,{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":0,"byteOffset":0,"byteLength":1,"recordSha256":"record-0","prefixEvidence":{"byteLength":1,"sha256":"prefix-0"}},"redactedSafeCandidate":"{}"}
+                """;
+            static string Snapshot(string streams) =>
+                $"{{\"contractVersion\":1,\"streams\":[{streams}]}}";
+
+            return new TheoryData<string>
+            {
+                Snapshot(stream + "," + stream),
+                Snapshot(stream.Replace("\"enqueuedThrough\":1", "\"enqueuedThrough\":0", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("}],\"lastServerReceipt\"", "}" + secondQueue + "],\"lastServerReceipt\"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"sourcePosition\":0,\"locatorIdentity\"", "\"sourcePosition\":1,\"locatorIdentity\"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"sourcePosition\":0,\"locatorIdentity\"", "\"sourcePosition\":-1,\"locatorIdentity\"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"sourcePosition\":0,", "", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"status\":\"new\"", "\"status\":1", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"status\":\"new\"", "\"status\":\"accepted\"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"locatorIdentity\":\"receipt-0\"", "\"locatorIdentity\":\"   \"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5", "00000000-0000-0000-0000-000000000000", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("a4d86f4c-e045-4761-929b-eec9e5959f95", "00000000-0000-0000-0000-000000000000", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"canonicalSourceStreamUuid\":\"a4d86f4c-e045-4761-929b-eec9e5959f95\"", "\"canonicalSourceStreamUuid\":\"646daf38-73d9-4c9e-8a84-13e1fc5667f2\"", StringComparison.Ordinal)),
+                """{"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":1,"sha256":"prefix-1"},"enqueuedThrough":1,"queue":[{"sourceStream":"stream","sourcePosition":1,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":1,"byteOffset":0,"byteLength":1,"recordSha256":"record-1","prefixEvidence":{"byteLength":1,"sha256":"prefix-1"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}""",
+                """{"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":3,"sha256":"prefix-2"},"enqueuedThrough":2,"queue":[{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":0,"byteOffset":0,"byteLength":1,"recordSha256":"record-0","prefixEvidence":{"byteLength":1,"sha256":"prefix-0"}},"redactedSafeCandidate":"{}"},{"sourceStream":"stream","sourcePosition":2,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":2,"byteOffset":2,"byteLength":1,"recordSha256":"record-2","prefixEvidence":{"byteLength":3,"sha256":"prefix-2"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}""",
+                """{"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":3,"sha256":"prefix-2"},"enqueuedThrough":2,"queue":[{"sourceStream":"stream","sourcePosition":2,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":2,"byteOffset":2,"byteLength":1,"recordSha256":"record-2","prefixEvidence":{"byteLength":3,"sha256":"prefix-2"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":{"sourcePosition":0,"locatorIdentity":"receipt-0","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"},"canonicalSourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}]}""",
+                """{"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":2,"sha256":"prefix-0"},"enqueuedThrough":0,"queue":[{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":0,"byteOffset":0,"byteLength":1,"recordSha256":"record-0","prefixEvidence":{"byteLength":2,"sha256":"prefix-0"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}"""
+            };
+        }
     }
 
     [Fact]
@@ -2022,6 +2254,176 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task ExistingTranscriptResponsibilityRejectsAReplacementSourceStream()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-transcript-owner-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem responsible = QueueItem("session-a", 0, 10);
+            CaptureRuntimeQueueItem replacement = QueueItem("session-b", 0, 10);
+
+            Assert.True(await state.ClaimAsync(
+                responsible,
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+            CaptureRuntimeSnapshot beforeReplacement = await state.ReadAsync();
+
+            Assert.False(await state.ClaimAsync(
+                replacement,
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+
+            Assert.Equal(
+                JsonSerializer.Serialize(beforeReplacement),
+                JsonSerializer.Serialize(await state.ReadAsync()));
+            Assert.Equal("session-a", Assert.Single(beforeReplacement.Streams).SourceStream);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task AcceptedTranscriptOwnershipRejectsAReplacementSourceStreamAfterQueueDrains()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-accepted-owner-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem accepted = QueueItem("session-a", 0, 10);
+            CaptureRuntimeQueueItem replacement = QueueItem("session-b", 0, 10);
+
+            Assert.True(await state.ClaimAsync(
+                accepted,
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+            await state.RecordServerReceiptAsync(
+                accepted.SourceStream,
+                new CaptureServerReceiptState(
+                    accepted.SourcePosition,
+                    accepted.DeterministicLocatorEvidence.Identity,
+                    "new",
+                    Guid.NewGuid(),
+                    Guid.NewGuid()));
+            CaptureRuntimeSnapshot beforeReplacement = await state.ReadAsync();
+            Assert.Empty(Assert.Single(beforeReplacement.Streams).Queue);
+
+            Assert.False(await state.ClaimAsync(
+                replacement,
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+
+            Assert.Equal(
+                JsonSerializer.Serialize(beforeReplacement),
+                JsonSerializer.Serialize(await state.ReadAsync()));
+            Assert.Equal("session-a", Assert.Single(beforeReplacement.Streams).SourceStream);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task FirstClaimMustBeginAtSourcePositionZero()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-first-gap-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => state.ClaimAsync(
+                QueueItem("stream", 1, 10),
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ClaimCannotSkipAnEnqueuedSourcePosition()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-enqueued-gap-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem first = QueueItem("stream", 0, 10);
+            Assert.True(await state.ClaimAsync(
+                first, expectedPrefix: null, verifiedPrefixMatchesSnapshot: _ => false));
+            CaptureRuntimeSnapshot before = await state.ReadAsync();
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => state.ClaimAsync(
+                QueueItem("stream", 2, 20),
+                first.DeterministicLocatorEvidence.PrefixEvidence,
+                _ => false));
+
+            Assert.Equal(
+                JsonSerializer.Serialize(before),
+                JsonSerializer.Serialize(await state.ReadAsync()));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ClaimCannotSkipThePositionAfterAConclusiveReceipt()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-receipt-gap-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem first = QueueItem("stream", 0, 10);
+            Assert.True(await state.ClaimAsync(
+                first, expectedPrefix: null, verifiedPrefixMatchesSnapshot: _ => false));
+            await state.RecordServerReceiptAsync(
+                "stream",
+                new CaptureServerReceiptState(
+                    0,
+                    first.DeterministicLocatorEvidence.Identity,
+                    "new",
+                    Guid.NewGuid(),
+                    Guid.NewGuid()));
+            CaptureRuntimeSnapshot before = await state.ReadAsync();
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => state.ClaimAsync(
+                QueueItem("stream", 2, 20),
+                first.DeterministicLocatorEvidence.PrefixEvidence,
+                _ => false));
+
+            Assert.Equal(
+                JsonSerializer.Serialize(before),
+                JsonSerializer.Serialize(await state.ReadAsync()));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task StoppedStreamRetainsResponsibilityAndCannotAdvanceEitherProgressBoundary()
     {
         string directory = Path.Combine(
@@ -2517,6 +2919,90 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task EmptyObservationUuidReceiptLeavesResponsibilityAndPersistedStateUnchanged()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-empty-observation-uuid-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem queued = QueueItem("stream", 0, 10);
+            Assert.True(await state.ClaimAsync(
+                queued, expectedPrefix: null, verifiedPrefixMatchesSnapshot: _ => false));
+            CaptureRuntimeSnapshot beforeReceipt = await state.ReadAsync();
+
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                state.RecordServerReceiptAsync(
+                    "stream",
+                    new CaptureServerReceiptState(
+                        queued.SourcePosition,
+                        queued.DeterministicLocatorEvidence.Identity,
+                        "new",
+                        Guid.Empty,
+                        Guid.NewGuid())));
+
+            CaptureRuntimeSnapshot afterReceipt =
+                await new FileCaptureRuntimeState(directory).ReadAsync();
+            Assert.Equal(
+                JsonSerializer.Serialize(beforeReceipt),
+                JsonSerializer.Serialize(afterReceipt));
+            Assert.Equal(
+                JsonSerializer.Serialize(queued),
+                JsonSerializer.Serialize(
+                    Assert.Single(Assert.Single(afterReceipt.Streams).Queue)));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task EmptySourceStreamUuidReceiptLeavesResponsibilityAndPersistedStateUnchanged()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-empty-stream-uuid-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem queued = QueueItem("stream", 0, 10);
+            Assert.True(await state.ClaimAsync(
+                queued, expectedPrefix: null, verifiedPrefixMatchesSnapshot: _ => false));
+            CaptureRuntimeSnapshot beforeReceipt = await state.ReadAsync();
+
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                state.RecordServerReceiptAsync(
+                    "stream",
+                    new CaptureServerReceiptState(
+                        queued.SourcePosition,
+                        queued.DeterministicLocatorEvidence.Identity,
+                        "new",
+                        Guid.NewGuid(),
+                        Guid.Empty)));
+
+            CaptureRuntimeSnapshot afterReceipt =
+                await new FileCaptureRuntimeState(directory).ReadAsync();
+            Assert.Equal(
+                JsonSerializer.Serialize(beforeReceipt),
+                JsonSerializer.Serialize(afterReceipt));
+            Assert.Equal(
+                JsonSerializer.Serialize(queued),
+                JsonSerializer.Serialize(
+                    Assert.Single(Assert.Single(afterReceipt.Streams).Queue)));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task KillingPackagedTracerDuringRealStateTempWriteLeavesAtomicClaimSnapshot()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -2862,7 +3348,12 @@ public sealed class CaptureRuntimeStateTests
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Empty(result.Stdout);
-        Assert.Contains("OVERMIND_CODEX_TRANSCRIPT_ROOT is required", result.Stderr);
+        JsonElement diagnostic = JsonDocument.Parse(
+            Assert.Single(result.Stderr.Split(
+                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries))).RootElement;
+        Assert.Equal(
+            "capture_runtime_configuration_invalid",
+            diagnostic.GetProperty("event").GetString());
     }
 
     [Fact]
@@ -3002,15 +3493,14 @@ public sealed class CaptureRuntimeStateTests
 
             Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
-            Assert.Equal(
-                [0L, 1L],
-                result.Stdout.Split(
-                        Environment.NewLine,
-                        StringSplitOptions.RemoveEmptyEntries)
-                    .Select(line => JsonDocument.Parse(line).RootElement
-                        .GetProperty("sourcePosition").GetInt64()));
-            Assert.Contains("queued_source_evidence_changed", result.Stderr);
-            Assert.Contains("source position 2", result.Stderr);
+            Assert.Empty(result.Stdout);
+            JsonElement diagnostic = result.Stderr.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line =>
+                    line.GetProperty("event").GetString() == "capture_cycle_failed");
+            Assert.Equal("capture_cycle_failed", diagnostic.GetProperty("event").GetString());
+            Assert.Equal("stream_stopped", diagnostic.GetProperty("reason").GetString());
 
             var state = new FileCaptureRuntimeState(stateDirectory);
             CaptureRuntimeSnapshot stopped = await state.ReadAsync();
@@ -3070,10 +3560,14 @@ public sealed class CaptureRuntimeStateTests
 
             Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
-            Assert.Contains(
-                "does not match queued sourcePosition 1",
-                result.Stderr,
-                StringComparison.Ordinal);
+            JsonElement diagnostic = result.Stderr.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line =>
+                    line.GetProperty("event").GetString() == "capture_cycle_failed");
+            Assert.Equal(
+                "invalid_source_or_receipt",
+                diagnostic.GetProperty("reason").GetString());
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
             Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
@@ -3088,12 +3582,23 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Theory]
+    [InlineData("{}")]
+    [InlineData("[]")]
+    [InlineData("""{"sourcePosition":"1","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
+    [InlineData("""{"sourcePosition":9223372036854775808,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
+    [InlineData("""{"sourcePosition":1,"status":1,"observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
     [InlineData("""{"sourcePosition":1,"status":"   ","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
     [InlineData("""{"sourcePosition":1,"status":"failed","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
     [InlineData("""{"sourcePosition":1,"status":"new"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":1}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"not-a-uuid"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"00000000-0000-0000-0000-000000000000"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":1}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"locator":{"kind":"byte_range","byteOffset":999999,"byteLength":1}}}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"locator":{"kind":"byte_range","byteOffset":9223372036854775808,"byteLength":1}}}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"locator":{"kind":1,"byteOffset":0,"byteLength":1}}}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"observationUuid":"9da8ad61-92c5-40b5-8b71-0ef233648c56","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"646daf38-73d9-4c9e-8a84-13e1fc5667f2","observation":{"observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"646daf38-73d9-4c9e-8a84-13e1fc5667f2"}}""")]
     public async Task PackagedTracerRejectsMalformedSuccessfulReceiptWithoutReplacingLastValidReceipt(
         string malformedReceipt)
@@ -3127,6 +3632,23 @@ public sealed class CaptureRuntimeStateTests
 
             Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
+            Assert.Empty(result.Stdout);
+            JsonElement diagnostic = result.Stderr.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line =>
+                    line.GetProperty("event").GetString() == "capture_cycle_failed");
+            Assert.Equal(
+                "invalid_source_or_receipt",
+                diagnostic.GetProperty("reason").GetString());
+            Assert.DoesNotContain("Unhandled exception", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain(" at ", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("sourcePosition", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("observationUuid", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("sourceStreamUuid", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("byteOffset", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("byteLength", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("locator", result.Stderr, StringComparison.OrdinalIgnoreCase);
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
             Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
@@ -3136,6 +3658,78 @@ public sealed class CaptureRuntimeStateTests
             Assert.Equal(
                 stream.CanonicalSourceStreamUuid,
                 stream.LastServerReceipt?.SourceStreamUuid);
+        }
+        finally
+        {
+            await serverCancellation.CancelAsync();
+            listener.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("sourcePosition")]
+    [InlineData("status")]
+    [InlineData("observationUuid")]
+    [InlineData("observation")]
+    [InlineData("locator")]
+    public async Task PackagedTracerRejectsDuplicateReceiptPropertiesWithoutAdvancingState(
+        string duplicateProperty)
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-receipt-duplicate-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Guid acceptedObservation = Guid.NewGuid();
+        Guid rejectedObservation = Guid.NewGuid();
+        using var serverCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<int> server = ServeResponsesAsync(
+            listener,
+            [
+                (HttpStatusCode.OK, Receipt(0, acceptedObservation)),
+                (HttpStatusCode.OK, Receipt(1, rejectedObservation))
+            ],
+            serverCancellation.Token,
+            mutateResponse: (requestCount, body) => requestCount == 2
+                ? AddDuplicateReceiptProperty(body, duplicateProperty)
+                : body);
+
+        try
+        {
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
+                TracerEnvironment(transcript, stateDirectory, port));
+            await serverCancellation.CancelAsync();
+
+            Assert.False(result.Succeeded);
+            Assert.Equal(2, await server);
+            Assert.Empty(result.Stdout);
+            Assert.DoesNotContain(acceptedObservation.ToString(), result.Stderr,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(rejectedObservation.ToString(), result.Stderr,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("sourcePosition", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("observationUuid", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("sourceStreamUuid", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("byteOffset", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("byteLength", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("locator", result.Stderr, StringComparison.OrdinalIgnoreCase);
+            JsonElement diagnostic = result.Stderr.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line => line.GetProperty("event").GetString() == "capture_cycle_failed");
+            Assert.Equal("invalid_source_or_receipt", diagnostic.GetProperty("reason").GetString());
+
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal([1L, 2L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
+            Assert.Equal(acceptedObservation, stream.LastServerReceipt?.ObservationUuid);
         }
         finally
         {
@@ -3201,7 +3795,8 @@ public sealed class CaptureRuntimeStateTests
         TcpListener listener,
         IReadOnlyList<(HttpStatusCode Status, string Body)> responses,
         CancellationToken cancellationToken,
-        Action<int>? beforeResponse = null)
+        Action<int>? beforeResponse = null,
+        Func<int, string, string>? mutateResponse = null)
     {
         int requestCount = 0;
         Guid sourceStreamUuid = Guid.NewGuid();
@@ -3217,6 +3812,8 @@ public sealed class CaptureRuntimeStateTests
                 beforeResponse?.Invoke(requestCount);
                 string responseBody = AddRequestObservation(
                     body, requestBody, sourceStreamUuid);
+                responseBody = mutateResponse?.Invoke(requestCount, responseBody)
+                    ?? responseBody;
                 byte[] bodyBytes = Encoding.UTF8.GetBytes(responseBody);
                 byte[] response = Encoding.ASCII.GetBytes(
                     $"HTTP/1.1 {(int)status} {status}\r\n" +
@@ -3234,15 +3831,41 @@ public sealed class CaptureRuntimeStateTests
         return requestCount;
     }
 
+    private static string AddDuplicateReceiptProperty(
+        string receipt,
+        string propertyName)
+    {
+        (string target, string replacement) = propertyName switch
+        {
+            "sourcePosition" => ("\"sourcePosition\":", "\"sourcePosition\":999,\"sourcePosition\":"),
+            "status" => ("\"status\":", "\"status\":\"failed\",\"status\":"),
+            "observationUuid" => ("\"observationUuid\":", "\"observationUuid\":\"00000000-0000-0000-0000-000000000000\",\"observationUuid\":"),
+            "observation" => ("\"observation\":", "\"observation\":null,\"observation\":"),
+            "locator" => ("\"locator\":", "\"locator\":null,\"locator\":"),
+            _ => throw new ArgumentOutOfRangeException(nameof(propertyName))
+        };
+        int index = receipt.IndexOf(target, StringComparison.Ordinal);
+        Assert.True(index >= 0);
+        return string.Concat(
+            receipt.AsSpan(0, index),
+            replacement,
+            receipt.AsSpan(index + target.Length));
+    }
+
     private static string AddRequestObservation(
         string responseBody,
         string requestBody,
         Guid sourceStreamUuid)
     {
-        JsonObject? response = JsonNode.Parse(responseBody)?.AsObject();
-        JsonObject? request = JsonNode.Parse(requestBody)?.AsObject();
+        JsonObject? response = JsonNode.Parse(responseBody) as JsonObject;
+        JsonObject? request = JsonNode.Parse(requestBody) as JsonObject;
         if (response is not null && request?["locator"] is JsonObject locator)
         {
+            if (response["observation"] is not null
+                && response["observation"] is not JsonObject)
+            {
+                return response.ToJsonString();
+            }
             JsonObject observation = response["observation"] as JsonObject ?? new JsonObject();
             observation["locator"] ??= locator.DeepClone();
             observation["observationUuid"] ??= response["observationUuid"]?.DeepClone();

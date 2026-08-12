@@ -1,10 +1,243 @@
 using CaptureAdapters;
 using MemSrv.Core;
+using System.Text.Json;
 
 namespace MemSrv.Tests;
 
 public sealed class CaptureScheduleTests
 {
+    [Fact]
+    public async Task ProductionDiscoveryOnlySelectsCurrentSessionRollouts()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-current-sessions-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions");
+        string current = Path.Combine(sessions, "2026", "08", "12", "rollout-current.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(current)!);
+        Directory.CreateDirectory(Path.Combine(codexHome, "archived_sessions"));
+        await File.WriteAllTextAsync(current, "{}\n");
+        await File.WriteAllTextAsync(Path.Combine(sessions, "unrelated.jsonl"), "{}\n");
+        await File.WriteAllTextAsync(Path.Combine(codexHome, "history.jsonl"), "{}\n");
+        await File.WriteAllTextAsync(
+            Path.Combine(codexHome, "archived_sessions", "rollout-archive.jsonl"), "{}\n");
+
+        try
+        {
+            CodexTranscriptStream stream = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    sessions,
+                    Path.Combine(codexHome, "archived_sessions"),
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
+            Assert.Equal(current, stream.Path);
+            Assert.False(stream.TerminalAtEndOfFile);
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProductionDiscoverySelectsOnlyArchivesWithExistingDurableResponsibility()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-responsible-archive-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions");
+        string archive = Path.Combine(codexHome, "archived_sessions");
+        string current = Path.Combine(sessions, "2026", "08", "12", "rollout-current.jsonl");
+        string responsibleActive = Path.Combine(
+            sessions, "2026", "08", "12", "rollout-responsible.jsonl");
+        string responsible = Path.Combine(archive, "rollout-responsible.jsonl");
+        string unrelated = Path.Combine(archive, "rollout-unrelated.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(current)!);
+        Directory.CreateDirectory(archive);
+        await File.WriteAllTextAsync(current, SessionMetadata("current-session"));
+        await File.WriteAllTextAsync(responsibleActive, SessionMetadata("responsible-session"));
+        await File.WriteAllTextAsync(unrelated, SessionMetadata("unrelated-session"));
+
+        try
+        {
+            CodexTranscriptStream responsibleStream = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    sessions,
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)),
+                stream => stream.Path == responsibleActive);
+            File.Move(responsibleActive, responsible);
+
+            CodexTranscriptStream[] discovered =
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    sessions,
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        [responsibleStream.TranscriptIdentity!] =
+                            responsibleStream.SourceStream
+                    })
+                .ToArray();
+
+            Assert.Equal([current, responsible], discovered.Select(stream => stream.Path));
+            Assert.False(discovered[0].TerminalAtEndOfFile);
+            Assert.True(discovered[1].TerminalAtEndOfFile);
+            Assert.DoesNotContain(discovered, stream => stream.Path == unrelated);
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProductionDiscoveryDoesNotOpenAnUnrelatedArchiveBeforeResponsibilityFiltering()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-prefilter-archive-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(codexHome, "archived_sessions");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-responsible.jsonl");
+        string responsible = Path.Combine(archive, Path.GetFileName(active));
+        string unrelated = Path.Combine(archive, "rollout-unrelated.jsonl");
+        await File.WriteAllTextAsync(active, SessionMetadata("responsible-session"));
+
+        try
+        {
+            CodexTranscriptStream current = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
+            File.Move(active, responsible);
+            await File.WriteAllTextAsync(unrelated, "not-json-and-must-not-be-opened\n");
+            using var unrelatedLock = new FileStream(
+                unrelated, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            CodexTranscriptStream selected = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        [current.TranscriptIdentity!] = current.SourceStream
+                    }));
+            var delivered = new List<string>();
+            await CodexTranscriptScanCycle.RunAsync(
+                [selected],
+                (stream, _) =>
+                {
+                    delivered.Add(stream.Path);
+                    return Task.CompletedTask;
+                },
+                failure => throw failure);
+
+            Assert.Equal(responsible, selected.Path);
+            Assert.True(selected.TerminalAtEndOfFile);
+            Assert.Equal(current.TranscriptIdentity, selected.TranscriptIdentity);
+            Assert.Equal(current.SourceStream, selected.SourceStream);
+            Assert.Equal([responsible], delivered);
+            Assert.DoesNotContain("unrelated", selected.Path, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProductionDiscoveryRejectsResponsibleArchiveWithDifferentSourceIdentity()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-replaced-archive-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(codexHome, "archived_sessions");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-responsible.jsonl");
+        string archived = Path.Combine(archive, Path.GetFileName(active));
+        await File.WriteAllTextAsync(active, SessionMetadata("authorized-session"));
+
+        try
+        {
+            CodexTranscriptStream authorized = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
+            File.Delete(active);
+            await File.WriteAllTextAsync(archived, SessionMetadata("replacement-session"));
+
+            Assert.Empty(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        [authorized.TranscriptIdentity!] = authorized.SourceStream
+                    }));
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProductionDiscoveryKeepsQueuedTranscriptOwnershipAcrossCurrentReplacement()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-replaced-current-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(codexHome, "archived_sessions");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-reused.jsonl");
+        string distinct = Path.Combine(sessions, "rollout-distinct.jsonl");
+        string archived = Path.Combine(archive, Path.GetFileName(active));
+        string original = SessionMetadata("session-a");
+        await File.WriteAllTextAsync(active, original);
+
+        try
+        {
+            CodexTranscriptStream responsible = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
+            var ownership = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [responsible.TranscriptIdentity!] = responsible.SourceStream
+            };
+
+            await File.WriteAllTextAsync(active, SessionMetadata("session-b"));
+            Assert.Empty(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"), archive, ownership));
+
+            await File.WriteAllTextAsync(distinct, SessionMetadata("session-c"));
+            await File.WriteAllTextAsync(archived, original);
+            CodexTranscriptStream[] converged =
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"), archive, ownership)
+                .ToArray();
+
+            Assert.Equal([distinct, archived], converged.Select(stream => stream.Path));
+            Assert.False(converged[0].TerminalAtEndOfFile);
+            Assert.True(converged[1].TerminalAtEndOfFile);
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    private static string SessionMetadata(string sessionId) =>
+        JsonSerializer.Serialize(new
+        {
+            type = "session_meta",
+            payload = new { id = sessionId, session_id = sessionId }
+        }) + "\n";
+
     [Theory]
     [InlineData(
         "codex-cli-0.77.parent-only.synthetic.jsonl",
@@ -174,6 +407,47 @@ public sealed class CaptureScheduleTests
         }
     }
 
+    [Fact]
+    public void DistinctRolloutBasenamesWithTheSameObservedIdentityFailDiscoveryClosed()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-source-stream-collision-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string first = Path.Combine(sessions, "2026", "08", "11", "rollout-first.jsonl");
+        string second = Path.Combine(sessions, "2026", "08", "12", "rollout-second.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(first)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(second)!);
+        Directory.CreateDirectory(archive);
+        const string privateSession = "same-private-session";
+        string sessionMetadata = JsonSerializer.Serialize(new
+        {
+            type = "session_meta",
+            payload = new { session_id = privateSession, id = privateSession }
+        }) + "\n";
+        File.WriteAllText(first, sessionMetadata);
+        File.WriteAllText(second, sessionMetadata);
+
+        try
+        {
+            InvalidDataException failure = Assert.Throws<InvalidDataException>(() =>
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    sessions,
+                    archive,
+                    new Dictionary<string, string>(StringComparer.Ordinal)));
+
+            Assert.Equal(
+                "Configured Codex transcript discovery contains ambiguous duplicate source streams.",
+                failure.Message);
+            Assert.DoesNotContain(privateSession, failure.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(root, failure.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("80", "40", 80, 40)]
     [InlineData("150", "60", 150, 60)]
@@ -223,7 +497,17 @@ public sealed class CaptureScheduleTests
 
             Assert.NotEqual(0, result.ExitCode);
             Assert.Empty(result.Stdout);
-            Assert.Contains(invalidName, result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain(invalidName, result.Stderr, StringComparison.Ordinal);
+            JsonElement diagnostic = JsonDocument.Parse(
+                Assert.Single(result.Stderr.Split(
+                    Environment.NewLine,
+                    StringSplitOptions.RemoveEmptyEntries))).RootElement;
+            Assert.Equal(
+                "capture_runtime_configuration_invalid",
+                diagnostic.GetProperty("event").GetString());
+            Assert.Equal(
+                "invalid_scan_schedule",
+                diagnostic.GetProperty("reason").GetString());
         }
         finally
         {

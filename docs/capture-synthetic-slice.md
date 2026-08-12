@@ -1,4 +1,9 @@
-# Disabled synthetic capture slice
+# Historical synthetic capture slice
+
+This document records the earlier #74/#75 tracer-bullet contract. Issue #83
+supersedes its packaging and enable-gate limitations. Supported installation is
+now documented in [codex-capture-runtime.md](codex-capture-runtime.md); the
+synthetic fixture and generic discovery remain only for test compatibility.
 
 Issue #74 adds one deliberately narrow Phase-2 tracer bullet. It proves the
 capture ledger and authority boundaries; it is **not a production capture

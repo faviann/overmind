@@ -232,14 +232,21 @@ modes run from the same image.
   HTTP on the LAN. The backend remains plain HTTP; external Traefik/TLS must
   supply the documented forwarded scheme and OIDC callback configuration.
 
-## Disabled synthetic capture artifact — NOT A DEPLOYMENT CONTRACT
+## Per-user Codex catch-up runtime
 
-`Dockerfile.capture-tracer` builds an explicitly disabled, non-production OCI
-tracer for the synthetic Codex fixture. It is separate from
-`ghcr.io/faviann/overmind:<version>`, is not published by the release workflow,
-and does not alter the supported server topology. Its temporary operator
-procedure and limitations are documented in
-`docs/capture-synthetic-slice.md`.
+`Dockerfile.capture-runtime` builds the separately versioned
+`ghcr.io/faviann/overmind-codex-capture:<version>` artifact. It contains only
+the Codex scanner adapter and talks to the server through the capture HTTP API;
+it has no database connection or server role. `compose.capture.yaml` is the
+reference Linux-first installation beside local Codex. Its container root is
+read-only; the current `~/.codex/sessions` tree, the
+`~/.codex/archived_sessions` retry-locator tree, and repository mounts are
+read-only; durable state is
+the only writable volume, and it has no ports, Docker socket, privileged mode,
+or self-update behavior. Archived files are selected only for an existing
+non-empty durable queue, never as historical import. See
+`docs/codex-capture-runtime.md` for enrollment and
+the machine-owned/server-owned configuration boundary.
 
 ## Release verification
 

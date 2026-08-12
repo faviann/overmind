@@ -186,39 +186,81 @@ public sealed class CapturePackagingTests
         string command = Path.Combine(
             TestProcessRunner.RepoRoot,
             "packages/codex-capture-hooks/0.147.0/overmind-codex-wake-0.147.0");
-        Assert.Contains(
-            "--max-time 0.25",
-            await File.ReadAllTextAsync(command),
-            StringComparison.Ordinal);
-        using var listener = new System.Net.Sockets.TcpListener(
-            System.Net.IPAddress.Loopback, 43191);
-        listener.Start();
+        string contents = await File.ReadAllTextAsync(command);
+        Assert.Contains("curl --disable ", contents, StringComparison.Ordinal);
+        Assert.Contains("--noproxy '*'", contents, StringComparison.Ordinal);
+        Assert.Contains("--max-time 0.25", contents, StringComparison.Ordinal);
+        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
+        using var listener = await ListenOnFixedWakePortAsync();
+        System.Net.IPAddress nonLoopback = Assert.IsType<System.Net.IPAddress>(
+            DiscoverNonLoopbackIpv4Address());
+        using var proxy = new System.Net.Sockets.TcpListener(nonLoopback, 0);
+        proxy.Start();
+        int proxyPort = ((System.Net.IPEndPoint)proxy.LocalEndpoint).Port;
         Task<System.Net.Sockets.TcpClient> accepted = listener.AcceptTcpClientAsync();
+        Task<System.Net.Sockets.TcpClient> proxied = proxy.AcceptTcpClientAsync();
+        string curlHome = Path.Combine(
+            Path.GetTempPath(), $"hostile-curl-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(curlHome);
+        await File.WriteAllTextAsync(
+            Path.Combine(curlHome, ".curlrc"),
+            $"url = \"http://{nonLoopback}:{proxyPort}/from-curlrc\"\n" +
+            $"proxy = \"http://{nonLoopback}:{proxyPort}\"\n" +
+            "request = PUT\n" +
+            "data = operator-config-payload\n");
 
-        Task<(int ExitCode, string Stdout, string Stderr, TimeSpan Elapsed)> execution =
-            TestProcessRunner.RunCommandToExitAsync(
-                command,
-                "private hook payload",
-                TimeSpan.FromSeconds(2),
-                "packaged Codex wake command");
-        using System.Net.Sockets.TcpClient client =
-            await accepted.WaitAsync(TimeSpan.FromSeconds(2));
-        using var reader = new StreamReader(client.GetStream());
-        string request = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
-        Assert.Equal("POST /wake HTTP/1.1", request);
-        string? line;
-        while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync()))
+        try
         {
-            Assert.DoesNotContain("Content-Length", line, StringComparison.OrdinalIgnoreCase);
+            string proxyUrl = $"http://{nonLoopback}:{proxyPort}";
+            Task<(int ExitCode, string Stdout, string Stderr, TimeSpan Elapsed)> execution =
+                TestProcessRunner.RunCommandToExitAsync(
+                    command,
+                    [],
+                    "private hook payload",
+                    TimeSpan.Zero,
+                    new Dictionary<string, string>
+                    {
+                        ["HOME"] = curlHome,
+                        ["CURL_HOME"] = curlHome,
+                        ["http_proxy"] = proxyUrl,
+                        ["HTTP_PROXY"] = proxyUrl,
+                        ["all_proxy"] = proxyUrl,
+                        ["ALL_PROXY"] = proxyUrl,
+                        ["no_proxy"] = "",
+                        ["NO_PROXY"] = ""
+                    },
+                    TimeSpan.FromSeconds(2),
+                    "packaged Codex wake command");
+            using System.Net.Sockets.TcpClient client =
+                await accepted.WaitAsync(TimeSpan.FromSeconds(2));
+            using var reader = new StreamReader(client.GetStream(), leaveOpen: true);
+            string request = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+            Assert.Equal("POST /wake HTTP/1.1", request);
+            string? line;
+            while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync()))
+            {
+                Assert.DoesNotContain("Content-Length", line, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("Transfer-Encoding", line, StringComparison.OrdinalIgnoreCase);
+            }
+            byte[] response = System.Text.Encoding.ASCII.GetBytes(
+                "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+            await client.GetStream().WriteAsync(response);
+            var result = await execution;
+            Assert.Equal(0, result.ExitCode);
+            Assert.True(result.Elapsed < TimeSpan.FromMilliseconds(750), result.Elapsed.ToString());
+            Assert.Empty(result.Stdout);
+            Assert.Empty(result.Stderr);
+            await Task.Delay(100);
+            Assert.False(proxied.IsCompleted, "The wake command contacted a non-loopback proxy.");
+            Assert.False(listener.Pending(), "The wake command sent more than one loopback request.");
         }
-        await Task.Delay(TimeSpan.FromMilliseconds(500));
-        var result = await execution;
-        Assert.Equal(0, result.ExitCode);
-        Assert.True(result.Elapsed < TimeSpan.FromMilliseconds(750), result.Elapsed.ToString());
-        Assert.Empty(result.Stdout);
-        Assert.Empty(result.Stderr);
+        finally
+        {
+            listener.Stop();
+            proxy.Stop();
+            Directory.Delete(curlHome, recursive: true);
+        }
 
-        listener.Stop();
         var absent = await TestProcessRunner.RunCommandToExitAsync(
             command,
             "",
@@ -230,6 +272,61 @@ public sealed class CapturePackagingTests
         Assert.Empty(absent.Stderr);
     }
 
+    private static async Task<FileStream> AcquireFixedWakePortLockAsync()
+    {
+        string path = Path.Combine(Path.GetTempPath(), "overmind-capture-wake-43191.lock");
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while (true)
+        {
+            try
+            {
+                return new FileStream(
+                    path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException) when (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(50);
+            }
+        }
+    }
+
+    private static async Task<System.Net.Sockets.TcpListener> ListenOnFixedWakePortAsync()
+    {
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while (true)
+        {
+            var listener = new System.Net.Sockets.TcpListener(
+                System.Net.IPAddress.Loopback, 43191);
+            try
+            {
+                listener.Start();
+                return listener;
+            }
+            catch (System.Net.Sockets.SocketException) when (DateTime.UtcNow < deadline)
+            {
+                listener.Stop();
+                await Task.Delay(50);
+            }
+        }
+    }
+
+    private static int ReserveLoopbackPort()
+    {
+        using var reservation = new System.Net.Sockets.TcpListener(
+            System.Net.IPAddress.Loopback, 0);
+        reservation.Start();
+        return ((System.Net.IPEndPoint)reservation.LocalEndpoint).Port;
+    }
+
+    private static void UseDiagnosticWakePort(
+        Dictionary<string, string> environment,
+        int port)
+    {
+        environment["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production";
+        environment["OVERMIND_CAPTURE_WAKE_TEST_PORT"] = port.ToString(
+            System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     [Fact]
     public async Task PackagedLoopbackWakeStartsCatchUpBeforeLongScheduleExpires()
     {
@@ -239,6 +336,8 @@ public sealed class CapturePackagingTests
         Directory.CreateDirectory(sessions);
         Directory.CreateDirectory(archive);
         Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        int wakePort = ReserveLoopbackPort();
+        UseDiagnosticWakePort(environment, wakePort);
         environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "3600000";
         environment["OVERMIND_CAPTURE_WAKE_ENABLED"] = "true";
         using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
@@ -258,7 +357,7 @@ public sealed class CapturePackagingTests
                 try
                 {
                     readiness = await client.PostAsync(
-                        "http://127.0.0.1:43191/wake", content: null);
+                        $"http://127.0.0.1:{wakePort}/wake", content: null);
                 }
                 catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
                 {
@@ -276,7 +375,7 @@ public sealed class CapturePackagingTests
             if (nonLoopback is not null)
             {
                 Exception? nonLoopbackFailure = await Record.ExceptionAsync(() =>
-                    client.PostAsync($"http://{nonLoopback}:43191/wake", content: null));
+                    client.PostAsync($"http://{nonLoopback}:{wakePort}/wake", content: null));
                 Assert.True(
                     nonLoopbackFailure is HttpRequestException or TaskCanceledException,
                     $"The wake endpoint was reachable through non-loopback address " +
@@ -291,7 +390,7 @@ public sealed class CapturePackagingTests
             await File.WriteAllTextAsync(second, Transcript("second"));
 
             using HttpResponseMessage response = await client.PostAsync(
-                "http://127.0.0.1:43191/wake", content: null);
+                $"http://127.0.0.1:{wakePort}/wake", content: null);
             Assert.Equal(System.Net.HttpStatusCode.NoContent, response.StatusCode);
             string diagnostic = await process.StandardError.ReadLineAsync()
                 .WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
@@ -457,9 +556,11 @@ public sealed class CapturePackagingTests
         Directory.CreateDirectory(sessions);
         Directory.CreateDirectory(archive);
         using var collision = new System.Net.Sockets.TcpListener(
-            System.Net.IPAddress.Loopback, 43191);
+            System.Net.IPAddress.Loopback, 0);
         collision.Start();
+        int wakePort = ((System.Net.IPEndPoint)collision.LocalEndpoint).Port;
         Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        UseDiagnosticWakePort(environment, wakePort);
         environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25";
         environment["OVERMIND_CAPTURE_WAKE_ENABLED"] = "true";
         using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);

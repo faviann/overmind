@@ -15,6 +15,7 @@ string transcriptRoot;
 string? archiveRoot;
 string stateDirectory;
 bool useLegacySyntheticDiscovery;
+int wakePort;
 try
 {
     endpoint = Required("OVERMIND_CAPTURE_URL").TrimEnd('/');
@@ -36,6 +37,23 @@ try
         Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_STATE_DIR")
         ?? transcriptRoot + ".overmind-state");
     credential = await ResolveCredentialAsync(endpoint, stateDirectory);
+    wakePort = CaptureWakeListener.Port;
+    string? diagnosticWakePort =
+        Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_WAKE_TEST_PORT");
+    if (legacySyntheticDiagnostics && !string.IsNullOrWhiteSpace(diagnosticWakePort))
+    {
+        if (!int.TryParse(
+                diagnosticWakePort,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out wakePort)
+            || wakePort is < 1 or > 65535
+            || wakePort == CaptureWakeListener.Port)
+        {
+            throw new InvalidOperationException(
+                "OVERMIND_CAPTURE_WAKE_TEST_PORT must be a non-production TCP port.");
+        }
+    }
 }
 catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
 {
@@ -160,7 +178,7 @@ if (string.Equals(
         "true",
         StringComparison.Ordinal))
 {
-    var candidate = new CaptureWakeListener(wakeup);
+    var candidate = new CaptureWakeListener(wakeup, wakePort);
     try
     {
         candidate.Start();

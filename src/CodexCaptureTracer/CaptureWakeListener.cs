@@ -6,12 +6,16 @@ using CaptureAdapters;
 internal sealed class CaptureWakeListener : IAsyncDisposable
 {
     internal const int Port = 43191;
-    private readonly TcpListener _listener = new(IPAddress.Loopback, Port);
+    private readonly TcpListener _listener;
     private readonly CaptureScanWakeup _wakeup;
     private readonly CancellationTokenSource _stopping = new();
     private Task? _loop;
 
-    internal CaptureWakeListener(CaptureScanWakeup wakeup) => _wakeup = wakeup;
+    internal CaptureWakeListener(CaptureScanWakeup wakeup, int port = Port)
+    {
+        _wakeup = wakeup;
+        _listener = new TcpListener(IPAddress.Loopback, port);
+    }
 
     internal void Start()
     {

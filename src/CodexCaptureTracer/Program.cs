@@ -245,56 +245,92 @@ static CaptureServerReceiptState ValidateReceipt(
     string receipt,
     CaptureRuntimeQueueItem queued)
 {
-    using JsonDocument document = JsonDocument.Parse(receipt);
+    JsonDocument parsed;
+    try
+    {
+        parsed = JsonDocument.Parse(receipt);
+    }
+    catch (JsonException)
+    {
+        throw InvalidReceipt();
+    }
+    using JsonDocument document = parsed;
     JsonElement root = document.RootElement;
-    long receiptSourcePosition = root.GetProperty("sourcePosition").GetInt64();
-    if (receiptSourcePosition != queued.SourcePosition)
-    {
-        throw new InvalidDataException(
-            $"Capture server receipt sourcePosition {receiptSourcePosition} " +
-            $"does not match queued sourcePosition {queued.SourcePosition}.");
-    }
-    if (!root.TryGetProperty("status", out JsonElement statusElement)
-        || statusElement.ValueKind != JsonValueKind.String
-        || statusElement.GetString() is not ("new" or "already_accepted"))
-    {
-        throw new InvalidDataException(
-            "Capture server receipt status must be new or already_accepted.");
-    }
-    if (!root.TryGetProperty(
-            "observationUuid", out JsonElement observationUuidElement)
-        || !observationUuidElement.TryGetGuid(out Guid observationUuid))
-    {
-        throw new InvalidDataException(
-            "Capture server receipt observationUuid must be a valid UUID.");
-    }
-    if (!root.TryGetProperty("observation", out JsonElement observation)
-        || !observation.TryGetProperty(
-            "observationUuid", out JsonElement nestedObservationUuidElement)
-        || !nestedObservationUuidElement.TryGetGuid(out Guid nestedObservationUuid)
+    if (root.ValueKind != JsonValueKind.Object
+        || !TryGetInt64(root, "sourcePosition", out long receiptSourcePosition)
+        || receiptSourcePosition < 0
+        || receiptSourcePosition != queued.SourcePosition
+        || !TryGetString(root, "status", out string? status)
+        || status is not ("new" or "already_accepted")
+        || !TryGetNonemptyGuid(root, "observationUuid", out Guid observationUuid)
+        || !root.TryGetProperty("observation", out JsonElement observation)
+        || observation.ValueKind != JsonValueKind.Object
+        || !TryGetNonemptyGuid(
+            observation, "observationUuid", out Guid nestedObservationUuid)
         || nestedObservationUuid != observationUuid
-        || !observation.TryGetProperty(
-            "sourceStreamUuid", out JsonElement sourceStreamUuidElement)
-        || !sourceStreamUuidElement.TryGetGuid(out Guid sourceStreamUuid)
+        || !TryGetNonemptyGuid(
+            observation, "sourceStreamUuid", out Guid sourceStreamUuid)
         || !observation.TryGetProperty("locator", out JsonElement receiptLocator)
-        || receiptLocator.GetProperty("kind").GetString() != "byte_range"
-        || receiptLocator.GetProperty("byteOffset").GetInt64()
-            != queued.DeterministicLocatorEvidence.ByteOffset
-        || receiptLocator.GetProperty("byteLength").GetInt64()
-            != queued.DeterministicLocatorEvidence.ByteLength)
+        || receiptLocator.ValueKind != JsonValueKind.Object
+        || !TryGetString(receiptLocator, "kind", out string? locatorKind)
+        || locatorKind != "byte_range"
+        || !TryGetInt64(receiptLocator, "byteOffset", out long byteOffset)
+        || byteOffset < 0
+        || byteOffset != queued.DeterministicLocatorEvidence.ByteOffset
+        || !TryGetInt64(receiptLocator, "byteLength", out long byteLength)
+        || byteLength <= 0
+        || byteLength != queued.DeterministicLocatorEvidence.ByteLength
+        || (root.TryGetProperty("sourceStreamUuid", out JsonElement topSourceStreamUuid)
+            && (!TryReadNonemptyGuid(topSourceStreamUuid, out Guid topStreamUuid)
+                || topStreamUuid != sourceStreamUuid)))
     {
-        throw new InvalidDataException(
-            $"Capture server receipt observation identity or locator does not match " +
-            $"queued sourcePosition {queued.SourcePosition}.");
+        throw InvalidReceipt();
     }
 
     return new CaptureServerReceiptState(
         receiptSourcePosition,
         queued.DeterministicLocatorEvidence.Identity,
-        statusElement.GetString()!,
+        status,
         observationUuid,
         sourceStreamUuid);
 }
+
+static bool TryGetInt64(JsonElement parent, string propertyName, out long value)
+{
+    value = default;
+    return parent.TryGetProperty(propertyName, out JsonElement element)
+        && element.ValueKind == JsonValueKind.Number
+        && element.TryGetInt64(out value);
+}
+
+static bool TryGetString(JsonElement parent, string propertyName, out string? value)
+{
+    value = null;
+    return parent.TryGetProperty(propertyName, out JsonElement element)
+        && element.ValueKind == JsonValueKind.String
+        && (value = element.GetString()) is not null;
+}
+
+static bool TryGetNonemptyGuid(
+    JsonElement parent,
+    string propertyName,
+    out Guid value)
+{
+    value = default;
+    return parent.TryGetProperty(propertyName, out JsonElement element)
+        && TryReadNonemptyGuid(element, out value);
+}
+
+static bool TryReadNonemptyGuid(JsonElement element, out Guid value)
+{
+    value = default;
+    return element.ValueKind == JsonValueKind.String
+        && element.TryGetGuid(out value)
+        && value != Guid.Empty;
+}
+
+static InvalidDataException InvalidReceipt() =>
+    new("Capture server receipt has an unsupported contract.");
 
 static void WriteFailure(Exception failure)
 {

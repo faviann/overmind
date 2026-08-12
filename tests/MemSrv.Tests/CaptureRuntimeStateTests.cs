@@ -334,6 +334,59 @@ public sealed class CaptureRuntimeStateTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(InvalidRuntimeSnapshotRelationships))]
+    public async Task RuntimeStateRejectsContradictorySnapshotRelationshipsAsInvalidData(
+        string durable)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-relationship-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capture-state.json"), durable);
+
+        try
+        {
+            InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+            Assert.Equal("Capture runtime state has an unsupported contract.", failure.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    public static TheoryData<string> InvalidRuntimeSnapshotRelationships
+    {
+        get
+        {
+            const string stream = """
+                {"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":2,"sha256":"prefix-1"},"enqueuedThrough":1,"queue":[{"sourceStream":"stream","sourcePosition":1,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":1,"byteOffset":1,"byteLength":1,"recordSha256":"record-1","prefixEvidence":{"byteLength":2,"sha256":"prefix-1"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":{"sourcePosition":0,"locatorIdentity":"receipt-0","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"},"canonicalSourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}
+                """;
+            const string secondQueue = """
+                ,{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":0,"byteOffset":0,"byteLength":1,"recordSha256":"record-0","prefixEvidence":{"byteLength":1,"sha256":"prefix-0"}},"redactedSafeCandidate":"{}"}
+                """;
+            static string Snapshot(string streams) =>
+                $"{{\"contractVersion\":1,\"streams\":[{streams}]}}";
+
+            return new TheoryData<string>
+            {
+                Snapshot(stream + "," + stream),
+                Snapshot(stream.Replace("\"enqueuedThrough\":1", "\"enqueuedThrough\":0", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("}],\"lastServerReceipt\"", "}" + secondQueue + "],\"lastServerReceipt\"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"sourcePosition\":0,\"locatorIdentity\"", "\"sourcePosition\":1,\"locatorIdentity\"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"sourcePosition\":0,\"locatorIdentity\"", "\"sourcePosition\":-1,\"locatorIdentity\"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"sourcePosition\":0,", "", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"status\":\"new\"", "\"status\":1", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"status\":\"new\"", "\"status\":\"accepted\"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"locatorIdentity\":\"receipt-0\"", "\"locatorIdentity\":\"   \"", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5", "00000000-0000-0000-0000-000000000000", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("a4d86f4c-e045-4761-929b-eec9e5959f95", "00000000-0000-0000-0000-000000000000", StringComparison.Ordinal)),
+                Snapshot(stream.Replace("\"canonicalSourceStreamUuid\":\"a4d86f4c-e045-4761-929b-eec9e5959f95\"", "\"canonicalSourceStreamUuid\":\"646daf38-73d9-4c9e-8a84-13e1fc5667f2\"", StringComparison.Ordinal))
+            };
+        }
+    }
+
     [Fact]
     public void LegacyQueueItemWithoutOutcomeDefaultsToHealthyComplete()
     {
@@ -3179,12 +3232,23 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Theory]
+    [InlineData("{}")]
+    [InlineData("[]")]
+    [InlineData("""{"sourcePosition":"1","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
+    [InlineData("""{"sourcePosition":9223372036854775808,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
+    [InlineData("""{"sourcePosition":1,"status":1,"observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
     [InlineData("""{"sourcePosition":1,"status":"   ","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
     [InlineData("""{"sourcePosition":1,"status":"failed","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5"}""")]
     [InlineData("""{"sourcePosition":1,"status":"new"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":1}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"not-a-uuid"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"00000000-0000-0000-0000-000000000000"}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":1}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"locator":{"kind":"byte_range","byteOffset":999999,"byteLength":1}}}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"locator":{"kind":"byte_range","byteOffset":9223372036854775808,"byteLength":1}}}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"locator":{"kind":1,"byteOffset":0,"byteLength":1}}}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"observationUuid":"9da8ad61-92c5-40b5-8b71-0ef233648c56","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}}""")]
+    [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"646daf38-73d9-4c9e-8a84-13e1fc5667f2","observation":{"observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}}""")]
     [InlineData("""{"sourcePosition":1,"status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","observation":{"observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"646daf38-73d9-4c9e-8a84-13e1fc5667f2"}}""")]
     public async Task PackagedTracerRejectsMalformedSuccessfulReceiptWithoutReplacingLastValidReceipt(
         string malformedReceipt)
@@ -3218,6 +3282,23 @@ public sealed class CaptureRuntimeStateTests
 
             Assert.False(result.Succeeded);
             Assert.Equal(2, await server);
+            Assert.Empty(result.Stdout);
+            JsonElement diagnostic = result.Stderr.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line =>
+                    line.GetProperty("event").GetString() == "capture_cycle_failed");
+            Assert.Equal(
+                "invalid_source_or_receipt",
+                diagnostic.GetProperty("reason").GetString());
+            Assert.DoesNotContain("Unhandled exception", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain(" at ", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("sourcePosition", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("observationUuid", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("sourceStreamUuid", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("byteOffset", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("byteLength", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("locator", result.Stderr, StringComparison.OrdinalIgnoreCase);
             CaptureRuntimeStreamState stream = Assert.Single(
                 (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
             Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
@@ -3330,10 +3411,15 @@ public sealed class CaptureRuntimeStateTests
         string requestBody,
         Guid sourceStreamUuid)
     {
-        JsonObject? response = JsonNode.Parse(responseBody)?.AsObject();
-        JsonObject? request = JsonNode.Parse(requestBody)?.AsObject();
+        JsonObject? response = JsonNode.Parse(responseBody) as JsonObject;
+        JsonObject? request = JsonNode.Parse(requestBody) as JsonObject;
         if (response is not null && request?["locator"] is JsonObject locator)
         {
+            if (response["observation"] is not null
+                && response["observation"] is not JsonObject)
+            {
+                return response.ToJsonString();
+            }
             JsonObject observation = response["observation"] as JsonObject ?? new JsonObject();
             observation["locator"] ??= locator.DeepClone();
             observation["observationUuid"] ??= response["observationUuid"]?.DeepClone();

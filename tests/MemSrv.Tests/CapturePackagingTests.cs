@@ -121,6 +121,71 @@ public sealed class CapturePackagingTests
     }
 
     [Theory]
+    [MemberData(nameof(CorruptSnapshotRelationships))]
+    public async Task ContradictoryDurableStateFailsContentFreeBeforePackagedCapture(
+        string stateContents)
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-contradictory-state-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Directory.CreateDirectory(state);
+        await File.WriteAllTextAsync(Path.Combine(state, "capture-state.json"), stateContents);
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerToExitAsync(
+                ProductionEnvironment(root, sessions, archive));
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Empty(result.Stdout);
+            AssertContentFreeJsonDiagnostics(
+                result.Stderr,
+                "invalid_source_or_receipt",
+                root,
+                "private-stream",
+                "private-transcript",
+                "receipt-private-locator");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    public static IEnumerable<object[]> CorruptSnapshotRelationships()
+    {
+        const string stream = """
+            {"sourceStream":"private-stream","transcriptIdentity":"private-transcript","verifiedPrefix":{"byteLength":2,"sha256":"prefix-1"},"enqueuedThrough":1,"queue":[{"sourceStream":"private-stream","sourcePosition":1,"deterministicLocatorEvidence":{"transcriptIdentity":"private-transcript","sourcePosition":1,"byteOffset":1,"byteLength":1,"recordSha256":"record-1","prefixEvidence":{"byteLength":2,"sha256":"prefix-1"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":{"sourcePosition":0,"locatorIdentity":"receipt-private-locator","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"},"canonicalSourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}
+            """;
+        static string Snapshot(string streams) =>
+            $"{{\"contractVersion\":1,\"streams\":[{streams}]}}";
+
+        yield return [Snapshot(stream + "," + stream)];
+        yield return [Snapshot(stream.Replace(
+            "\"enqueuedThrough\":1", "\"enqueuedThrough\":0", StringComparison.Ordinal))];
+        yield return [Snapshot(stream.Replace(
+            "\"sourcePosition\":0,\"locatorIdentity\"",
+            "\"sourcePosition\":-1,\"locatorIdentity\"",
+            StringComparison.Ordinal))];
+        yield return [Snapshot(stream.Replace(
+            "\"sourcePosition\":0,", "", StringComparison.Ordinal))];
+        yield return [Snapshot(stream.Replace(
+            "\"status\":\"new\"", "\"status\":\"unknown\"", StringComparison.Ordinal))];
+        yield return [Snapshot(stream.Replace(
+            "b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5",
+            "00000000-0000-0000-0000-000000000000",
+            StringComparison.Ordinal))];
+        yield return [Snapshot(stream.Replace(
+            "\"canonicalSourceStreamUuid\":\"a4d86f4c-e045-4761-929b-eec9e5959f95\"",
+            "\"canonicalSourceStreamUuid\":\"646daf38-73d9-4c9e-8a84-13e1fc5667f2\"",
+            StringComparison.Ordinal))];
+    }
+
+    [Theory]
     [InlineData("null")]
     [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":-1,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":0,\"sha256\":\"prefix\"}}")]
     [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":9223372036854775807,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}}")]

@@ -287,16 +287,18 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         await using var stream = new FileStream(
             _statePath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using JsonDocument document = await JsonDocument.ParseAsync(
+            stream, cancellationToken: cancellationToken);
         CaptureRuntimeSnapshot snapshot;
         try
         {
             snapshot =
-                await JsonSerializer.DeserializeAsync<CaptureRuntimeSnapshot>(
-                    stream, RuntimeJson.Options, cancellationToken)
+                document.RootElement.Deserialize<CaptureRuntimeSnapshot>(RuntimeJson.Options)
                 ?? throw UnsupportedState();
         }
         catch (Exception ex) when (
-            ex is InvalidDataException
+            ex is JsonException
+                or InvalidDataException
                 or ArgumentException
                 or NullReferenceException
                 or OverflowException)
@@ -305,33 +307,164 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         }
         if (snapshot.ContractVersion != CaptureRuntimeSnapshot.Empty.ContractVersion
             || snapshot.Streams is null
+            || !HasValidReceiptShapes(document.RootElement)
+            || snapshot.Streams
+                .Select(stream => stream?.SourceStream)
+                .Distinct(StringComparer.Ordinal)
+                .Count() != snapshot.Streams.Count
             || snapshot.Streams.Any(stream =>
-                stream is null
-                || string.IsNullOrWhiteSpace(stream.SourceStream)
-                || string.IsNullOrWhiteSpace(stream.TranscriptIdentity)
-                || stream.VerifiedPrefix is { ByteLength: < 0 }
-                || stream.VerifiedPrefix is { Sha256: null or "" }
-                || stream.EnqueuedThrough < 0
-                || stream.Queue is null
-                || stream.Queue.Any(item =>
-                    item is null
-                    || string.IsNullOrWhiteSpace(item.SourceStream)
-                    || item.DeterministicLocatorEvidence is null
-                    || !IsValidLocator(item.DeterministicLocatorEvidence)
-                    || item.Outcome is null
-                    || string.IsNullOrWhiteSpace(item.RedactedSafeCandidate)
-                    || !string.Equals(
-                        item.SourceStream, stream.SourceStream, StringComparison.Ordinal)
-                    || !string.Equals(
-                        item.DeterministicLocatorEvidence.TranscriptIdentity,
-                        stream.TranscriptIdentity,
-                        StringComparison.Ordinal)
-                    || !IsJson(item.RedactedSafeCandidate))))
+                stream is null || !IsValidStream(stream)))
         {
             throw UnsupportedState();
         }
         return snapshot;
     }
+
+    private static bool HasValidReceiptShapes(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("streams", out JsonElement streams)
+            || streams.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+        foreach (JsonElement stream in streams.EnumerateArray())
+        {
+            if (stream.ValueKind != JsonValueKind.Object
+                || !stream.TryGetProperty(
+                    "lastServerReceipt", out JsonElement receipt))
+            {
+                return false;
+            }
+            if (receipt.ValueKind == JsonValueKind.Null)
+            {
+                continue;
+            }
+            if (receipt.ValueKind != JsonValueKind.Object
+                || !TryGetNonnegativeInt64(receipt, "sourcePosition")
+                || !TryGetNonblankString(receipt, "locatorIdentity")
+                || !TryGetReceiptStatus(receipt)
+                || !TryGetNonemptyGuid(receipt, "observationUuid", out _)
+                || !TryGetNonemptyGuid(
+                    receipt, "sourceStreamUuid", out Guid receiptStreamUuid)
+                || !TryGetNonemptyGuid(
+                    stream, "canonicalSourceStreamUuid", out Guid canonicalStreamUuid)
+                || receiptStreamUuid != canonicalStreamUuid)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool TryGetNonnegativeInt64(
+        JsonElement parent,
+        string propertyName) =>
+        parent.TryGetProperty(propertyName, out JsonElement value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt64(out long parsed)
+        && parsed >= 0;
+
+    private static bool TryGetNonblankString(
+        JsonElement parent,
+        string propertyName) =>
+        parent.TryGetProperty(propertyName, out JsonElement value)
+        && value.ValueKind == JsonValueKind.String
+        && !string.IsNullOrWhiteSpace(value.GetString());
+
+    private static bool TryGetReceiptStatus(JsonElement receipt) =>
+        receipt.TryGetProperty("status", out JsonElement status)
+        && status.ValueKind == JsonValueKind.String
+        && status.GetString() is "new" or "already_accepted";
+
+    private static bool TryGetNonemptyGuid(
+        JsonElement parent,
+        string propertyName,
+        out Guid value)
+    {
+        value = default;
+        return parent.TryGetProperty(propertyName, out JsonElement element)
+            && element.ValueKind == JsonValueKind.String
+            && element.TryGetGuid(out value)
+            && value != Guid.Empty;
+    }
+
+    private static bool IsValidStream(CaptureRuntimeStreamState stream)
+    {
+        if (string.IsNullOrWhiteSpace(stream.SourceStream)
+            || string.IsNullOrWhiteSpace(stream.TranscriptIdentity)
+            || stream.VerifiedPrefix is null
+            || stream.VerifiedPrefix.ByteLength < 0
+            || string.IsNullOrWhiteSpace(stream.VerifiedPrefix.Sha256)
+            || stream.EnqueuedThrough is not long enqueuedThrough
+            || enqueuedThrough < 0
+            || stream.Queue is null
+            || stream.Queue.Any(item => !IsValidQueueItem(stream, item)))
+        {
+            return false;
+        }
+
+        long previousPosition = -1;
+        foreach (CaptureRuntimeQueueItem item in stream.Queue)
+        {
+            if (item.SourcePosition <= previousPosition)
+            {
+                return false;
+            }
+            previousPosition = item.SourcePosition;
+        }
+        if (stream.Queue.Count > 0
+            && (previousPosition != enqueuedThrough
+                || !Equals(
+                    stream.VerifiedPrefix,
+                    stream.Queue[^1].DeterministicLocatorEvidence.PrefixEvidence)))
+        {
+            return false;
+        }
+        if (stream.Stop?.SourcePosition is long stoppedPosition
+            && (stream.Queue.Count == 0
+                || stream.Queue[0].SourcePosition != stoppedPosition))
+        {
+            return false;
+        }
+
+        CaptureServerReceiptState? receipt = stream.LastServerReceipt;
+        if (receipt is null)
+        {
+            return stream.CanonicalSourceStreamUuid is null && stream.Queue.Count > 0;
+        }
+        if (receipt.SourcePosition < 0
+            || receipt.SourcePosition > enqueuedThrough
+            || string.IsNullOrWhiteSpace(receipt.LocatorIdentity)
+            || receipt.Status is not ("new" or "already_accepted")
+            || receipt.ObservationUuid == Guid.Empty
+            || receipt.SourceStreamUuid == Guid.Empty
+            || stream.CanonicalSourceStreamUuid is not Guid canonicalSourceStreamUuid
+            || canonicalSourceStreamUuid == Guid.Empty
+            || canonicalSourceStreamUuid != receipt.SourceStreamUuid)
+        {
+            return false;
+        }
+        return stream.Queue.Count == 0
+            ? receipt.SourcePosition == enqueuedThrough
+            : receipt.SourcePosition < stream.Queue[0].SourcePosition;
+    }
+
+    private static bool IsValidQueueItem(
+        CaptureRuntimeStreamState stream,
+        CaptureRuntimeQueueItem? item) =>
+        item is not null
+        && !string.IsNullOrWhiteSpace(item.SourceStream)
+        && item.DeterministicLocatorEvidence is not null
+        && IsValidLocator(item.DeterministicLocatorEvidence)
+        && item.Outcome is not null
+        && !string.IsNullOrWhiteSpace(item.RedactedSafeCandidate)
+        && string.Equals(item.SourceStream, stream.SourceStream, StringComparison.Ordinal)
+        && string.Equals(
+            item.DeterministicLocatorEvidence.TranscriptIdentity,
+            stream.TranscriptIdentity,
+            StringComparison.Ordinal)
+        && IsJson(item.RedactedSafeCandidate);
 
     private static bool IsJson(string candidate)
     {

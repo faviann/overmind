@@ -288,12 +288,17 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
                 options.ConnectionString, new NeverStoreGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
             string credentialPath = RequireOption(args, "--credential-file");
             string credential = (await File.ReadAllTextAsync(credentialPath)).Trim();
+            string harness = RequireOption(args, "--harness");
             var bindingUuid = await enrollment.EnrollAsync(
                 args[2],
-                RequireOption(args, "--harness"),
+                harness,
                 RequireOption(args, "--agent-id"),
                 credential);
             Console.WriteLine($"enrolled {bindingUuid} stable_name={args[2]}");
+            if (!string.Equals(harness, "codex", StringComparison.Ordinal))
+            {
+                Console.WriteLine("warning: no supported capture adapter; enrollment is retained for future capture support");
+            }
             return 0;
 
         case "receipt":

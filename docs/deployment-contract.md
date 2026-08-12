@@ -224,10 +224,33 @@ modes run from the same image.
   locally validated session therefore continues during an OIDC outage only
   until that expiration; new sign-ins and renewals fail while the provider is
   unavailable.
+  Credentialless enrollment additionally exposes
+  `GET /capture/console/pair/{userCode}` and
+  `POST /capture/console/pair/{userCode}/approve` under the same operator
+  policy. The page identifies the exact pending request by its displayed code,
+  shows the runtime-detected machine and Codex installation, and accepts only
+  the operator-owned label, allowed repository route patterns, and special
+  namespace mappings. Operator JSON inspection/approval and cancellation under
+  `/capture/console/api/pairing/{requestId}` use the same OIDC policy. Every
+  operator action derives its audit identity from the provider `sub`; no form,
+  query, agent key, or capture credential can supply it.
   The server accepts one `X-Forwarded-Proto` hop so Traefik's external HTTPS
   scheme is used in the OIDC callback URI; Traefik remains the TLS owner.
   An unavailable OIDC authority prevents unauthenticated console entry but is
   not consulted by `/capture/v1/observations`, `/mcp`, or `/healthz`.
+- **Capture pairing:** `POST /capture/v1/pairing-requests` creates a short-lived
+  request from detected machine/installation evidence without an existing
+  credential. `GET` and `DELETE /capture/v1/pairing-requests/{requestId}` use
+  the returned secret polling bearer capability, not MCP, capture, or operator
+  authority. The creation response contains a non-secret
+  `/capture/console/pair/{userCode}` URL; it never embeds the polling token.
+  Approval creates at most one binding for a Codex installation, including
+  concurrent requests. The approved capture credential is held as ephemeral
+  server coordination state, returned by one authenticated poll, and cleared
+  atomically at delivery. Polling tokens are stored only as hashes. Pairing
+  request state and its append-only audit are in PostgreSQL so server restarts
+  preserve an in-flight request; expired or cancelled requests cannot be
+  approved into authority.
 - **Day-1 agent URL:** `http://overmind.faviann.vms:8080/mcp` — DNS name, plain
   HTTP on the LAN. The backend remains plain HTTP; external Traefik/TLS must
   supply the documented forwarded scheme and OIDC callback configuration.
@@ -247,6 +270,12 @@ or self-update behavior. Archived files are selected only for an existing
 non-empty durable queue, never as historical import. See
 `docs/codex-capture-runtime.md` for enrollment and
 the machine-owned/server-owned configuration boundary.
+
+With no pre-provisioned `OVERMIND_CAPTURE_CREDENTIAL`, the runtime makes only
+outbound HTTP(S) pairing creation/poll requests followed by its normal capture
+observation writes. Its writable state volume persists a private installation
+identity and the one-time-delivered private capture credential. Supplying the
+existing environment credential remains compatible and bypasses pairing.
 
 ## Release verification
 

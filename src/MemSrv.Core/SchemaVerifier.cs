@@ -22,7 +22,8 @@ public static class SchemaVerifier
         "retrieval_config", "workstreams", "jobs",
         "capture_source_bindings", "capture_source_streams",
         "capture_route_policies", "capture_observations",
-        "captured_events", "captured_event_relationships"
+        "captured_events", "captured_event_relationships",
+        "capture_pairing_requests", "capture_pairing_audit"
     ];
 
     private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab", "capture/unscoped"];
@@ -44,6 +45,8 @@ public static class SchemaVerifier
         ("capture_observations", ["SELECT", "INSERT"]),
         ("captured_events", ["SELECT", "INSERT"]),
         ("captured_event_relationships", ["SELECT", "INSERT"]),
+        ("capture_pairing_requests", ["SELECT", "INSERT", "UPDATE"]),
+        ("capture_pairing_audit", ["SELECT", "INSERT"]),
     ];
 
     public static async Task<SchemaVerificationResult> VerifyAsync(string adminConnectionString)
@@ -107,7 +110,8 @@ public static class SchemaVerifier
             ("capture_observations", "capture_observations_immutable"),
             ("capture_route_policies", "capture_route_policies_immutable"),
             ("captured_events", "captured_events_immutable"),
-            ("captured_event_relationships", "captured_event_relationships_immutable")
+            ("captured_event_relationships", "captured_event_relationships_immutable"),
+            ("capture_pairing_audit", "capture_pairing_audit_immutable")
         })
         {
             var exists = await conn.ExecuteScalarAsync<bool>(
@@ -259,7 +263,8 @@ public static class SchemaVerifier
         foreach (var table in new[]
         {
             "traces", "trace_snapshots", "capture_observations",
-            "capture_route_policies", "captured_events", "captured_event_relationships"
+            "capture_route_policies", "captured_events", "captured_event_relationships",
+            "capture_pairing_audit"
         })
         {
             if (!existingTables.Contains(table))

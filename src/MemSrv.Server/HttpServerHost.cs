@@ -48,6 +48,8 @@ public static class HttpServerHost
         builder.Services.AddSingleton(provider =>
             new MemoryService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
         builder.Services.AddSingleton(_ => new CaptureAuthority(options.ConnectionString));
+        builder.Services.AddSingleton(provider => new CapturePairing(
+            options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
         builder.Services.AddSingleton(provider =>
             new CaptureIngestion(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
 
@@ -143,6 +145,51 @@ public static class HttpServerHost
             return healthy ? Results.Ok("ok") : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         });
 
+        // Pairing request creation and polling are deliberately outside every
+        // existing authority. The undisplayed polling token is the sole
+        // capability and can deliver the capture credential exactly once.
+        app.MapPost("/capture/v1/pairing-requests", async (
+            CapturePairingCreateRequest request, CapturePairing pairing, HttpContext http) =>
+        {
+            try
+            {
+                CapturePairingRequestCreated created = await pairing.CreateAsync(
+                    request.MachineName,
+                    request.CodexInstallationId,
+                    "/capture/console/pair",
+                    http.RequestAborted);
+                return Results.Created($"/capture/v1/pairing-requests/{created.RequestId}", created);
+            }
+            catch (Exception ex) when (ex is ArgumentException
+                or InvalidOperationException or SafetyConfigurationException
+                or SafetyScanException)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
+        app.MapGet("/capture/v1/pairing-requests/{requestId:guid}", async (
+            Guid requestId, CapturePairing pairing, HttpContext http) =>
+        {
+            string? token = Bearer(http);
+            CapturePairingPoll? poll = token is null
+                ? null
+                : await pairing.PollAsync(requestId, token, http.RequestAborted);
+            if (poll is null) return Results.Unauthorized();
+            if (poll.Status == "gone") return Results.StatusCode(StatusCodes.Status410Gone);
+            return Results.Ok(poll);
+        });
+
+        app.MapDelete("/capture/v1/pairing-requests/{requestId:guid}", async (
+            Guid requestId, CapturePairing pairing, HttpContext http) =>
+        {
+            string? token = Bearer(http);
+            if (token is null) return Results.Unauthorized();
+            return await pairing.CancelAsync(requestId, token, null, http.RequestAborted)
+                ? Results.NoContent()
+                : Results.StatusCode(StatusCodes.Status410Gone);
+        });
+
         // The focused console foundation intentionally exposes no business
         // operator actions yet. This focused entry route goes through the one
         // identity seam that derives the provider subject from the OIDC cookie.
@@ -155,6 +202,130 @@ public static class HttpServerHost
                 return Results.Content(
                     $"<main><h1>Capture console</h1><p>Operator: {subject}</p></main>",
                     "text/html");
+            }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+
+            app.MapGet("/capture/console/pair/{userCode}", async (
+                string userCode, CapturePairing pairing,
+                CaptureConsoleOperatorAuthorization authorization, HttpContext http) =>
+            {
+                CaptureConsoleOperator @operator = authorization.RequireOperator();
+                CapturePairingRequestView? request = await pairing.InspectByUserCodeAsync(
+                    userCode, http.RequestAborted);
+                if (request is null) return Results.NotFound();
+                string status = request.ExpiresAt <= DateTimeOffset.UtcNow
+                    && request.Status == "pending" ? "expired" : request.Status;
+                string code = System.Net.WebUtility.HtmlEncode(request.UserCode);
+                string detectedMachine = System.Net.WebUtility.HtmlEncode(request.MachineName);
+                string detectedInstallation = System.Net.WebUtility.HtmlEncode(
+                    request.CodexInstallationId);
+                string subject = System.Net.WebUtility.HtmlEncode(@operator.ProviderSubject);
+                string form = status == "pending"
+                    ? $"""
+                       <form method="post" action="/capture/console/pair/{code}/approve">
+                         <label>Label <input name="label" required></label>
+                         <label>Allowed repository route patterns
+                           <textarea name="allowedRepositoryPatterns" required></textarea>
+                         </label>
+                         <label>Special mappings (one alias=namespace per line)
+                           <textarea name="specialMappings"></textarea>
+                         </label>
+                         <button type="submit">Approve</button>
+                       </form>
+                       """
+                    : "";
+                return Results.Content(
+                    $"""
+                    <main><h1>Pair Codex capture</h1>
+                    <p>Operator: {subject}</p><p>Status: {System.Net.WebUtility.HtmlEncode(status)}</p>
+                    <dl><dt>Detected machine</dt><dd>{detectedMachine}</dd>
+                    <dt>Detected Codex installation</dt><dd>{detectedInstallation}</dd></dl>
+                    {form}</main>
+                    """, "text/html");
+            }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+
+            app.MapPost("/capture/console/pair/{userCode}/approve", async (
+                string userCode, CapturePairing pairing,
+                CaptureConsoleOperatorAuthorization authorization, HttpContext http) =>
+            {
+                try
+                {
+                    CaptureConsoleOperator @operator = authorization.RequireOperator();
+                    CapturePairingRequestView? request = await pairing.InspectByUserCodeAsync(
+                        userCode, http.RequestAborted);
+                    if (request is null) return Results.NotFound();
+                    IFormCollection form = await http.Request.ReadFormAsync(http.RequestAborted);
+                    CapturePairingApproval approval = PairingApprovalFromForm(form);
+                    CapturePairingApproved result = await pairing.ApproveAsync(
+                        request.RequestId, @operator.ProviderSubject, approval, http.RequestAborted);
+                    string label = System.Net.WebUtility.HtmlEncode(result.Label);
+                    return Results.Content(
+                        $"<main><h1>Pairing approved</h1><p>{label}</p></main>",
+                        "text/html");
+                }
+                catch (CapturePairingConflictException ex)
+                {
+                    return Results.Conflict(new { error = ex.Message });
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+                {
+                    return Results.Conflict(new { error = "This Codex installation is already paired." });
+                }
+                catch (Exception ex) when (ex is ArgumentException
+                    or InvalidOperationException or SafetyConfigurationException
+                    or SafetyScanException)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }).DisableAntiforgery()
+              .RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+
+            app.MapGet("/capture/console/api/pairing/{requestId:guid}", async (
+                Guid requestId, CapturePairing pairing,
+                CaptureConsoleOperatorAuthorization authorization, HttpContext http) =>
+            {
+                _ = authorization.RequireOperator();
+                CapturePairingRequestView? request = await pairing.InspectAsync(
+                    requestId, http.RequestAborted);
+                return request is null ? Results.NotFound() : Results.Ok(request);
+            }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+
+            app.MapPost("/capture/console/api/pairing/{requestId:guid}/approve", async (
+                Guid requestId, CapturePairingApproval approval, CapturePairing pairing,
+                CaptureConsoleOperatorAuthorization authorization, HttpContext http) =>
+            {
+                try
+                {
+                    CaptureConsoleOperator @operator = authorization.RequireOperator();
+                    CapturePairingApproved result = await pairing.ApproveAsync(
+                        requestId, @operator.ProviderSubject, approval, http.RequestAborted);
+                    return Results.Ok(result);
+                }
+                catch (KeyNotFoundException) { return Results.NotFound(); }
+                catch (CapturePairingConflictException ex)
+                {
+                    return Results.Conflict(new { error = ex.Message });
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+                {
+                    return Results.Conflict(new { error = "This Codex installation is already paired." });
+                }
+                catch (Exception ex) when (ex is ArgumentException
+                    or InvalidOperationException or SafetyConfigurationException
+                    or SafetyScanException)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+
+            app.MapDelete("/capture/console/api/pairing/{requestId:guid}", async (
+                Guid requestId, CapturePairing pairing,
+                CaptureConsoleOperatorAuthorization authorization, HttpContext http) =>
+            {
+                CaptureConsoleOperator @operator = authorization.RequireOperator();
+                return await pairing.CancelAsync(
+                    requestId, null, @operator.ProviderSubject, http.RequestAborted)
+                    ? Results.NoContent()
+                    : Results.StatusCode(StatusCodes.Status410Gone);
             }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
         }
 
@@ -259,4 +430,34 @@ public static class HttpServerHost
         }
         return null;
     }
+
+    private static string? Bearer(HttpContext http)
+    {
+        string header = http.Request.Headers.Authorization.ToString();
+        const string prefix = "Bearer ";
+        return header.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(header[prefix.Length..])
+            ? header[prefix.Length..].Trim()
+            : null;
+    }
+
+    private static CapturePairingApproval PairingApprovalFromForm(IFormCollection form)
+    {
+        string[] patterns = form["allowedRepositoryPatterns"].ToString()
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        CaptureSpecialNamespace[] mappings = form["specialMappings"].ToString()
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(value =>
+            {
+                string[] parts = value.Split('=', 2, StringSplitOptions.TrimEntries);
+                if (parts.Length != 2 || parts.Any(string.IsNullOrWhiteSpace))
+                    throw new ArgumentException(
+                        "Special mappings must use one alias=namespace pair per line.");
+                return new CaptureSpecialNamespace(parts[0], parts[1]);
+            }).ToArray();
+        return new CapturePairingApproval(form["label"].ToString(), patterns, mappings);
+    }
+
+    private sealed record CapturePairingCreateRequest(
+        string MachineName, string CodexInstallationId);
 }

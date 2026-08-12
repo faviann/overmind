@@ -30,6 +30,179 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
     };
 
     [Fact]
+    public async Task AuthenticatedOperatorPairsRuntimeWithoutDisclosingCredentialFromApproval()
+    {
+        using var provider = ConfigureFakeOidcProvider("authentik|pairing-operator");
+        OidcSignIn signIn = await CompleteOidcSignInAsync(provider);
+        using var runtime = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+        using var created = await runtime.PostAsJsonAsync("/capture/v1/pairing-requests", new
+        {
+            machineName = "detected-machine",
+            codexInstallationId = "detected-installation"
+        });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        JsonElement request = await created.Content.ReadFromJsonAsync<JsonElement>();
+        string requestId = request.GetProperty("requestId").GetString()!;
+        string userCode = request.GetProperty("userCode").GetString()!;
+        string pollingToken = request.GetProperty("pollingToken").GetString()!;
+        Assert.NotEqual(pollingToken, userCode);
+        Assert.DoesNotContain(pollingToken, request.GetProperty("verificationUri").GetString());
+
+        using var console = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+        console.DefaultRequestHeaders.Add("Cookie", signIn.CookieHeader);
+        using var inspected = await console.GetAsync($"/capture/console/pair/{userCode}");
+        Assert.Equal(HttpStatusCode.OK, inspected.StatusCode);
+        string detected = await inspected.Content.ReadAsStringAsync();
+        Assert.Contains("detected-machine", detected);
+        Assert.Contains("detected-installation", detected);
+        Assert.Contains("authentik|pairing-operator", detected);
+        Assert.Contains($"action=\"/capture/console/pair/{userCode}/approve\"", detected);
+        Assert.DoesNotContain(requestId, detected);
+        Assert.DoesNotContain(pollingToken, detected);
+
+        using var approved = await console.PostAsync(
+            $"/capture/console/pair/{userCode}/approve", new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["label"] = "My Codex",
+                ["allowedRepositoryPatterns"] = "github.com/example/*",
+                ["specialMappings"] = "notes=homelab",
+                ["agentId"] = "caller-must-not-control-this"
+            }));
+        Assert.Equal(HttpStatusCode.OK, approved.StatusCode);
+        string approvalBody = await approved.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("mcap_", approvalBody);
+        Assert.DoesNotContain("caller-must-not-control-this", approvalBody);
+
+        using var poll = new HttpRequestMessage(
+            HttpMethod.Get, $"/capture/v1/pairing-requests/{requestId}");
+        poll.Headers.Authorization = new AuthenticationHeaderValue("Bearer", pollingToken);
+        using var delivered = await runtime.SendAsync(poll);
+        Assert.Equal(HttpStatusCode.OK, delivered.StatusCode);
+        JsonElement result = await delivered.Content.ReadFromJsonAsync<JsonElement>();
+        string credential = result.GetProperty("credential").GetString()!;
+        Assert.StartsWith("mcap_", credential);
+
+        using var replay = new HttpRequestMessage(
+            HttpMethod.Get, $"/capture/v1/pairing-requests/{requestId}");
+        replay.Headers.Authorization = new AuthenticationHeaderValue("Bearer", pollingToken);
+        using var replayed = await runtime.SendAsync(replay);
+        Assert.Equal(HttpStatusCode.Gone, replayed.StatusCode);
+
+        using var ingest = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+        ingest.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", credential);
+        using var imported = await ingest.PostAsJsonAsync(
+            "/capture/v1/observations", Observation());
+        Assert.Equal(HttpStatusCode.OK, imported.StatusCode);
+
+        using var mcpAttempt = new HttpRequestMessage(HttpMethod.Post, "/mcp");
+        mcpAttempt.Headers.Authorization =
+            new AuthenticationHeaderValue("Bearer", credential);
+        mcpAttempt.Content = JsonContent.Create(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "initialize",
+            @params = new { }
+        });
+        using var deniedMcp = await ingest.SendAsync(mcpAttempt);
+        Assert.Equal(HttpStatusCode.Unauthorized, deniedMcp.StatusCode);
+    }
+
+    [Fact]
+    public async Task DisplayedPairingUrlRequiresOidcOperatorPolicy()
+    {
+        ConfigureStaticOidcChallenge();
+        using var runtime = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+        using var created = await runtime.PostAsJsonAsync("/capture/v1/pairing-requests", new
+        {
+            machineName = "policy-machine",
+            codexInstallationId = $"policy-installation-{Guid.NewGuid():N}"
+        });
+        JsonElement request = await created.Content.ReadFromJsonAsync<JsonElement>();
+        string verificationUri = request.GetProperty("verificationUri").GetString()!;
+
+        using var browser = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+        using var open = new HttpRequestMessage(HttpMethod.Get, new Uri(new Uri(_baseUrl), verificationUri));
+        open.Headers.Add("X-Forwarded-Proto", "https");
+        using var challenged = await browser.SendAsync(open);
+
+        Assert.Equal(HttpStatusCode.Redirect, challenged.StatusCode);
+        Assert.Equal("authentik.test", challenged.Headers.Location!.Host);
+    }
+
+    [Fact]
+    public async Task DuplicatePairingApprovalsCreateOnlyOneInstallationBinding()
+    {
+        using var provider = ConfigureFakeOidcProvider("authentik|duplicate-operator");
+        OidcSignIn signIn = await CompleteOidcSignInAsync(provider);
+        string installation = $"duplicate-installation-{Guid.NewGuid():N}";
+        using var runtime = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+        JsonElement first = await CreatePairingAsync(runtime, "same-machine", installation);
+        JsonElement second = await CreatePairingAsync(runtime, "same-machine", installation);
+        using var console = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+        console.DefaultRequestHeaders.Add("Cookie", signIn.CookieHeader);
+
+        Task<HttpResponseMessage>[] approvals = new[] { first, second }
+            .Select(pairing => console.PostAsJsonAsync(
+                $"/capture/console/api/pairing/{pairing.GetProperty("requestId").GetString()}/approve",
+                new
+                {
+                    label = $"Duplicate {Guid.NewGuid():N}",
+                    allowedRepositoryPatterns = new[] { "github.com/example/*" },
+                    specialNamespaces = Array.Empty<object>()
+                }))
+            .ToArray();
+        HttpResponseMessage[] results = await Task.WhenAll(approvals);
+        try
+        {
+            Assert.Single(results, response => response.StatusCode == HttpStatusCode.OK);
+            Assert.Single(results, response => response.StatusCode == HttpStatusCode.Conflict);
+        }
+        finally
+        {
+            foreach (HttpResponseMessage response in results) response.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task PollingCapabilityCanCancelOnlyItsOwnLiveRequestAndCannotReplay()
+    {
+        var pairing = new CapturePairing(RuntimeConnection, SafetyGate());
+        CapturePairingRequestCreated created = await pairing.CreateAsync(
+            "cancel-machine", $"cancel-installation-{Guid.NewGuid():N}", "/capture/console/pair");
+        CapturePairingRequestCreated other = await pairing.CreateAsync(
+            "other-machine", $"other-installation-{Guid.NewGuid():N}", "/capture/console/pair");
+
+        Assert.Null(await pairing.PollAsync(created.RequestId, "wrong-token"));
+        Assert.Null(await pairing.PollAsync(other.RequestId, created.PollingToken));
+        Assert.False(await pairing.CancelAsync(created.RequestId, "wrong-token", null));
+        Assert.True(await pairing.CancelAsync(created.RequestId, created.PollingToken, null));
+        Assert.False(await pairing.CancelAsync(created.RequestId, created.PollingToken, null));
+        Assert.Equal("gone", (await pairing.PollAsync(created.RequestId, created.PollingToken))!.Status);
+    }
+
+    [Fact]
+    public async Task ExpiredPairingCannotBeCancelledOrApproved()
+    {
+        var clock = new ManualTimeProvider(new DateTimeOffset(2026, 8, 12, 12, 0, 0, TimeSpan.Zero));
+        var pairing = new CapturePairing(RuntimeConnection, SafetyGate(), clock);
+        CapturePairingRequestCreated created = await pairing.CreateAsync(
+            "expired-machine", $"expired-installation-{Guid.NewGuid():N}", "/capture/console/pair");
+        clock.Advance(TimeSpan.FromMinutes(16));
+
+        Assert.False(await pairing.CancelAsync(created.RequestId, created.PollingToken, null));
+        await Assert.ThrowsAsync<CapturePairingConflictException>(() => pairing.ApproveAsync(
+            created.RequestId,
+            "authentik|expiry-operator",
+            new CapturePairingApproval("Expired", ["github.com/example/*"], [])));
+        CapturePairingPoll poll = Assert.IsType<CapturePairingPoll>(
+            await pairing.PollAsync(created.RequestId, created.PollingToken));
+        Assert.Equal("gone", poll.Status);
+        Assert.Null(poll.Credential);
+    }
+
+    [Fact]
     public async Task ConsoleIsUnavailableWhenOidcConfigurationIsAbsent()
     {
         var options = RuntimeOptions();
@@ -320,6 +493,18 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
         }
     }
 
+    private static async Task<JsonElement> CreatePairingAsync(
+        HttpClient runtime, string machineName, string installationId)
+    {
+        using var response = await runtime.PostAsJsonAsync("/capture/v1/pairing-requests", new
+        {
+            machineName,
+            codexInstallationId = installationId
+        });
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<JsonElement>()).Clone();
+    }
+
     private static object Observation()
     {
         string marker = Guid.NewGuid().ToString("N");
@@ -358,6 +543,13 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
     }
 
     private sealed record OidcSignIn(string CookieHeader, string ProtectedTicket);
+
+    private sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan amount) => _now += amount;
+    }
 
     private sealed class FakeOidcProvider : HttpMessageHandler, IDisposable
     {

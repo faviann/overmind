@@ -13,6 +13,7 @@ Source interpretation before this spine is described by the
 | Module | Public interface | Caller |
 | --- | --- | --- |
 | `CaptureEnrollment` | `EnrollAsync(stableName, harness, agentId, credential)` → binding uuid | `memctl capture enroll` |
+| `CapturePairing` | create/poll/cancel plus code-based operator inspection and approval → one installation binding and one-time credential delivery | `/capture/v1/pairing-requests`, `/capture/console/pair/{userCode}` |
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |

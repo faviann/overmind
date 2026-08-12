@@ -137,6 +137,7 @@ public sealed class CapturePairing(
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        DateTimeOffset approvalTime = _time.GetUtcNow();
         PairingRow? request = await connection.QuerySingleOrDefaultAsync<PairingRow>(
             """
             SELECT status, expires_at AS ExpiresAt,
@@ -144,7 +145,7 @@ public sealed class CapturePairing(
             FROM capture_pairing_requests WHERE request_uuid = @requestId FOR UPDATE
             """, new { requestId }, transaction);
         if (request is null) throw new KeyNotFoundException("Pairing request was not found.");
-        if (request.Status != "pending" || request.ExpiresAt <= _time.GetUtcNow())
+        if (request.Status != "pending" || request.ExpiresAt <= approvalTime)
             throw new CapturePairingConflictException("Pairing request is no longer approvable.");
         foreach (CaptureSpecialNamespace mapping in approval.SpecialNamespaces)
         {
@@ -197,10 +198,12 @@ public sealed class CapturePairing(
                 delivery_credential=@credential, approved_by=@operatorSubject,
                 approved_at=@approvedAt
             WHERE request_uuid=@requestId AND status='pending'
+              AND expires_at>@approvalTime
             """, new
             {
                 requestId, bindingId, credential, operatorSubject,
-                approvedAt = _time.GetUtcNow()
+                approvedAt = approvalTime,
+                approvalTime
             }, transaction);
         if (changed != 1) throw new CapturePairingConflictException("Pairing approval conflicted.");
         await connection.ExecuteAsync(

@@ -472,7 +472,7 @@ static async Task<string> ResolveCredentialAsync(string endpoint, string stateDi
         userCode = pairing.UserCode
     }, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
-    while (DateTimeOffset.UtcNow < pairing.ExpiresAt)
+    while (true)
     {
         using var pollRequest = new HttpRequestMessage(
             HttpMethod.Get, $"capture/v1/pairing-requests/{pairing.RequestId}");
@@ -496,7 +496,6 @@ static async Task<string> ResolveCredentialAsync(string endpoint, string stateDi
             throw new InvalidDataException("Pairing poll response is invalid.");
         await Task.Delay(TimeSpan.FromSeconds(2));
     }
-    throw new InvalidOperationException("Capture pairing expired.");
 }
 
 static async Task WritePrivateFileAsync(string path, string content)

@@ -6,9 +6,10 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
 
 ## Authority
 
-1. `docs/memory-server-phase1-spec.md` — binding build details, schema, and tool contracts
-2. `docs/agent-memory-handoff-v4.md` — intent and architecture where the spec is silent
-3. This file and `docs/` conventions
+1. `docs/conversation-capture-phase2-spec.md` — binding for conversation-capture work and its explicit Phase 1 amendments
+2. `docs/memory-server-phase1-spec.md` — binding for Phase 1 contracts and every area the Phase 2 capture spec does not amend
+3. `docs/agent-memory-handoff-v4.md` — intent and architecture where the applicable spec is silent
+4. This file and `docs/` conventions
 
 ## Always-on invariants
 
@@ -22,7 +23,7 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
 - **Derive `agent_id` from the credential, never from tool arguments.**
 - **Shared memories require operator approval.** They are born `proposed`, and
   approval is `memctl`-only; never add an agent-facing approval tool.
-- **Do not broaden scope beyond the binding spec.**
+- **Do not broaden scope beyond the applicable binding spec.**
 
 ## Read before changing
 
@@ -31,6 +32,8 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
   `reference/csharp-sdk/`. Trust that evidence over memory. Remote transport
   uses Streamable HTTP, never legacy SSE.
 - Tests or refactors → `docs/testing.md`
+- Capture runtime packaging, hooks, console/OIDC, operations, or historical
+  backfill → `docs/conversation-capture-phase2-spec.md`
 - Capture enrollment, ingestion, or operator receipt reads →
   `docs/capture-modules.md`
 - Capture adapters or fixture parsing → `docs/capture-adapter-contract.md`

@@ -7,6 +7,21 @@ namespace MemSrv.Tests;
 public sealed class CapturePackagingTests
 {
     [Fact]
+    public void ShippedComposeAllowsCredentiallessPairingAndDocumentsOptionalCredential()
+    {
+        string compose = File.ReadAllText(Path.Combine(
+            TestProcessRunner.RepoRoot, "compose.capture.yaml"));
+        string example = File.ReadAllText(Path.Combine(
+            TestProcessRunner.RepoRoot, ".env.capture.example"));
+
+        Assert.Contains(
+            "OVERMIND_CAPTURE_CREDENTIAL: ${OVERMIND_CAPTURE_CREDENTIAL:-}", compose);
+        Assert.DoesNotContain("OVERMIND_CAPTURE_CREDENTIAL:?", compose);
+        Assert.Contains("# OVERMIND_CAPTURE_CREDENTIAL=mcap_", example);
+        Assert.DoesNotContain("OVERMIND_CAPTURE_CREDENTIAL=<", example);
+    }
+
+    [Fact]
     public async Task MissingCredentialUsesPairingAndPersistsDeliveredCredentialMode0600()
     {
         string root = Path.Combine(Path.GetTempPath(), $"capture-pairing-{Guid.NewGuid():N}");

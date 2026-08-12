@@ -286,7 +286,7 @@ internal static class CaptureRouteResolver
             : $"{host.ToLowerInvariant()}/{parts[^2].ToLowerInvariant()}/{parts[^1].ToLowerInvariant()}";
     }
 
-    internal static string NormalizeDirectoryForPolicy(string value) =>
+    public static string NormalizeDirectoryForPolicy(string value) =>
         NormalizeDirectory(value)
         ?? throw new ArgumentException("Directory routes require an absolute path.");
 

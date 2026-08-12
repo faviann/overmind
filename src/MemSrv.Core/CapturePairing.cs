@@ -21,7 +21,8 @@ public sealed class CapturePairingRequestView
 public sealed record CapturePairingApproval(
     string Label,
     IReadOnlyList<string> AllowedRepositoryPatterns,
-    IReadOnlyList<CaptureSpecialNamespace> SpecialNamespaces);
+    IReadOnlyList<CaptureSpecialNamespace> SpecialNamespaces,
+    IReadOnlyList<CaptureDirectoryRoute>? DirectoryRoutes = null);
 public sealed record CapturePairingApproved(Guid BindingId, string Label);
 public sealed record CapturePairingPoll(string Status, string? Credential);
 
@@ -110,8 +111,27 @@ public sealed class CapturePairing(
         if (approval.SpecialNamespaces.Select(value => value.Alias)
             .Distinct(StringComparer.Ordinal).Count() != approval.SpecialNamespaces.Count)
             throw new ArgumentException("Special namespace aliases must be unique.");
+        CaptureDirectoryRoute[] directoryRoutes = (approval.DirectoryRoutes ?? [])
+            .Select(item => new CaptureDirectoryRoute(
+                CaptureRouteResolver.NormalizeDirectoryForPolicy(item.Directory),
+                item.Target))
+            .ToArray();
+        if (directoryRoutes.Select(value => value.Directory)
+            .Distinct(StringComparer.Ordinal).Count() != directoryRoutes.Length)
+            throw new ArgumentException("Directory route paths must be unique.");
+        var aliases = approval.SpecialNamespaces.Select(value => value.Alias)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (CaptureDirectoryRoute route in directoryRoutes)
+        {
+            if (!route.Target.StartsWith("special:", StringComparison.Ordinal)
+                || !aliases.Contains(route.Target["special:".Length..]))
+                throw new ArgumentException(
+                    $"Directory route target '{route.Target}' must name a configured special alias.");
+        }
         foreach (string value in patterns.Concat(approval.SpecialNamespaces
                      .SelectMany(item => new[] { item.Alias, item.Namespace })))
+            neverStore.AssertAllowed(value);
+        foreach (string value in directoryRoutes.SelectMany(item => new[] { item.Directory, item.Target }))
             neverStore.AssertAllowed(value);
 
         await using var connection = new NpgsqlConnection(connectionString);
@@ -160,11 +180,13 @@ public sealed class CapturePairing(
             INSERT INTO capture_route_policies
               (binding_uuid, allowed_repository_patterns, remote_overrides,
                directory_routes, special_namespaces)
-            VALUES (@bindingId, @patterns, '[]'::jsonb, '[]'::jsonb,
+            VALUES (@bindingId, @patterns, '[]'::jsonb, CAST(@directoryRoutes AS jsonb),
                     CAST(@specialNamespaces AS jsonb))
             """, new
             {
                 bindingId, patterns,
+                directoryRoutes = JsonSerializer.Serialize(
+                    directoryRoutes, CaptureLedger.JsonOptions),
                 specialNamespaces = JsonSerializer.Serialize(
                     approval.SpecialNamespaces, CaptureLedger.JsonOptions)
             }, transaction);
@@ -204,7 +226,8 @@ public sealed class CapturePairing(
             WHERE request_uuid=@requestId AND polling_token_hash=@tokenHash FOR UPDATE
             """, new { requestId, tokenHash = Hash(pollingToken) }, transaction);
         if (request is null) return null;
-        if (request.ExpiresAt <= _time.GetUtcNow() || request.Status is "cancelled" or "delivered")
+        if (request.Status is "cancelled" or "delivered"
+            || request.Status == "pending" && request.ExpiresAt <= _time.GetUtcNow())
             return new("gone", null);
         if (request.Status == "pending") return new("pending", null);
         if (request.Status != "approved" || request.Credential is null)

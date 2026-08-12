@@ -29,7 +29,8 @@ previously delivered credential, the runtime:
 The operator opens `/capture/console/pair/{userCode}`, signs in through the
 configured OIDC provider, verifies the detected machine and installation, and
 chooses the label, allowed repository route patterns, and special namespace
-mappings. The server derives the operator identity from the OIDC `sub` claim.
+mappings, plus any directory routes that select those mappings. The server
+derives the operator identity from the OIDC `sub` claim.
 It derives the capture `agent_id` and binding identity itself; neither is a
 pairing input. A Codex installation can acquire only one binding, including
 when multiple requests or approvals race.
@@ -37,9 +38,11 @@ when multiple requests or approvals race.
 The user code and verification URL are safe to display. The polling token and
 delivered `mcap_…` credential are secrets: neither is put in the URL or logs.
 Only the polling-token hash is persisted long-term. Credential plaintext exists
-in pending server state only between approval and its first authenticated poll,
-which atomically returns it once and clears that plaintext. Cancellation and
-expiry never grant capture authority.
+in transient delivery state only between approval and its first authenticated
+poll, which atomically returns it once and clears that plaintext. Expiry removes
+authority from a still-pending request. Once approval commits before expiry,
+delivery remains available exactly once across expiry or an outage; cancellation
+cannot revoke that already-created binding.
 
 Pre-provisioned capture credentials remain supported for unattended rollout or
 break-glass operation. When `OVERMIND_CAPTURE_CREDENTIAL` is present, the
@@ -60,8 +63,9 @@ captured-content reads, or database access.
 ## Run the immutable image
 
 Copy `.env.capture.example` to an ignored operator-owned environment file,
-replace every placeholder, restrict it to the operator before starting Compose,
-and use an immutable version or registry digest:
+replace every required placeholder, optionally uncomment a pre-provisioned
+credential (otherwise browser pairing runs), restrict it to the operator before
+starting Compose, and use an immutable version or registry digest:
 
 ```sh
 chmod 0600 .env.capture

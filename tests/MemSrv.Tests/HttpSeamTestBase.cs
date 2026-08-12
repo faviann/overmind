@@ -42,7 +42,8 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");
         await File.WriteAllTextAsync(_keysPath, KeyFileYaml());
 
-        _app = HttpServerHost.Build(RuntimeOptions(), AgentKeyStore.Load(_keysPath));
+        _app = HttpServerHost.Build(
+            RuntimeOptions(), AgentKeyStore.Load(_keysPath), RuntimeTimeProvider());
         _app.Urls.Add("http://127.0.0.1:0");
         await _app.StartAsync();
         _baseUrl = _app.Services.GetRequiredService<IServer>()
@@ -67,6 +68,7 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     };
 
     protected virtual CaptureConsoleOidcOptions ConsoleOidcOptions() => new();
+    protected virtual TimeProvider RuntimeTimeProvider() => TimeProvider.System;
 
     // The same governed gate the server builds, for callers that run the
     // disabled capture runtime in-process: built from the SAME options the

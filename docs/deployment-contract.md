@@ -275,7 +275,8 @@ With no pre-provisioned `OVERMIND_CAPTURE_CREDENTIAL`, the runtime makes only
 outbound HTTP(S) pairing creation/poll requests followed by its normal capture
 observation writes. Its writable state volume persists a private installation
 identity and the one-time-delivered private capture credential. Supplying the
-existing environment credential remains compatible and bypasses pairing.
+optional existing environment credential remains compatible and bypasses
+pairing; the shipped Compose and example environment do not require it.
 
 ## Release verification
 

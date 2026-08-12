@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -31,7 +32,10 @@ public static class HttpServerHost
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
-    public static WebApplication Build(MemSrvOptions options, AgentKeyStore keyStore)
+    public static WebApplication Build(
+        MemSrvOptions options,
+        AgentKeyStore keyStore,
+        TimeProvider? timeProvider = null)
     {
         bool captureConsoleEnabled = options.CaptureConsoleOidc.ValidateAndIsEnabled();
         var builder = WebApplication.CreateBuilder();
@@ -44,16 +48,27 @@ public static class HttpServerHost
 
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(keyStore);
+        builder.Services.AddSingleton(timeProvider ?? TimeProvider.System);
         builder.Services.AddSingleton(_ => new NeverStoreGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
         builder.Services.AddSingleton(provider =>
             new MemoryService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
         builder.Services.AddSingleton(_ => new CaptureAuthority(options.ConnectionString));
         builder.Services.AddSingleton(provider => new CapturePairing(
-            options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
+            options.ConnectionString,
+            provider.GetRequiredService<NeverStoreGate>(),
+            provider.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton(provider =>
             new CaptureIngestion(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
 
         builder.Services.AddHttpContextAccessor();
+        builder.Services.AddAntiforgery(antiforgery =>
+        {
+            antiforgery.Cookie.Name = "__Host-MemSrv-CaptureConsole-Csrf";
+            antiforgery.Cookie.Path = "/";
+            antiforgery.Cookie.HttpOnly = true;
+            antiforgery.Cookie.SameSite = SameSiteMode.Strict;
+            antiforgery.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+        });
         builder.Services.Configure<ForwardedHeadersOptions>(forwarded =>
         {
             // Traefik owns TLS. Trust exactly one forwarded scheme hop so OIDC
@@ -206,28 +221,36 @@ public static class HttpServerHost
 
             app.MapGet("/capture/console/pair/{userCode}", async (
                 string userCode, CapturePairing pairing,
-                CaptureConsoleOperatorAuthorization authorization, HttpContext http) =>
+                CaptureConsoleOperatorAuthorization authorization,
+                IAntiforgery antiforgery, TimeProvider time, HttpContext http) =>
             {
                 CaptureConsoleOperator @operator = authorization.RequireOperator();
                 CapturePairingRequestView? request = await pairing.InspectByUserCodeAsync(
                     userCode, http.RequestAborted);
                 if (request is null) return Results.NotFound();
-                string status = request.ExpiresAt <= DateTimeOffset.UtcNow
+                string status = request.ExpiresAt <= time.GetUtcNow()
                     && request.Status == "pending" ? "expired" : request.Status;
                 string code = System.Net.WebUtility.HtmlEncode(request.UserCode);
                 string detectedMachine = System.Net.WebUtility.HtmlEncode(request.MachineName);
                 string detectedInstallation = System.Net.WebUtility.HtmlEncode(
                     request.CodexInstallationId);
                 string subject = System.Net.WebUtility.HtmlEncode(@operator.ProviderSubject);
+                string antiforgeryToken = System.Net.WebUtility.HtmlEncode(
+                    antiforgery.GetAndStoreTokens(http).RequestToken
+                    ?? throw new InvalidOperationException("Antiforgery did not issue a request token."));
                 string form = status == "pending"
                     ? $"""
                        <form method="post" action="/capture/console/pair/{code}/approve">
+                         <input type="hidden" name="__RequestVerificationToken" value="{antiforgeryToken}">
                          <label>Label <input name="label" required></label>
                          <label>Allowed repository route patterns
                            <textarea name="allowedRepositoryPatterns" required></textarea>
                          </label>
                          <label>Special mappings (one alias=namespace per line)
                            <textarea name="specialMappings"></textarea>
+                         </label>
+                         <label>Special directory routes (one path=alias per line)
+                           <textarea name="specialDirectoryRoutes"></textarea>
                          </label>
                          <button type="submit">Approve</button>
                        </form>
@@ -245,10 +268,12 @@ public static class HttpServerHost
 
             app.MapPost("/capture/console/pair/{userCode}/approve", async (
                 string userCode, CapturePairing pairing,
-                CaptureConsoleOperatorAuthorization authorization, HttpContext http) =>
+                CaptureConsoleOperatorAuthorization authorization,
+                IAntiforgery antiforgery, HttpContext http) =>
             {
                 try
                 {
+                    await antiforgery.ValidateRequestAsync(http);
                     CaptureConsoleOperator @operator = authorization.RequireOperator();
                     CapturePairingRequestView? request = await pairing.InspectByUserCodeAsync(
                         userCode, http.RequestAborted);
@@ -266,6 +291,10 @@ public static class HttpServerHost
                 {
                     return Results.Conflict(new { error = ex.Message });
                 }
+                catch (AntiforgeryValidationException)
+                {
+                    return Results.BadRequest(new { error = "The antiforgery token is invalid." });
+                }
                 catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
                 {
                     return Results.Conflict(new { error = "This Codex installation is already paired." });
@@ -276,8 +305,7 @@ public static class HttpServerHost
                 {
                     return Results.BadRequest(new { error = ex.Message });
                 }
-            }).DisableAntiforgery()
-              .RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+            }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
 
             app.MapGet("/capture/console/api/pairing/{requestId:guid}", async (
                 Guid requestId, CapturePairing pairing,
@@ -455,7 +483,18 @@ public static class HttpServerHost
                         "Special mappings must use one alias=namespace pair per line.");
                 return new CaptureSpecialNamespace(parts[0], parts[1]);
             }).ToArray();
-        return new CapturePairingApproval(form["label"].ToString(), patterns, mappings);
+        CaptureDirectoryRoute[] directoryRoutes = form["specialDirectoryRoutes"].ToString()
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(value =>
+            {
+                string[] parts = value.Split('=', 2, StringSplitOptions.TrimEntries);
+                if (parts.Length != 2 || parts.Any(string.IsNullOrWhiteSpace))
+                    throw new ArgumentException(
+                        "Special directory routes must use one path=alias pair per line.");
+                return new CaptureDirectoryRoute(parts[0], $"special:{parts[1]}");
+            }).ToArray();
+        return new CapturePairingApproval(
+            form["label"].ToString(), patterns, mappings, directoryRoutes);
     }
 
     private sealed record CapturePairingCreateRequest(

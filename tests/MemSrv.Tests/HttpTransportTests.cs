@@ -496,7 +496,8 @@ public sealed class HttpTransportTests : IAsyncLifetime
         var deadOptions = new MemSrvOptions
         {
             ConnectionString = "Host=127.0.0.1;Port=1;Database=nope;Username=nobody;Password=nope;Timeout=1",
-            NeverStorePath = Path.Combine(_root, "config/never_store.yaml")
+            NeverStorePath = Path.Combine(_root, "config/never_store.yaml"),
+            CaptureConsoleOidc = TestOidcOptions(),
         };
         var deadApp = HttpServerHost.Build(deadOptions, AgentKeyStore.Load(_keysPath));
         deadApp.Urls.Add("http://127.0.0.1:0");
@@ -559,6 +560,14 @@ public sealed class HttpTransportTests : IAsyncLifetime
     {
         ConnectionString = RuntimeConnection,
         NeverStorePath = Path.Combine(_root, "config/never_store.yaml"),
+        CaptureConsoleOidc = TestOidcOptions(),
+    };
+
+    private static CaptureConsoleOidcOptions TestOidcOptions() => new()
+    {
+        Authority = "https://authentik.test/application/o/capture-console/",
+        ClientId = "capture-console-test",
+        ClientSecret = "test-only-client-secret",
     };
 
     private async Task<McpClient> ConnectAsync(string bearerKey)
@@ -631,6 +640,9 @@ public sealed class HttpTransportTests : IAsyncLifetime
             ["MEMSRV_HTTP_URL"] = "http://127.0.0.1:0",
             ["MEMSRV_AGENT_KEYS_PATH"] = _keysPath,
             ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection,
+            ["MEMSRV_CAPTURE_CONSOLE_OIDC_AUTHORITY"] = "https://authentik.test/application/o/capture-console/",
+            ["MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID"] = "capture-console-test",
+            ["MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET"] = "test-only-client-secret",
         });
 
     private static async Task StopProcessAsync(Process process)

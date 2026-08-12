@@ -63,13 +63,10 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     {
         ConnectionString = RuntimeConnection,
         NeverStorePath = Path.Combine(_root, "config/never_store.yaml"),
-        CaptureConsoleOidc = new()
-        {
-            Authority = "https://authentik.test/application/o/capture-console/",
-            ClientId = "capture-console-test",
-            ClientSecret = "test-only-client-secret",
-        },
+        CaptureConsoleOidc = ConsoleOidcOptions(),
     };
+
+    protected virtual CaptureConsoleOidcOptions ConsoleOidcOptions() => new();
 
     // The same governed gate the server builds, for callers that run the
     // disabled capture runtime in-process: built from the SAME options the

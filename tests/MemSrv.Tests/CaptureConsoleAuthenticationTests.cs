@@ -22,6 +22,13 @@ namespace MemSrv.Tests;
 [Collection("database")]
 public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
 {
+    protected override CaptureConsoleOidcOptions ConsoleOidcOptions() => new()
+    {
+        Authority = "https://authentik.test/application/o/capture-console/",
+        ClientId = "capture-console-test",
+        ClientSecret = "test-only-client-secret",
+    };
+
     [Fact]
     public async Task ConsoleIsUnavailableWhenOidcConfigurationIsAbsent()
     {
@@ -153,7 +160,7 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
         using (var console = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }))
         {
             using var refused = await console.GetAsync($"{_baseUrl}/capture/console");
-            Assert.False(refused.IsSuccessStatusCode);
+            await AssertOidcAuthorityUnavailableAsync(refused);
 
             console.DefaultRequestHeaders.Add("Cookie", signIn.CookieHeader);
             using var acceptedSession = await console.GetAsync($"{_baseUrl}/capture/console");
@@ -166,7 +173,7 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
             expiredConsole.DefaultRequestHeaders.Add("Cookie", ConsoleCookie(
                 cookie, DateTimeOffset.UtcNow.AddHours(-9), DateTimeOffset.UtcNow.AddHours(-1)));
             using var expiredSession = await expiredConsole.GetAsync($"{_baseUrl}/capture/console");
-            Assert.False(expiredSession.IsSuccessStatusCode);
+            await AssertOidcAuthorityUnavailableAsync(expiredSession);
         }
 
         using var health = new HttpClient();
@@ -269,6 +276,13 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
             part => Uri.UnescapeDataString(part[0]),
             part => Uri.UnescapeDataString(part.Length == 2 ? part[1] : ""),
             StringComparer.Ordinal);
+
+    private static async Task AssertOidcAuthorityUnavailableAsync(HttpResponseMessage response)
+    {
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Null(response.Headers.Location);
+        Assert.Empty(await response.Content.ReadAsStringAsync());
+    }
 
     private static string ConsoleCookie(
         CookieAuthenticationOptions cookie, DateTimeOffset issuedUtc, DateTimeOffset expiresUtc)

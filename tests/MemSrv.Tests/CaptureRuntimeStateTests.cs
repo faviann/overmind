@@ -2290,6 +2290,51 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task AcceptedTranscriptOwnershipRejectsAReplacementSourceStreamAfterQueueDrains()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-accepted-owner-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem accepted = QueueItem("session-a", 0, 10);
+            CaptureRuntimeQueueItem replacement = QueueItem("session-b", 0, 10);
+
+            Assert.True(await state.ClaimAsync(
+                accepted,
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+            await state.RecordServerReceiptAsync(
+                accepted.SourceStream,
+                new CaptureServerReceiptState(
+                    accepted.SourcePosition,
+                    accepted.DeterministicLocatorEvidence.Identity,
+                    "new",
+                    Guid.NewGuid(),
+                    Guid.NewGuid()));
+            CaptureRuntimeSnapshot beforeReplacement = await state.ReadAsync();
+            Assert.Empty(Assert.Single(beforeReplacement.Streams).Queue);
+
+            Assert.False(await state.ClaimAsync(
+                replacement,
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+
+            Assert.Equal(
+                JsonSerializer.Serialize(beforeReplacement),
+                JsonSerializer.Serialize(await state.ReadAsync()));
+            Assert.Equal("session-a", Assert.Single(beforeReplacement.Streams).SourceStream);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task FirstClaimMustBeginAtSourcePositionZero()
     {
         string directory = Path.Combine(

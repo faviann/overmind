@@ -529,8 +529,7 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
 
         if (stream is null
             && streams.Any(existing =>
-                existing.Queue.Count > 0
-                && string.Equals(
+                string.Equals(
                     existing.TranscriptIdentity,
                     claim.DeterministicLocatorEvidence.TranscriptIdentity,
                     StringComparison.Ordinal)))

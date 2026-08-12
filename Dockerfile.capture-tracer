@@ -16,9 +16,10 @@ FROM mcr.microsoft.com/dotnet/runtime:10.0
 WORKDIR /app
 COPY --from=build /out/ ./
 COPY config/ /app/config/
+COPY fixtures/transcripts/ /app/fixtures/transcripts/
 RUN mkdir /state && chown 65532:65532 /state
 USER 65532:65532
-ENV OVERMIND_CODEX_TRANSCRIPT_ROOT=/capture/transcripts \
+ENV OVERMIND_CODEX_TRANSCRIPT_ROOT=/app/fixtures/transcripts \
     OVERMIND_CAPTURE_STATE_DIR=/state
 LABEL org.opencontainers.image.description="Codex-only scanner-first catch-up runtime"
 ENTRYPOINT ["dotnet", "/app/CodexCaptureTracer.dll"]

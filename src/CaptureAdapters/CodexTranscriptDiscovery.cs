@@ -50,9 +50,9 @@ public static class CodexTranscriptDiscovery
                 fullArchiveRoot, "rollout-*.jsonl", SearchOption.AllDirectories)
             .Select(Path.GetFullPath)
             .OrderBy(path => path, StringComparer.Ordinal)
+            .Where(path => responsibleTranscriptIdentities.Contains(
+                ProductionTranscriptIdentity(path)))
             .Select(path => DescribeProduction(path, terminalAtEndOfFile: true))
-            .Where(stream => stream.TranscriptIdentity is not null
-                && responsibleTranscriptIdentities.Contains(stream.TranscriptIdentity))
             .ToArray();
         CodexTranscriptStream[] streams = [.. current, .. responsibleArchives];
         ThrowIfAmbiguous(streams);
@@ -115,12 +115,23 @@ public static class CodexTranscriptDiscovery
         string path,
         bool terminalAtEndOfFile)
     {
-        string logicalIdentityPath = string.Join(
+        string identityMaterial = ProductionIdentityMaterial(path);
+        string transcriptIdentity = Digest(identityMaterial);
+        CodexTranscriptStream described =
+            Describe(path, identityMaterial, terminalAtEndOfFile);
+        return described.IdentityFailure is null
+            ? described with { TranscriptIdentity = transcriptIdentity }
+            : described;
+    }
+
+    private static string ProductionTranscriptIdentity(string path) =>
+        Digest(ProductionIdentityMaterial(path));
+
+    private static string ProductionIdentityMaterial(string path) =>
+        string.Join(
             "\n",
             "codex-production-session-basename/v1",
             Path.GetFileName(path));
-        return Describe(path, logicalIdentityPath, terminalAtEndOfFile);
-    }
 
     private static void ThrowIfAmbiguous(IReadOnlyList<CodexTranscriptStream> streams)
     {

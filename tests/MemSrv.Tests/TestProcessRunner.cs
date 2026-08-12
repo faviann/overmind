@@ -332,6 +332,7 @@ internal static class TestProcessRunner
 internal sealed class CaptureTracerProcess : IDisposable
 {
     private readonly Process _process;
+    private readonly string? _stateDirectory;
 
     public CaptureTracerProcess(
         Process process,
@@ -339,12 +340,13 @@ internal sealed class CaptureTracerProcess : IDisposable
         int initialReceiptCount)
     {
         _process = process;
-        StateDirectory = stateDirectory ?? throw new InvalidOperationException(
-            "Capture tracer process has no durable-state directory.");
+        _stateDirectory = stateDirectory;
         InitialReceiptCount = initialReceiptCount;
     }
 
-    public string StateDirectory { get; }
+    public string StateDirectory => _stateDirectory
+        ?? throw new InvalidOperationException(
+            "Capture tracer process has no durable-state directory.");
     public int InitialReceiptCount { get; }
     public HashSet<Guid> SeenReceiptIds { get; } = [];
     public StreamReader StandardOutput => _process.StandardOutput;

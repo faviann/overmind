@@ -12,6 +12,27 @@ namespace MemSrv.Tests;
 public sealed class CaptureRuntimeStateTests
 {
     [Fact]
+    public async Task UnsupportedDurableStateContractFailsClosed()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-state-contract-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory, "capture-state.json"),
+            "{\"contractVersion\":2,\"streams\":[]}");
+
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(
+                () => new FileCaptureRuntimeState(directory).ReadAsync());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task MalformedTailsAdvanceOnlyAfterTerminalEvidenceAndRetriesRestartSafely()
     {
         string root = TestProcessRunner.RepoRoot;

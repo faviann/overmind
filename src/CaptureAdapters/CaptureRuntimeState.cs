@@ -258,9 +258,27 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         await using var stream = new FileStream(
             _statePath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        return await JsonSerializer.DeserializeAsync<CaptureRuntimeSnapshot>(
+        CaptureRuntimeSnapshot snapshot =
+            await JsonSerializer.DeserializeAsync<CaptureRuntimeSnapshot>(
                 stream, RuntimeJson.Options, cancellationToken)
             ?? throw new InvalidDataException("Capture runtime state is empty.");
+        if (snapshot.ContractVersion != CaptureRuntimeSnapshot.Empty.ContractVersion
+            || snapshot.Streams is null
+            || snapshot.Streams.Any(stream =>
+                stream is null
+                || string.IsNullOrWhiteSpace(stream.SourceStream)
+                || string.IsNullOrWhiteSpace(stream.TranscriptIdentity)
+                || stream.Queue is null
+                || stream.Queue.Any(item =>
+                    item is null
+                    || string.IsNullOrWhiteSpace(item.SourceStream)
+                    || item.DeterministicLocatorEvidence is null
+                    || string.IsNullOrWhiteSpace(item.RedactedSafeCandidate))))
+        {
+            throw new InvalidDataException(
+                "Capture runtime state has an unsupported contract.");
+        }
+        return snapshot;
     }
 
     public async Task<bool> ClaimAsync(

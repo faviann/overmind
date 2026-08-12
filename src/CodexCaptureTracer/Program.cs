@@ -45,18 +45,27 @@ try
         Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_STATE_DIR")
         ?? transcriptRoot + ".overmind-state");
 }
-catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
 {
-    WriteDiagnostic("capture_runtime_configuration_invalid");
+    WriteDiagnostic("capture_runtime_configuration_invalid", FailureCode(ex));
     return 2;
 }
 
 // Fail closed before any source material is read: a tracer whose rule set is
 // missing, empty, invalid, duplicated, unsupported, or un-loadable refuses to
 // run and says why on stderr. Diagnostics never reach stdout.
-var captureOptions = Configuration.Load(Directory.GetCurrentDirectory());
-var safetyGate = new NeverStoreGate(
-    captureOptions.NeverStorePath, captureOptions.NeverStoreLiteralsPath);
+NeverStoreGate safetyGate;
+try
+{
+    var captureOptions = Configuration.Load(Directory.GetCurrentDirectory());
+    safetyGate = new NeverStoreGate(
+        captureOptions.NeverStorePath, captureOptions.NeverStoreLiteralsPath);
+}
+catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+{
+    WriteDiagnostic("capture_runtime_configuration_invalid", FailureCode(ex));
+    return 3;
+}
 if (!safetyGate.IsConfigured)
 {
     CaptureOutcomeSummary outcome = CaptureOutcomeAggregation.Summarize(
@@ -144,9 +153,11 @@ try
 {
     schedule = CaptureRescanConfiguration.Load();
 }
-catch (InvalidOperationException)
+catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
 {
-    WriteDiagnostic("capture_runtime_configuration_invalid", "invalid_scan_schedule");
+    WriteDiagnostic(
+        "capture_runtime_configuration_invalid",
+        ex is InvalidOperationException ? "invalid_scan_schedule" : FailureCode(ex));
     return 2;
 }
 using var stopping = new CancellationTokenSource();
@@ -182,7 +193,7 @@ try
                         responsibleTranscriptIdentities);
             }
         }
-        catch (Exception ex) when (IsExpectedFilesystemFailure(ex))
+        catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
         {
             WriteFailure(ex);
             return;
@@ -195,17 +206,7 @@ try
                 {
                     await ScanAndDeliverAsync(transcript, token);
                 }
-                catch (Exception ex) when (
-                    ex is CaptureDeliveryException
-                    or HttpRequestException
-                    or CapturePrefixChangedException
-                    or CaptureStreamStoppedException
-                    or CaptureRuntimeConcurrencyException
-                    or InvalidDataException
-                    or JsonException
-                    or SafetyScanException
-                    or SafetyConfigurationException
-                    || IsExpectedFilesystemFailure(ex))
+                catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
                 {
                     // One source stream or endpoint outage cannot cancel
                     // responsibility for later cycles/streams.
@@ -230,6 +231,11 @@ try
 }
 catch (OperationCanceledException) when (stopping.IsCancellationRequested)
 {
+}
+catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+{
+    WriteFailure(ex);
+    return 4;
 }
 
 WriteDiagnostic("capture_runtime_stopped");
@@ -320,11 +326,32 @@ static string FailureCode(Exception failure) => failure switch
     JsonException => "invalid_json",
     SafetyScanException => "safety_scan_failed",
     SafetyConfigurationException => "safety_configuration_failed",
+    InvalidOperationException => "invalid_configuration_or_state",
+    ArgumentException => "invalid_configuration_or_state",
+    NotSupportedException => "unsupported_configuration_or_state",
+    System.Security.Authentication.AuthenticationException => "authentication_failed",
     _ => "scan_failed"
 };
 
 static bool IsExpectedFilesystemFailure(Exception failure) =>
     failure is IOException or UnauthorizedAccessException;
+
+static bool IsExpectedRuntimeFailure(Exception failure) =>
+    failure is not OperationCanceledException
+    && (failure is CaptureDeliveryException
+        or HttpRequestException
+        or CapturePrefixChangedException
+        or CaptureStreamStoppedException
+        or CaptureRuntimeConcurrencyException
+        or InvalidDataException
+        or JsonException
+        or SafetyScanException
+        or SafetyConfigurationException
+        or InvalidOperationException
+        or ArgumentException
+        or NotSupportedException
+        or System.Security.Authentication.AuthenticationException
+        || IsExpectedFilesystemFailure(failure));
 
 static void WriteDiagnostic(string eventName, string? reason = null) =>
     Console.Error.WriteLine(JsonSerializer.Serialize(

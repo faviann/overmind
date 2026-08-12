@@ -42,19 +42,25 @@ public sealed class CaptureScheduleTests
         string sessions = Path.Combine(codexHome, "sessions");
         string archive = Path.Combine(codexHome, "archived_sessions");
         string current = Path.Combine(sessions, "2026", "08", "12", "rollout-current.jsonl");
+        string responsibleActive = Path.Combine(
+            sessions, "2026", "08", "12", "rollout-responsible.jsonl");
         string responsible = Path.Combine(archive, "rollout-responsible.jsonl");
         string unrelated = Path.Combine(archive, "rollout-unrelated.jsonl");
         Directory.CreateDirectory(Path.GetDirectoryName(current)!);
         Directory.CreateDirectory(archive);
         await File.WriteAllTextAsync(current, SessionMetadata("current-session"));
-        await File.WriteAllTextAsync(responsible, SessionMetadata("responsible-session"));
+        await File.WriteAllTextAsync(responsibleActive, SessionMetadata("responsible-session"));
         await File.WriteAllTextAsync(unrelated, SessionMetadata("unrelated-session"));
 
         try
         {
             CodexTranscriptStream responsibleStream = Assert.Single(
-                CodexTranscriptDiscovery.Enumerate(archive),
-                stream => stream.Path == responsible);
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    sessions,
+                    archive,
+                    new HashSet<string>(StringComparer.Ordinal)),
+                stream => stream.Path == responsibleActive);
+            File.Move(responsibleActive, responsible);
 
             CodexTranscriptStream[] discovered =
                 CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
@@ -70,6 +76,63 @@ public sealed class CaptureScheduleTests
             Assert.False(discovered[0].TerminalAtEndOfFile);
             Assert.True(discovered[1].TerminalAtEndOfFile);
             Assert.DoesNotContain(discovered, stream => stream.Path == unrelated);
+        }
+        finally
+        {
+            Directory.Delete(codexHome, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProductionDiscoveryDoesNotOpenAnUnrelatedArchiveBeforeResponsibilityFiltering()
+    {
+        string codexHome = Path.Combine(
+            Path.GetTempPath(), $"capture-prefilter-archive-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(codexHome, "sessions", "2026", "08", "12");
+        string archive = Path.Combine(codexHome, "archived_sessions");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string active = Path.Combine(sessions, "rollout-responsible.jsonl");
+        string responsible = Path.Combine(archive, Path.GetFileName(active));
+        string unrelated = Path.Combine(archive, "rollout-unrelated.jsonl");
+        await File.WriteAllTextAsync(active, SessionMetadata("responsible-session"));
+
+        try
+        {
+            CodexTranscriptStream current = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new HashSet<string>(StringComparer.Ordinal)));
+            File.Move(active, responsible);
+            await File.WriteAllTextAsync(unrelated, "not-json-and-must-not-be-opened\n");
+            using var unrelatedLock = new FileStream(
+                unrelated, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            CodexTranscriptStream selected = Assert.Single(
+                CodexTranscriptDiscovery.EnumerateCurrentSessionsAndResponsibleArchives(
+                    Path.Combine(codexHome, "sessions"),
+                    archive,
+                    new HashSet<string>(StringComparer.Ordinal)
+                    {
+                        current.TranscriptIdentity!
+                    }));
+            var delivered = new List<string>();
+            await CodexTranscriptScanCycle.RunAsync(
+                [selected],
+                (stream, _) =>
+                {
+                    delivered.Add(stream.Path);
+                    return Task.CompletedTask;
+                },
+                failure => throw failure);
+
+            Assert.Equal(responsible, selected.Path);
+            Assert.True(selected.TerminalAtEndOfFile);
+            Assert.Equal(current.TranscriptIdentity, selected.TranscriptIdentity);
+            Assert.Equal(current.SourceStream, selected.SourceStream);
+            Assert.Equal([responsible], delivered);
+            Assert.DoesNotContain("unrelated", selected.Path, StringComparison.Ordinal);
         }
         finally
         {

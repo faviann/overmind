@@ -5,12 +5,17 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
+using Microsoft.IdentityModel.Tokens;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Security.Claims;
+using System.Text;
+using System.Text.Json;
 
 namespace MemSrv.Tests;
 
@@ -73,28 +78,36 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
     }
 
     [Fact]
-    public async Task OidcAuthenticatedOperatorSubjectComesFromTheServerPrincipalNotRequestInput()
+    public async Task AuthorizationCodeCallbackIssuesFixedNonSlidingSessionForProviderSubject()
     {
         const string providerSubject = "authentik|operator-179";
+        using var provider = ConfigureFakeOidcProvider(providerSubject);
+
+        OidcSignIn signIn = await CompleteOidcSignInAsync(provider);
+
         var cookie = _app.Services
             .GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
             .Get(CaptureConsoleAuthentication.CookieScheme);
-        var principal = new ClaimsPrincipal(new ClaimsIdentity(
-            [new Claim("sub", providerSubject)],
-            CaptureConsoleAuthentication.OidcScheme));
-        var ticket = new AuthenticationTicket(
-            principal,
-            new AuthenticationProperties(),
-            CaptureConsoleAuthentication.CookieScheme);
-        string protectedTicket = cookie.TicketDataFormat.Protect(ticket);
+        AuthenticationTicket ticket = Assert.IsType<AuthenticationTicket>(
+            cookie.TicketDataFormat.Unprotect(signIn.ProtectedTicket));
 
-        using var client = new HttpClient();
-        client.DefaultRequestHeaders.Add(
-            "Cookie", $"{cookie.Cookie.Name}={protectedTicket}");
+        Assert.Equal(providerSubject, ticket.Principal.FindFirstValue("sub"));
+        Assert.NotNull(ticket.Properties.IssuedUtc);
+        Assert.NotNull(ticket.Properties.ExpiresUtc);
+        Assert.Equal(
+            TimeSpan.FromHours(8),
+            ticket.Properties.ExpiresUtc.Value - ticket.Properties.IssuedUtc.Value);
+        Assert.False(cookie.SlidingExpiration);
+        Assert.Equal(1, provider.TokenExchangeCount);
+        Assert.Equal("synthetic-authorization-code", provider.ExchangedCode);
+
+        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+        client.DefaultRequestHeaders.Add("Cookie", signIn.CookieHeader);
         using var response = await client.GetAsync(
             $"{_baseUrl}/capture/console?operator=caller-supplied");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(response.Headers.TryGetValues("Set-Cookie", out _));
         string console = await response.Content.ReadAsStringAsync();
         Assert.Contains(providerSubject, console);
         Assert.DoesNotContain("caller-supplied", console);
@@ -123,6 +136,9 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
     [Fact]
     public async Task ProviderOutagePreservesLocalSessionOnlyUntilFixedExpirationAndOtherHttpSurfacesRemainAvailable()
     {
+        using var provider = ConfigureFakeOidcProvider("authentik|outage-operator");
+        OidcSignIn signIn = await CompleteOidcSignInAsync(provider);
+
         var oidc = _app.Services
             .GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>()
             .Get(CaptureConsoleAuthentication.OidcScheme);
@@ -139,10 +155,10 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
             using var refused = await console.GetAsync($"{_baseUrl}/capture/console");
             Assert.False(refused.IsSuccessStatusCode);
 
-            console.DefaultRequestHeaders.Add("Cookie", ConsoleCookie(
-                cookie, DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddHours(7)));
+            console.DefaultRequestHeaders.Add("Cookie", signIn.CookieHeader);
             using var acceptedSession = await console.GetAsync($"{_baseUrl}/capture/console");
             Assert.Equal(HttpStatusCode.OK, acceptedSession.StatusCode);
+            Assert.False(acceptedSession.Headers.TryGetValues("Set-Cookie", out _));
         }
 
         using (var expiredConsole = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }))
@@ -196,6 +212,63 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
                 AuthorizationEndpoint = "https://authentik.test/application/o/authorize/",
             });
     }
+
+    private FakeOidcProvider ConfigureFakeOidcProvider(string providerSubject)
+    {
+        var provider = new FakeOidcProvider(
+            providerSubject,
+            $"https://{new Uri(_baseUrl).Authority}/capture/console/signin-oidc");
+        var oidc = _app.Services
+            .GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>()
+            .Get(CaptureConsoleAuthentication.OidcScheme);
+        oidc.ConfigurationManager = new StaticConfigurationManager<OpenIdConnectConfiguration>(
+            provider.Configuration);
+        oidc.Backchannel = new HttpClient(provider);
+        return provider;
+    }
+
+    private async Task<OidcSignIn> CompleteOidcSignInAsync(FakeOidcProvider provider)
+    {
+        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
+        using var challenge = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/capture/console");
+        challenge.Headers.Add("X-Forwarded-Proto", "https");
+        using var challenged = await client.SendAsync(challenge);
+
+        Assert.Equal(HttpStatusCode.Redirect, challenged.StatusCode);
+        Uri authorization = Assert.IsType<Uri>(challenged.Headers.Location);
+        var parameters = ParseQuery(authorization.Query);
+        provider.Nonce = parameters["nonce"];
+        Assert.False(string.IsNullOrWhiteSpace(parameters["state"]));
+
+        string correlationCookies = string.Join("; ", challenged.Headers.GetValues("Set-Cookie")
+            .Select(header => header[..header.IndexOf(';')]));
+        using var callback = new HttpRequestMessage(
+            HttpMethod.Post, $"{_baseUrl}/capture/console/signin-oidc");
+        callback.Headers.Add("X-Forwarded-Proto", "https");
+        callback.Headers.Add("Cookie", correlationCookies);
+        callback.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["code"] = "synthetic-authorization-code",
+            ["state"] = parameters["state"],
+        });
+        using var completed = await client.SendAsync(callback);
+
+        Assert.Equal(HttpStatusCode.Redirect, completed.StatusCode);
+        Assert.Equal("/capture/console", completed.Headers.Location?.OriginalString);
+        string applicationCookie = completed.Headers.GetValues("Set-Cookie")
+            .Single(header => header.StartsWith("__Secure-MemSrv-CaptureConsole=", StringComparison.Ordinal));
+        string cookiePair = applicationCookie[..applicationCookie.IndexOf(';')];
+        return new OidcSignIn(cookiePair, cookiePair[(cookiePair.IndexOf('=') + 1)..]);
+    }
+
+    private static Dictionary<string, string> ParseQuery(string query) => query
+        .TrimStart('?')
+        .Split('&', StringSplitOptions.RemoveEmptyEntries)
+        .Select(part => part.Split('=', 2))
+        .ToDictionary(
+            part => Uri.UnescapeDataString(part[0]),
+            part => Uri.UnescapeDataString(part.Length == 2 ? part[1] : ""),
+            StringComparer.Ordinal);
 
     private static string ConsoleCookie(
         CookieAuthenticationOptions cookie, DateTimeOffset issuedUtc, DateTimeOffset expiresUtc)
@@ -267,6 +340,88 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
 
         public void RequestRefresh()
         {
+        }
+    }
+
+    private sealed record OidcSignIn(string CookieHeader, string ProtectedTicket);
+
+    private sealed class FakeOidcProvider : HttpMessageHandler, IDisposable
+    {
+        private const string Issuer = "https://authentik.test/application/o/capture-console/";
+        private readonly RSA _rsa = RSA.Create(2048);
+        private readonly string _providerSubject;
+
+        public FakeOidcProvider(string providerSubject, string expectedRedirectUri)
+        {
+            _providerSubject = providerSubject;
+            ExpectedRedirectUri = expectedRedirectUri;
+            var signingKey = new RsaSecurityKey(_rsa) { KeyId = "synthetic-oidc-signing-key" };
+            SigningCredentials = new SigningCredentials(signingKey, SecurityAlgorithms.RsaSha256);
+            Configuration = new OpenIdConnectConfiguration
+            {
+                Issuer = Issuer,
+                AuthorizationEndpoint = $"{Issuer}authorize/",
+                TokenEndpoint = $"{Issuer}token/",
+            };
+            Configuration.SigningKeys.Add(signingKey);
+        }
+
+        public OpenIdConnectConfiguration Configuration { get; }
+        private SigningCredentials SigningCredentials { get; }
+        private string ExpectedRedirectUri { get; }
+        public string Nonce { get; set; } = "";
+        public int TokenExchangeCount { get; private set; }
+        public string? ExchangedCode { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Assert.Equal(Configuration.TokenEndpoint, request.RequestUri?.AbsoluteUri);
+            Assert.NotNull(request.Content);
+            string form = await request.Content.ReadAsStringAsync(cancellationToken);
+            var parameters = ParseQuery(form);
+            Assert.Equal("authorization_code", parameters["grant_type"]);
+            Assert.Equal("capture-console-test", parameters["client_id"]);
+            Assert.Equal(ExpectedRedirectUri, parameters["redirect_uri"]);
+            ExchangedCode = parameters["code"];
+            Assert.True(parameters.ContainsKey("code_verifier"));
+            TokenExchangeCount++;
+
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            string idToken = new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
+            {
+                Issuer = Issuer,
+                Audience = "capture-console-test",
+                Subject = new ClaimsIdentity(
+                [
+                    new Claim("sub", _providerSubject),
+                    new Claim("nonce", Nonce),
+                ]),
+                IssuedAt = now.UtcDateTime,
+                NotBefore = now.AddMinutes(-1).UtcDateTime,
+                Expires = now.AddMinutes(5).UtcDateTime,
+                SigningCredentials = SigningCredentials,
+            });
+            string json = JsonSerializer.Serialize(new
+            {
+                access_token = "synthetic-access-token",
+                token_type = "Bearer",
+                expires_in = 300,
+                id_token = idToken,
+            });
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            };
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _rsa.Dispose();
+            }
+            base.Dispose(disposing);
         }
     }
 }

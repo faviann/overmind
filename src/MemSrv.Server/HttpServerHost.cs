@@ -144,7 +144,7 @@ public static class HttpServerHost
         });
 
         // The focused console foundation intentionally exposes no business
-        // operator actions yet. Even this entry action goes through the one
+        // operator actions yet. This focused entry route goes through the one
         // identity seam that derives the provider subject from the OIDC cookie.
         if (captureConsoleEnabled)
         {

@@ -136,8 +136,13 @@ What it asserts:
 - Bootstrap rows exist: the `memory-system` and `homelab` namespaces and the
   default (`*`/`*`) retrieval config.
 - The capture slice's binding, append-only route-policy, stream, observation,
-  event, and relationship tables exist; immutable capture-ledger triggers and
-  restricted grants are present; and `capture/unscoped` exists.
+  event, relationship, pairing-request coordination, and pairing-audit tables
+  exist; immutable capture-ledger triggers and restricted grants are present;
+  and `capture/unscoped` exists.
+- `memsrv` has the expected SELECT, INSERT, and UPDATE grants on mutable pairing
+  request state. Pairing audit has the `capture_pairing_audit_immutable`
+  trigger, the expected SELECT and INSERT grants, no UPDATE grant, and no
+  DELETE grant.
 
 Run it against a **disposable** target only — dev/test/CI use a locally
 provisioned database, never the persistent production `memory`.

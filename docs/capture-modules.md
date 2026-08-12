@@ -1,9 +1,9 @@
 # Capture modules
 
-The capture spine (issue #74, stabilized by #120 and routed by #77) is six
-public modules in `MemSrv.Core`, plus the never-store gate (#76) that all of
-them cross. No module requires a caller to understand another's rules. This
-note records the shape that exists; it decides nothing new.
+The capture spine (issue #74, stabilized by #120 and routed by #77) comprises
+the public modules listed below. Capture paths cross the never-store gate
+(#76). No module requires a caller to understand another's rules. This note
+records the shape that exists; it decides nothing new.
 
 Source interpretation before this spine is described by the
 [harness-neutral capture adapter contract](capture-adapter-contract.md).

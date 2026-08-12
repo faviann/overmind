@@ -436,11 +436,12 @@ public sealed class CaptureAdapterConformanceTests : HttpSeamTestBase
         await File.WriteAllTextAsync(credentialPath, credential);
         try
         {
-            await RunMemCtlAsync(
+            string enrollment = await RunMemCtlAsync(
                 "capture", "enroll", stableName,
                 "--harness", "codex",
                 "--agent-id", $"capture:{stableName}",
                 "--credential-file", credentialPath);
+            Assert.DoesNotContain("no supported capture adapter", enrollment);
 
             var adapter = new CodexJsonlAdapter();
             using var client = new HttpClient { BaseAddress = new Uri(_baseUrl) };

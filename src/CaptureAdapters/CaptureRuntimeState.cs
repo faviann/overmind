@@ -404,14 +404,24 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
             return false;
         }
 
+        CaptureServerReceiptState? receipt = stream.LastServerReceipt;
+        long? expectedPosition = receipt is null
+            ? 0
+            : receipt.SourcePosition < long.MaxValue
+                ? receipt.SourcePosition + 1
+                : null;
         long previousPosition = -1;
         foreach (CaptureRuntimeQueueItem item in stream.Queue)
         {
-            if (item.SourcePosition <= previousPosition)
+            if (expectedPosition is not long expected
+                || item.SourcePosition != expected)
             {
                 return false;
             }
             previousPosition = item.SourcePosition;
+            expectedPosition = item.SourcePosition < long.MaxValue
+                ? item.SourcePosition + 1
+                : null;
         }
         if (stream.Queue.Count > 0
             && (previousPosition != enqueuedThrough
@@ -428,7 +438,6 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
             return false;
         }
 
-        CaptureServerReceiptState? receipt = stream.LastServerReceipt;
         if (receipt is null)
         {
             return stream.CanonicalSourceStreamUuid is null && stream.Queue.Count > 0;
@@ -447,7 +456,7 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
         }
         return stream.Queue.Count == 0
             ? receipt.SourcePosition == enqueuedThrough
-            : receipt.SourcePosition < stream.Queue[0].SourcePosition;
+            : true;
     }
 
     private static bool IsValidQueueItem(
@@ -487,7 +496,7 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
                 && locator.ByteOffset >= 0
                 && locator.ByteLength > 0
                 && checked(locator.ByteOffset + locator.ByteLength)
-                    <= locator.PrefixEvidence.ByteLength;
+                    == locator.PrefixEvidence.ByteLength;
         }
         catch (OverflowException)
         {
@@ -561,6 +570,13 @@ public sealed class FileCaptureRuntimeState : ICaptureRuntimeState
             == true)
         {
             return false;
+        }
+        long expectedSourcePosition = stream is null
+            ? 0
+            : checked(stream.EnqueuedThrough!.Value + 1);
+        if (claim.SourcePosition != expectedSourcePosition)
+        {
+            throw UnsupportedState();
         }
 
         var queue = stream?.Queue.ToList() ?? [];

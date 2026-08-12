@@ -29,9 +29,11 @@ key and provides no captured-content reads or database access.
 ## Run the immutable image
 
 Copy `.env.capture.example` to an ignored operator-owned environment file,
-replace every placeholder, and use an immutable version or registry digest:
+replace every placeholder, restrict it to the operator before starting Compose,
+and use an immutable version or registry digest:
 
 ```sh
+chmod 0600 .env.capture
 docker compose --env-file .env.capture -f compose.capture.yaml up -d
 ```
 

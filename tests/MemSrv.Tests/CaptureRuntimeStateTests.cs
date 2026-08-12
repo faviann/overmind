@@ -277,6 +277,7 @@ public sealed class CaptureRuntimeStateTests
     [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":null}")]
     [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":-1,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}}")]
     [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":10,\"byteLength\":2,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":11,\"sha256\":\"prefix\"}}")]
+    [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":0,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":2,\"sha256\":\"prefix\"}}")]
     [InlineData("{\"transcriptIdentity\":\"transcript\",\"sourcePosition\":0,\"byteOffset\":9223372036854775807,\"byteLength\":1,\"recordSha256\":\"record\",\"prefixEvidence\":{\"byteLength\":1,\"sha256\":\"prefix\"}}")]
     public async Task RuntimeStateRejectsInvalidNestedLocatorEvidenceAsInvalidData(
         string locatorEvidence)
@@ -382,7 +383,11 @@ public sealed class CaptureRuntimeStateTests
                 Snapshot(stream.Replace("\"locatorIdentity\":\"receipt-0\"", "\"locatorIdentity\":\"   \"", StringComparison.Ordinal)),
                 Snapshot(stream.Replace("b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5", "00000000-0000-0000-0000-000000000000", StringComparison.Ordinal)),
                 Snapshot(stream.Replace("a4d86f4c-e045-4761-929b-eec9e5959f95", "00000000-0000-0000-0000-000000000000", StringComparison.Ordinal)),
-                Snapshot(stream.Replace("\"canonicalSourceStreamUuid\":\"a4d86f4c-e045-4761-929b-eec9e5959f95\"", "\"canonicalSourceStreamUuid\":\"646daf38-73d9-4c9e-8a84-13e1fc5667f2\"", StringComparison.Ordinal))
+                Snapshot(stream.Replace("\"canonicalSourceStreamUuid\":\"a4d86f4c-e045-4761-929b-eec9e5959f95\"", "\"canonicalSourceStreamUuid\":\"646daf38-73d9-4c9e-8a84-13e1fc5667f2\"", StringComparison.Ordinal)),
+                """{"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":1,"sha256":"prefix-1"},"enqueuedThrough":1,"queue":[{"sourceStream":"stream","sourcePosition":1,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":1,"byteOffset":0,"byteLength":1,"recordSha256":"record-1","prefixEvidence":{"byteLength":1,"sha256":"prefix-1"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}""",
+                """{"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":3,"sha256":"prefix-2"},"enqueuedThrough":2,"queue":[{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":0,"byteOffset":0,"byteLength":1,"recordSha256":"record-0","prefixEvidence":{"byteLength":1,"sha256":"prefix-0"}},"redactedSafeCandidate":"{}"},{"sourceStream":"stream","sourcePosition":2,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":2,"byteOffset":2,"byteLength":1,"recordSha256":"record-2","prefixEvidence":{"byteLength":3,"sha256":"prefix-2"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}""",
+                """{"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":3,"sha256":"prefix-2"},"enqueuedThrough":2,"queue":[{"sourceStream":"stream","sourcePosition":2,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":2,"byteOffset":2,"byteLength":1,"recordSha256":"record-2","prefixEvidence":{"byteLength":3,"sha256":"prefix-2"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":{"sourcePosition":0,"locatorIdentity":"receipt-0","status":"new","observationUuid":"b6cb766b-b9c0-4d93-a1bb-4ddd3c6db8f5","sourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"},"canonicalSourceStreamUuid":"a4d86f4c-e045-4761-929b-eec9e5959f95"}]}""",
+                """{"contractVersion":1,"streams":[{"sourceStream":"stream","transcriptIdentity":"transcript","verifiedPrefix":{"byteLength":2,"sha256":"prefix-0"},"enqueuedThrough":0,"queue":[{"sourceStream":"stream","sourcePosition":0,"deterministicLocatorEvidence":{"transcriptIdentity":"transcript","sourcePosition":0,"byteOffset":0,"byteLength":1,"recordSha256":"record-0","prefixEvidence":{"byteLength":2,"sha256":"prefix-0"}},"redactedSafeCandidate":"{}"}],"lastServerReceipt":null,"canonicalSourceStreamUuid":null}]}"""
             };
         }
     }
@@ -2158,6 +2163,95 @@ public sealed class CaptureRuntimeStateTests
     }
 
     [Fact]
+    public async Task FirstClaimMustBeginAtSourcePositionZero()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-first-gap-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => state.ClaimAsync(
+                QueueItem("stream", 1, 10),
+                expectedPrefix: null,
+                verifiedPrefixMatchesSnapshot: _ => false));
+
+            Assert.Empty((await state.ReadAsync()).Streams);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ClaimCannotSkipAnEnqueuedSourcePosition()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-enqueued-gap-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem first = QueueItem("stream", 0, 10);
+            Assert.True(await state.ClaimAsync(
+                first, expectedPrefix: null, verifiedPrefixMatchesSnapshot: _ => false));
+            CaptureRuntimeSnapshot before = await state.ReadAsync();
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => state.ClaimAsync(
+                QueueItem("stream", 2, 20),
+                first.DeterministicLocatorEvidence.PrefixEvidence,
+                _ => false));
+
+            Assert.Equal(
+                JsonSerializer.Serialize(before),
+                JsonSerializer.Serialize(await state.ReadAsync()));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ClaimCannotSkipThePositionAfterAConclusiveReceipt()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-receipt-gap-{Guid.NewGuid():N}");
+        try
+        {
+            var state = new FileCaptureRuntimeState(directory);
+            CaptureRuntimeQueueItem first = QueueItem("stream", 0, 10);
+            Assert.True(await state.ClaimAsync(
+                first, expectedPrefix: null, verifiedPrefixMatchesSnapshot: _ => false));
+            await state.RecordServerReceiptAsync(
+                "stream",
+                new CaptureServerReceiptState(
+                    0,
+                    first.DeterministicLocatorEvidence.Identity,
+                    "new",
+                    Guid.NewGuid(),
+                    Guid.NewGuid()));
+            CaptureRuntimeSnapshot before = await state.ReadAsync();
+
+            await Assert.ThrowsAsync<InvalidDataException>(() => state.ClaimAsync(
+                QueueItem("stream", 2, 20),
+                first.DeterministicLocatorEvidence.PrefixEvidence,
+                _ => false));
+
+            Assert.Equal(
+                JsonSerializer.Serialize(before),
+                JsonSerializer.Serialize(await state.ReadAsync()));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task StoppedStreamRetainsResponsibilityAndCannotAdvanceEitherProgressBoundary()
     {
         string directory = Path.Combine(
@@ -3317,6 +3411,78 @@ public sealed class CaptureRuntimeStateTests
         }
     }
 
+    [Theory]
+    [InlineData("sourcePosition")]
+    [InlineData("status")]
+    [InlineData("observationUuid")]
+    [InlineData("observation")]
+    [InlineData("locator")]
+    public async Task PackagedTracerRejectsDuplicateReceiptPropertiesWithoutAdvancingState(
+        string duplicateProperty)
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string directory = Path.Combine(
+            Path.GetTempPath(), $"capture-runtime-receipt-duplicate-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(directory, "rollout.jsonl");
+        string stateDirectory = Path.Combine(directory, "state");
+        Directory.CreateDirectory(directory);
+        File.Copy(Path.Combine(root, "fixtures/transcripts/codex-synthetic.jsonl"), transcript);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Guid acceptedObservation = Guid.NewGuid();
+        Guid rejectedObservation = Guid.NewGuid();
+        using var serverCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task<int> server = ServeResponsesAsync(
+            listener,
+            [
+                (HttpStatusCode.OK, Receipt(0, acceptedObservation)),
+                (HttpStatusCode.OK, Receipt(1, rejectedObservation))
+            ],
+            serverCancellation.Token,
+            mutateResponse: (requestCount, body) => requestCount == 2
+                ? AddDuplicateReceiptProperty(body, duplicateProperty)
+                : body);
+
+        try
+        {
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
+                TracerEnvironment(transcript, stateDirectory, port));
+            await serverCancellation.CancelAsync();
+
+            Assert.False(result.Succeeded);
+            Assert.Equal(2, await server);
+            Assert.Empty(result.Stdout);
+            Assert.DoesNotContain(acceptedObservation.ToString(), result.Stderr,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(rejectedObservation.ToString(), result.Stderr,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("sourcePosition", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("observationUuid", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("sourceStreamUuid", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("byteOffset", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("byteLength", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("locator", result.Stderr, StringComparison.OrdinalIgnoreCase);
+            JsonElement diagnostic = result.Stderr.Split(
+                    Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line => line.GetProperty("event").GetString() == "capture_cycle_failed");
+            Assert.Equal("invalid_source_or_receipt", diagnostic.GetProperty("reason").GetString());
+
+            CaptureRuntimeStreamState stream = Assert.Single(
+                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
+            Assert.Equal([1L, 2L], stream.Queue.Select(item => item.SourcePosition));
+            Assert.Equal(0, stream.LastServerReceipt?.SourcePosition);
+            Assert.Equal(acceptedObservation, stream.LastServerReceipt?.ObservationUuid);
+        }
+        finally
+        {
+            await serverCancellation.CancelAsync();
+            listener.Stop();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static Dictionary<string, string> TracerEnvironment(
         string transcript,
         string stateDirectory,
@@ -3373,7 +3539,8 @@ public sealed class CaptureRuntimeStateTests
         TcpListener listener,
         IReadOnlyList<(HttpStatusCode Status, string Body)> responses,
         CancellationToken cancellationToken,
-        Action<int>? beforeResponse = null)
+        Action<int>? beforeResponse = null,
+        Func<int, string, string>? mutateResponse = null)
     {
         int requestCount = 0;
         Guid sourceStreamUuid = Guid.NewGuid();
@@ -3389,6 +3556,8 @@ public sealed class CaptureRuntimeStateTests
                 beforeResponse?.Invoke(requestCount);
                 string responseBody = AddRequestObservation(
                     body, requestBody, sourceStreamUuid);
+                responseBody = mutateResponse?.Invoke(requestCount, responseBody)
+                    ?? responseBody;
                 byte[] bodyBytes = Encoding.UTF8.GetBytes(responseBody);
                 byte[] response = Encoding.ASCII.GetBytes(
                     $"HTTP/1.1 {(int)status} {status}\r\n" +
@@ -3404,6 +3573,27 @@ public sealed class CaptureRuntimeStateTests
         }
 
         return requestCount;
+    }
+
+    private static string AddDuplicateReceiptProperty(
+        string receipt,
+        string propertyName)
+    {
+        (string target, string replacement) = propertyName switch
+        {
+            "sourcePosition" => ("\"sourcePosition\":", "\"sourcePosition\":999,\"sourcePosition\":"),
+            "status" => ("\"status\":", "\"status\":\"failed\",\"status\":"),
+            "observationUuid" => ("\"observationUuid\":", "\"observationUuid\":\"00000000-0000-0000-0000-000000000000\",\"observationUuid\":"),
+            "observation" => ("\"observation\":", "\"observation\":null,\"observation\":"),
+            "locator" => ("\"locator\":", "\"locator\":null,\"locator\":"),
+            _ => throw new ArgumentOutOfRangeException(nameof(propertyName))
+        };
+        int index = receipt.IndexOf(target, StringComparison.Ordinal);
+        Assert.True(index >= 0);
+        return string.Concat(
+            receipt.AsSpan(0, index),
+            replacement,
+            receipt.AsSpan(index + target.Length));
     }
 
     private static string AddRequestObservation(

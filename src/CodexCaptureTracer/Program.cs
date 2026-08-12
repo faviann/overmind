@@ -257,6 +257,7 @@ static CaptureServerReceiptState ValidateReceipt(
     using JsonDocument document = parsed;
     JsonElement root = document.RootElement;
     if (root.ValueKind != JsonValueKind.Object
+        || HasDuplicatePropertyNames(root)
         || !TryGetInt64(root, "sourcePosition", out long receiptSourcePosition)
         || receiptSourcePosition < 0
         || receiptSourcePosition != queued.SourcePosition
@@ -293,6 +294,28 @@ static CaptureServerReceiptState ValidateReceipt(
         status,
         observationUuid,
         sourceStreamUuid);
+}
+
+static bool HasDuplicatePropertyNames(JsonElement value)
+{
+    if (value.ValueKind == JsonValueKind.Array)
+    {
+        return value.EnumerateArray().Any(HasDuplicatePropertyNames);
+    }
+    if (value.ValueKind != JsonValueKind.Object)
+    {
+        return false;
+    }
+
+    var names = new HashSet<string>(StringComparer.Ordinal);
+    foreach (JsonProperty property in value.EnumerateObject())
+    {
+        if (!names.Add(property.Name) || HasDuplicatePropertyNames(property.Value))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool TryGetInt64(JsonElement parent, string propertyName, out long value)

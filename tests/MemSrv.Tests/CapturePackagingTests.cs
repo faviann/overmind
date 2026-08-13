@@ -163,10 +163,20 @@ public sealed class CapturePackagingTests
         const string privateSession = "same-private-session";
         await File.WriteAllTextAsync(first, Transcript(privateSession));
         await File.WriteAllTextAsync(second, Transcript(privateSession));
-        using var listener = new System.Net.Sockets.TcpListener(
-            System.Net.IPAddress.Loopback, 0);
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
         listener.Start();
-        int port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        Task server = Task.Run(async () =>
+        {
+            HttpListenerContext poll = await listener.GetContextAsync();
+            Assert.Equal("/capture/v1/instructions", poll.Request.Url!.AbsolutePath);
+            await RespondJsonAsync(poll, new
+            {
+                paused = false,
+                instructions = Array.Empty<object>()
+            });
+        });
         Dictionary<string, string> environment = ProductionEnvironment(
             root, sessions, archive);
         environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
@@ -175,9 +185,9 @@ public sealed class CapturePackagingTests
         {
             var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
                 environment, "\"event\":\"capture_cycle_failed\"");
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.Empty(result.Stdout);
-            Assert.False(listener.Pending());
             Assert.False(File.Exists(Path.Combine(state, "capture-state.json")));
             AssertContentFreeJsonDiagnostics(
                 result.Stderr,
@@ -737,8 +747,12 @@ public sealed class CapturePackagingTests
         string root = Path.Combine(Path.GetTempPath(), $"capture-instruction-{Guid.NewGuid():N}");
         string sessions = Path.Combine(root, "sessions");
         string archive = Path.Combine(root, "archive");
-        Directory.CreateDirectory(sessions);
+        string first = Path.Combine(sessions, "2026", "08", "13", "rollout-first.jsonl");
+        string second = Path.Combine(sessions, "2026", "08", "13", "rollout-second.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(first)!);
         Directory.CreateDirectory(archive);
+        await File.WriteAllTextAsync(first, Transcript("same-private-session"));
+        await File.WriteAllTextAsync(second, Transcript("same-private-session"));
         Guid instructionId = Guid.NewGuid();
         using var listener = new HttpListener();
         int port = FreePort();
@@ -782,9 +796,238 @@ public sealed class CapturePackagingTests
                 environment, "\"event\":\"capture_policy_paused\"");
             await server.WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Empty(result.Stdout);
+            Assert.DoesNotContain("capture_cycle_failed", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("same-private-session", result.Stderr, StringComparison.Ordinal);
+            Assert.False(File.Exists(Path.Combine(root, "state", "capture-state.json")));
             JsonElement state = JsonDocument.Parse(await File.ReadAllTextAsync(
                 Path.Combine(root, "state", "capture-instruction-policy.json"))).RootElement;
             Assert.True(state.GetProperty("paused").GetBoolean());
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerAcknowledgesScanOnlyAfterCompletedTranscriptDelivery()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-scan-instruction-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "13");
+        string archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        await File.WriteAllTextAsync(
+            Path.Combine(sessions, "rollout-scan.jsonl"), Transcript("scan-session"));
+        Guid instructionId = Guid.NewGuid();
+        Guid sourceStreamUuid = Guid.NewGuid();
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Task server = Task.Run(async () =>
+        {
+            HttpListenerContext poll = await listener.GetContextAsync();
+            Assert.Equal("/capture/v1/instructions", poll.Request.Url!.AbsolutePath);
+            await RespondJsonAsync(poll, new
+            {
+                paused = false,
+                instructions = new[]
+                {
+                    new { instructionId, operation = "scan", createdAt = DateTimeOffset.UtcNow }
+                }
+            });
+            for (int delivered = 0; delivered < 2; delivered++)
+            {
+                HttpListenerContext observation = await listener.GetContextAsync();
+                Assert.Equal("/capture/v1/observations", observation.Request.Url!.AbsolutePath);
+                await RespondWithObservationReceiptAsync(observation, sourceStreamUuid);
+            }
+            HttpListenerContext acknowledgement = await listener.GetContextAsync();
+            Assert.Equal(
+                $"/capture/v1/instructions/{instructionId}/acknowledge",
+                acknowledgement.Request.Url!.AbsolutePath);
+            await RespondJsonAsync(acknowledgement, new
+            {
+                instructionId, acknowledgedAt = DateTimeOffset.UtcNow
+            });
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(environment);
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            await server.WaitAsync(TimeSpan.FromSeconds(10));
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Assert.Contains("capture_delivery_accepted", await stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerAcknowledgesRetryOnlyAfterDurableQueueDelivery()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-retry-instruction-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "13");
+        string archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        await File.WriteAllTextAsync(
+            Path.Combine(sessions, "rollout-retry.jsonl"), Transcript("retry-session"));
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+
+        try
+        {
+            _ = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"reason\":\"endpoint_unavailable\"");
+            Guid instructionId = Guid.NewGuid();
+            Guid sourceStreamUuid = Guid.NewGuid();
+            using var listener = new HttpListener();
+            int port = FreePort();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            listener.Start();
+            Task server = Task.Run(async () =>
+            {
+                HttpListenerContext poll = await listener.GetContextAsync();
+                await RespondJsonAsync(poll, new
+                {
+                    paused = false,
+                    instructions = new[]
+                    {
+                        new { instructionId, operation = "retry", createdAt = DateTimeOffset.UtcNow }
+                    }
+                });
+                for (int delivered = 0; delivered < 2; delivered++)
+                {
+                    HttpListenerContext observation = await listener.GetContextAsync();
+                    Assert.Equal("/capture/v1/observations", observation.Request.Url!.AbsolutePath);
+                    await RespondWithObservationReceiptAsync(observation, sourceStreamUuid);
+                }
+                HttpListenerContext acknowledgement = await listener.GetContextAsync();
+                Assert.Equal(
+                    $"/capture/v1/instructions/{instructionId}/acknowledge",
+                    acknowledgement.Request.Url!.AbsolutePath);
+                await RespondJsonAsync(acknowledgement, new
+                {
+                    instructionId, acknowledgedAt = DateTimeOffset.UtcNow
+                });
+            });
+            environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+            using var process = TestProcessRunner.StartCaptureTracer(environment);
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            await server.WaitAsync(TimeSpan.FromSeconds(10));
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Assert.Contains("capture_delivery_accepted", await stderr, StringComparison.Ordinal);
+            listener.Stop();
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PausedMixtureDefersScanAndRetryAcknowledgementsUntilResumedWork()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-paused-mixture-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "13");
+        string archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        await File.WriteAllTextAsync(
+            Path.Combine(sessions, "rollout-mixture.jsonl"), Transcript("mixture-session"));
+        Guid pauseId = Guid.NewGuid();
+        Guid scanId = Guid.NewGuid();
+        Guid retryId = Guid.NewGuid();
+        Guid resumeId = Guid.NewGuid();
+        Guid sourceStreamUuid = Guid.NewGuid();
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Task server = Task.Run(async () =>
+        {
+            HttpListenerContext firstPoll = await listener.GetContextAsync();
+            await RespondJsonAsync(firstPoll, new
+            {
+                paused = true,
+                instructions = new object[]
+                {
+                    new { instructionId = pauseId, operation = "pause", createdAt = DateTimeOffset.UtcNow },
+                    new { instructionId = scanId, operation = "scan", createdAt = DateTimeOffset.UtcNow },
+                    new { instructionId = retryId, operation = "retry", createdAt = DateTimeOffset.UtcNow }
+                }
+            });
+            HttpListenerContext pauseAck = await listener.GetContextAsync();
+            Assert.Equal(
+                $"/capture/v1/instructions/{pauseId}/acknowledge",
+                pauseAck.Request.Url!.AbsolutePath);
+            await RespondJsonAsync(pauseAck, new
+            {
+                instructionId = pauseId, acknowledgedAt = DateTimeOffset.UtcNow
+            });
+
+            HttpListenerContext secondPoll = await listener.GetContextAsync();
+            Assert.Equal("/capture/v1/instructions", secondPoll.Request.Url!.AbsolutePath);
+            await RespondJsonAsync(secondPoll, new
+            {
+                paused = false,
+                instructions = new object[]
+                {
+                    new { instructionId = scanId, operation = "scan", createdAt = DateTimeOffset.UtcNow },
+                    new { instructionId = retryId, operation = "retry", createdAt = DateTimeOffset.UtcNow },
+                    new { instructionId = resumeId, operation = "resume", createdAt = DateTimeOffset.UtcNow }
+                }
+            });
+            for (int delivered = 0; delivered < 2; delivered++)
+            {
+                HttpListenerContext observation = await listener.GetContextAsync();
+                Assert.Equal("/capture/v1/observations", observation.Request.Url!.AbsolutePath);
+                await RespondWithObservationReceiptAsync(observation, sourceStreamUuid);
+            }
+            foreach (Guid instructionId in new[] { scanId, retryId, resumeId })
+            {
+                HttpListenerContext acknowledgement = await listener.GetContextAsync();
+                Assert.Equal(
+                    $"/capture/v1/instructions/{instructionId}/acknowledge",
+                    acknowledgement.Request.Url!.AbsolutePath);
+                await RespondJsonAsync(acknowledgement, new
+                {
+                    instructionId, acknowledgedAt = DateTimeOffset.UtcNow
+                });
+            }
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(environment);
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            await server.WaitAsync(TimeSpan.FromSeconds(10));
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            string diagnostics = await stderr;
+            Assert.Contains("capture_policy_paused", diagnostics, StringComparison.Ordinal);
+            Assert.Contains("capture_delivery_accepted", diagnostics, StringComparison.Ordinal);
         }
         finally
         {
@@ -833,8 +1076,22 @@ public sealed class CapturePackagingTests
                     }
                 }) + "\n");
 
+            using var listener = new HttpListener();
+            int port = FreePort();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            listener.Start();
+            Task server = Task.Run(async () =>
+            {
+                HttpListenerContext poll = await listener.GetContextAsync();
+                Assert.Equal("/capture/v1/instructions", poll.Request.Url!.AbsolutePath);
+                poll.Response.StatusCode = 503;
+                poll.Response.Close();
+            });
+            environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
             var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
                 environment, "\"event\":\"capture_cycle_failed\"");
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.Empty(result.Stdout);
             Assert.Contains("\"reason\":\"endpoint_unavailable\"", result.Stderr);
@@ -921,7 +1178,13 @@ public sealed class CapturePackagingTests
             });
             poll.Response.StatusCode = 200;
             poll.Response.Close();
-            listener.Stop();
+            Guid sourceStreamUuid = Guid.NewGuid();
+            for (int delivered = 0; delivered < 2; delivered++)
+            {
+                HttpListenerContext observation = await listener.GetContextAsync();
+                Assert.Equal("/capture/v1/observations", observation.Request.Url!.AbsolutePath);
+                await RespondWithObservationReceiptAsync(observation, sourceStreamUuid);
+            }
         });
         Dictionary<string, string> environment = ProductionEnvironment(
             root, Path.Combine(root, "sessions"), archive);
@@ -929,16 +1192,18 @@ public sealed class CapturePackagingTests
 
         try
         {
-            _ = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
-                environment, "\"event\":\"capture_cycle_failed\"");
-            await server.WaitAsync(TimeSpan.FromSeconds(5));
+            using var process = TestProcessRunner.StartCaptureTracer(environment);
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            await server.WaitAsync(TimeSpan.FromSeconds(10));
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
 
+            Assert.Empty(await stdout);
+            Assert.Contains("capture_delivery_accepted", await stderr, StringComparison.Ordinal);
             JsonElement policy = JsonDocument.Parse(await File.ReadAllTextAsync(
                 Path.Combine(state, "capture-instruction-policy.json"))).RootElement;
             Assert.False(policy.GetProperty("paused").GetBoolean());
-            CaptureRuntimeStreamState resumed = Assert.Single(
-                (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
-            Assert.Equal(2, resumed.Queue.Count);
         }
         finally
         {
@@ -960,6 +1225,43 @@ public sealed class CapturePackagingTests
         ["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "1",
         ["OVERMIND_CAPTURE_SCAN_JITTER_MS"] = "0"
     };
+
+    private static async Task RespondWithObservationReceiptAsync(
+        HttpListenerContext context,
+        Guid sourceStreamUuid)
+    {
+        using JsonDocument request = await JsonDocument.ParseAsync(
+            context.Request.InputStream);
+        JsonElement root = request.RootElement;
+        JsonElement locator = root.GetProperty("locator");
+        Guid observationUuid = Guid.NewGuid();
+        await RespondJsonAsync(context, new
+        {
+            observationUuid,
+            status = "new",
+            sourcePosition = root.GetProperty("sourcePosition").GetInt64(),
+            sourceStreamUuid,
+            observation = new
+            {
+                observationUuid,
+                sourceStreamUuid,
+                locator = new
+                {
+                    kind = "byte_range",
+                    byteOffset = locator.GetProperty("byteOffset").GetInt64(),
+                    byteLength = locator.GetProperty("byteLength").GetInt64()
+                }
+            }
+        });
+    }
+
+    private static async Task RespondJsonAsync(HttpListenerContext context, object body)
+    {
+        context.Response.ContentType = "application/json";
+        await JsonSerializer.SerializeAsync(context.Response.OutputStream, body);
+        context.Response.StatusCode = 200;
+        context.Response.Close();
+    }
 
     private static void AssertContentFreeJsonDiagnostics(
         string stderr,

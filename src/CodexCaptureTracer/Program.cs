@@ -213,18 +213,6 @@ try
         }
 
         IReadOnlyList<CodexTranscriptStream>? streams = null;
-        if (persistedPaused != true)
-        {
-            try
-            {
-                streams = DiscoverStreams();
-            }
-            catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
-            {
-                WriteFailure(ex);
-                return;
-            }
-        }
 
         CaptureInstructionPoll? instructionPoll = null;
         Exception? instructionPollFailure = null;
@@ -254,7 +242,14 @@ try
             if (instructionPoll is not null)
             {
                 await AcknowledgeCaptureInstructionsAsync(
-                    endpoint, credential, instructionPoll.Instructions, cancellationToken);
+                    endpoint,
+                    credential,
+                    instructionPoll.Instructions
+                        .Where(instruction =>
+                            instruction.Operation is CaptureInstructionOperations.Pause
+                                or CaptureInstructionOperations.Resume)
+                        .ToArray(),
+                    cancellationToken);
             }
             return;
         }

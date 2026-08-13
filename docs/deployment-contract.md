@@ -143,6 +143,8 @@ What it asserts:
   request state. Pairing audit has the `capture_pairing_audit_immutable`
   trigger, the expected SELECT and INSERT grants, no UPDATE grant, and no
   DELETE grant.
+- The `capture_instructions` table exists. `memsrv` has SELECT and INSERT plus
+  an UPDATE grant limited to `acknowledged_at`, and has no DELETE grant.
 
 Run it against a **disposable** target only — dev/test/CI use a locally
 provisioned database, never the persistent production `memory`.

@@ -140,12 +140,15 @@ internal static class TestProcessRunner
             ?? throw new InvalidOperationException("Failed to start MemSrv.Server.");
     }
 
-    public static Task<(int ExitCode, string Stdout, string Stderr)> RunCaptureTracerToExitAsync(
-        IReadOnlyDictionary<string, string> environment) =>
-        RunToExitAsync(
+    public static async Task<(int ExitCode, string Stdout, string Stderr)>
+        RunCaptureTracerToExitAsync(IReadOnlyDictionary<string, string> environment)
+    {
+        await using FileStream wakePortLock = AcquireCaptureWakePortLock();
+        return await RunToExitAsync(
             CreateStartInfo(CaptureTracerPath, [], environment),
             TimeSpan.FromSeconds(60),
             "CodexCaptureTracer");
+    }
 
     public static async Task<(string Stdout, string Stderr)>
         RunCaptureTracerUntilDiagnosticAsync(
@@ -301,8 +304,12 @@ internal static class TestProcessRunner
 
     public static CaptureTracerProcess StartCaptureTracer(
         IReadOnlyDictionary<string, string> environment,
-        IReadOnlyList<string>? args = null)
+        IReadOnlyList<string>? args = null,
+        bool coordinateWakePort = true)
     {
+        FileStream? wakePortLock = coordinateWakePort
+            ? AcquireCaptureWakePortLock()
+            : null;
         string? stateDirectory = environment.GetValueOrDefault("OVERMIND_CAPTURE_STATE_DIR");
         int initialReceiptCount = 0;
         if (stateDirectory is not null)
@@ -321,9 +328,39 @@ internal static class TestProcessRunner
                 // The packaged child owns fail-closed validation of corrupt state.
             }
         }
-        Process process = Process.Start(CreateStartInfo(CaptureTracerPath, args ?? [], environment))
-            ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
-        return new CaptureTracerProcess(process, stateDirectory, initialReceiptCount);
+        try
+        {
+            Process process = Process.Start(CreateStartInfo(CaptureTracerPath, args ?? [], environment))
+                ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
+            return new CaptureTracerProcess(
+                process, stateDirectory, initialReceiptCount, wakePortLock);
+        }
+        catch
+        {
+            wakePortLock?.Dispose();
+            throw;
+        }
+    }
+
+    private static FileStream AcquireCaptureWakePortLock()
+    {
+        // Every packaged tracer owns the fixed production listener, so all
+        // subprocess tests share one cross-process boundary. Otherwise a wake
+        // from one test can spuriously interrupt a different tracer shard.
+        string path = Path.Combine(Path.GetTempPath(), "overmind-capture-wake-43191.lock");
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+        while (true)
+        {
+            try
+            {
+                return new FileStream(
+                    path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException) when (DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(50);
+            }
+        }
     }
 
     private static ProcessStartInfo CreateStartInfo(
@@ -448,14 +485,17 @@ internal sealed class CaptureTracerProcess : IDisposable
 {
     private readonly Process _process;
     private readonly string? _stateDirectory;
+    private readonly FileStream? _wakePortLock;
 
     public CaptureTracerProcess(
         Process process,
         string? stateDirectory,
-        int initialReceiptCount)
+        int initialReceiptCount,
+        FileStream? wakePortLock)
     {
         _process = process;
         _stateDirectory = stateDirectory;
+        _wakePortLock = wakePortLock;
         InitialReceiptCount = initialReceiptCount;
     }
 
@@ -487,5 +527,9 @@ internal sealed class CaptureTracerProcess : IDisposable
     public Task WaitForExitAsync(CancellationToken cancellationToken = default) =>
         _process.WaitForExitAsync(cancellationToken);
     public void WaitForExit() => _process.WaitForExit();
-    public void Dispose() => _process.Dispose();
+    public void Dispose()
+    {
+        _process.Dispose();
+        _wakePortLock?.Dispose();
+    }
 }

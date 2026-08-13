@@ -310,12 +310,6 @@ public sealed class CapturePackagingTests
         }
     }
 
-    private static async Task WaitForFixedWakePortAsync()
-    {
-        using var listener = await ListenOnFixedWakePortAsync();
-        listener.Stop();
-    }
-
     [Fact]
     public async Task PackagedLoopbackWakeStartsCatchUpBeforeLongScheduleExpires()
     {
@@ -326,8 +320,6 @@ public sealed class CapturePackagingTests
         Directory.CreateDirectory(archive);
         Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
         environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "3600000";
-        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
-        await WaitForFixedWakePortAsync();
         using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
         Task<string> stdout = process.StandardOutput.ReadToEndAsync();
         try
@@ -548,8 +540,6 @@ public sealed class CapturePackagingTests
         await File.WriteAllTextAsync(baseline, Transcript("startup-baseline"));
         Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
         environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "3600000";
-        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
-        await WaitForFixedWakePortAsync();
         using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
         Task<string> stdout = process.StandardOutput.ReadToEndAsync();
         try
@@ -670,7 +660,9 @@ public sealed class CapturePackagingTests
         using var collision = await ListenOnFixedWakePortAsync();
         Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
         environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25";
-        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(
+            environment,
+            coordinateWakePort: false);
         Task<string> stdout = process.StandardOutput.ReadToEndAsync();
         Task<string> stderr = process.StandardError.ReadToEndAsync();
         try
@@ -713,8 +705,6 @@ public sealed class CapturePackagingTests
         Directory.CreateDirectory(archive);
         Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
         environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25";
-        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
-        await WaitForFixedWakePortAsync();
         using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(
             environment,
             ["--bridge-wake-forwarder"]);

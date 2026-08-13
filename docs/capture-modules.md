@@ -25,7 +25,8 @@ Source interpretation before this spine is described by the
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
 | `CodexTranscriptDiscovery` | `EnumerateCurrentSessionsAndResponsibleArchives(sessionsRoot, archiveRoot, responsibleSourceStreamsByTranscriptIdentity)` for production current rollouts plus identity-bound responsibility-filtered archive retries; `Enumerate(configuredLocation)` for the legacy synthetic fixture seam → streams with explicit Codex source identity | `CodexCaptureTracer` |
 | `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
-| `CaptureRescanScheduler` | `RunAsync(scanCycle, schedule, jitterSource, delay)` | `CodexCaptureTracer` |
+| `CaptureRescanScheduler` | `RunAsync(scanCycle, schedule, jitterSource, delay, wakeup)` | `CodexCaptureTracer` |
+| `CaptureScanWakeup` | `Request()` | Codex loopback wake listener |
 | `CaptureRescanConfiguration` | `Load(readEnvironment)` → `CaptureRescanSchedule` | `CodexCaptureTracer` |
 
 `CaptureLedger` is internal: the single reader over the durable capture ledger
@@ -298,8 +299,11 @@ named interval and maximum-jitter environment inputs to one validated schedule.
 Startup enumeration runs immediately; only after a complete cycle does the
 scheduler choose a new bounded jitter sample and wait the configured interval
 plus that jitter. The scheduler awaits each whole
-enumeration/claim/delivery cycle, so a slow cycle cannot overlap another. The
-packaged tracer retains per-stream failures for a later cycle rather than
+enumeration/claim/delivery cycle, so a slow cycle cannot overlap another.
+`CaptureScanWakeup` is a capacity-one signal: duplicates coalesce, and a wake
+during a scan yields at most one immediate follow-up cycle. It only advances
+this same enumeration/claim/delivery cycle; startup and periodic scans remain
+authoritative. The packaged tracer retains per-stream failures for a later cycle rather than
 letting one outage cancel responsibility for other configured streams.
 
 The supported runtime calls
@@ -351,9 +355,10 @@ pre-boundary history, a completion observation, and the
 `context_compacted` annotation. Authenticated ingestion returns immutable
 observation UUIDs, retries return those same UUIDs as `already_accepted`, and
 `memctl capture receipt` exposes the operation phase, boundary, summary,
-replacement history, and window evidence. Hook facts use the same authenticated
-capture API and operator receipt seam directly: there is no hook claimer or
-hook runtime in this slice. The runtime does not interpret a summary as missing
+replacement history, and window evidence. The wake listener never creates hook
+facts or calls the capture API: it can only request this scheduled transcript
+cycle. Durable hook-fact ingestion remains outside this slice. The runtime does
+not interpret a summary as missing
 history or replace an earlier queued or canonical record.
 
 ## Where the gate runs

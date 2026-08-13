@@ -44,6 +44,43 @@ internal static class TestProcessRunner
 
     public static string CaptureTracerPath => _captureTracerPath.Value;
 
+    public static Task<(
+        int ExitCode,
+        string Stdout,
+        string Stderr,
+        TimeSpan Elapsed)> RunCommandToExitAsync(
+            string command,
+            string stdin,
+            TimeSpan timeout,
+            string description) => RunCommandToExitAsync(
+                command,
+                [],
+                stdin,
+                TimeSpan.Zero,
+                new Dictionary<string, string>(),
+                timeout,
+                description);
+
+    public static async Task<(
+        int ExitCode,
+        string Stdout,
+        string Stderr,
+        TimeSpan Elapsed)> RunCommandToExitAsync(
+            string command,
+            IReadOnlyList<string> args,
+            string stdin,
+            TimeSpan stdinCloseDelay,
+            IReadOnlyDictionary<string, string> environment,
+            TimeSpan timeout,
+            string description)
+    {
+        var startInfo = CreateStartInfo(command, args, environment);
+        startInfo.RedirectStandardInput = true;
+        ProcessResult result = await RunProcessToExitAsync(
+            startInfo, timeout, description, stdin, stdinCloseDelay);
+        return (result.ExitCode, result.Stdout, result.Stderr, result.Elapsed);
+    }
+
     // Runs memctl to completion. Failure-tolerant: returns the exit code and
     // both streams so tests can assert on refusals too.
     public static Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlToExitAsync(
@@ -103,12 +140,17 @@ internal static class TestProcessRunner
             ?? throw new InvalidOperationException("Failed to start MemSrv.Server.");
     }
 
-    public static Task<(int ExitCode, string Stdout, string Stderr)> RunCaptureTracerToExitAsync(
-        IReadOnlyDictionary<string, string> environment) =>
-        RunToExitAsync(
+    public static async Task<(int ExitCode, string Stdout, string Stderr)>
+        RunCaptureTracerToExitAsync(IReadOnlyDictionary<string, string> environment)
+    {
+        await using FileStream? wakePortLock = UsesProductionCaptureRuntime(environment)
+            ? AcquireCaptureWakePortLock()
+            : null;
+        return await RunToExitAsync(
             CreateStartInfo(CaptureTracerPath, [], environment),
             TimeSpan.FromSeconds(60),
             "CodexCaptureTracer");
+    }
 
     public static async Task<(string Stdout, string Stderr)>
         RunCaptureTracerUntilDiagnosticAsync(
@@ -263,8 +305,13 @@ internal static class TestProcessRunner
     }
 
     public static CaptureTracerProcess StartCaptureTracer(
-        IReadOnlyDictionary<string, string> environment)
+        IReadOnlyDictionary<string, string> environment,
+        IReadOnlyList<string>? args = null,
+        bool coordinateWakePort = true)
     {
+        FileStream? wakePortLock = coordinateWakePort && UsesProductionCaptureRuntime(environment)
+            ? AcquireCaptureWakePortLock()
+            : null;
         string? stateDirectory = environment.GetValueOrDefault("OVERMIND_CAPTURE_STATE_DIR");
         int initialReceiptCount = 0;
         if (stateDirectory is not null)
@@ -283,10 +330,46 @@ internal static class TestProcessRunner
                 // The packaged child owns fail-closed validation of corrupt state.
             }
         }
-        Process process = Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
-            ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
-        return new CaptureTracerProcess(process, stateDirectory, initialReceiptCount);
+        try
+        {
+            Process process = Process.Start(CreateStartInfo(CaptureTracerPath, args ?? [], environment))
+                ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
+            return new CaptureTracerProcess(
+                process, stateDirectory, initialReceiptCount, wakePortLock);
+        }
+        catch
+        {
+            wakePortLock?.Dispose();
+            throw;
+        }
     }
+
+    private static FileStream AcquireCaptureWakePortLock()
+    {
+        // Every packaged tracer owns the fixed production listener, so all
+        // subprocess tests share one cross-process boundary. Otherwise a wake
+        // from one test can spuriously interrupt a different tracer shard.
+        string path = Path.Combine(Path.GetTempPath(), "overmind-capture-wake-43191.lock");
+        while (true)
+        {
+            try
+            {
+                return new FileStream(
+                    path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException)
+            {
+                Thread.Sleep(50);
+            }
+        }
+    }
+
+    private static bool UsesProductionCaptureRuntime(
+        IReadOnlyDictionary<string, string> environment) =>
+        !string.Equals(
+            environment.GetValueOrDefault("OVERMIND_CODEX_CAPTURE_ENABLE"),
+            "synthetic-non-production",
+            StringComparison.Ordinal);
 
     private static ProcessStartInfo CreateStartInfo(
         string apphostPath, IReadOnlyList<string> args, IReadOnlyDictionary<string, string> environment)
@@ -312,6 +395,18 @@ internal static class TestProcessRunner
     private static async Task<(int ExitCode, string Stdout, string Stderr)> RunToExitAsync(
         ProcessStartInfo startInfo, TimeSpan timeout, string description)
     {
+        ProcessResult result = await RunProcessToExitAsync(startInfo, timeout, description);
+        return (result.ExitCode, result.Stdout, result.Stderr);
+    }
+
+    private static async Task<ProcessResult> RunProcessToExitAsync(
+        ProcessStartInfo startInfo,
+        TimeSpan timeout,
+        string description,
+        string? stdin = null,
+        TimeSpan stdinCloseDelay = default)
+    {
+        var elapsed = Stopwatch.StartNew();
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Failed to start {description}.");
         // Drain both streams concurrently so a full pipe buffer can't deadlock
@@ -323,6 +418,13 @@ internal static class TestProcessRunner
         using var cts = new CancellationTokenSource(timeout);
         try
         {
+            if (stdin is not null)
+            {
+                await process.StandardInput.WriteAsync(stdin.AsMemory(), cts.Token);
+                await process.StandardInput.FlushAsync(cts.Token);
+                await Task.Delay(stdinCloseDelay, cts.Token);
+                process.StandardInput.Close();
+            }
             await process.WaitForExitAsync(cts.Token);
         }
         catch (OperationCanceledException)
@@ -334,8 +436,13 @@ internal static class TestProcessRunner
                 $"{description} did not exit within {timeout.TotalSeconds:0}s.");
         }
 
-        return (process.ExitCode, await stdoutPump, await stderrPump);
+        elapsed.Stop();
+        return new ProcessResult(
+            process.ExitCode, await stdoutPump, await stderrPump, elapsed.Elapsed);
     }
+
+    private sealed record ProcessResult(
+        int ExitCode, string Stdout, string Stderr, TimeSpan Elapsed);
 
     private static string ResolveApphost(string projectName)
     {
@@ -386,14 +493,23 @@ internal sealed class CaptureTracerProcess : IDisposable
 {
     private readonly Process _process;
     private readonly string? _stateDirectory;
+    private FileStream? _wakePortLock;
 
     public CaptureTracerProcess(
         Process process,
         string? stateDirectory,
-        int initialReceiptCount)
+        int initialReceiptCount,
+        FileStream? wakePortLock)
     {
         _process = process;
         _stateDirectory = stateDirectory;
+        _wakePortLock = wakePortLock;
+        _process.EnableRaisingEvents = true;
+        _process.Exited += ReleaseWakePortLock;
+        if (_process.HasExited)
+        {
+            ReleaseWakePortLock(_process, EventArgs.Empty);
+        }
         InitialReceiptCount = initialReceiptCount;
     }
 
@@ -425,5 +541,13 @@ internal sealed class CaptureTracerProcess : IDisposable
     public Task WaitForExitAsync(CancellationToken cancellationToken = default) =>
         _process.WaitForExitAsync(cancellationToken);
     public void WaitForExit() => _process.WaitForExit();
-    public void Dispose() => _process.Dispose();
+    public void Dispose()
+    {
+        _process.Exited -= ReleaseWakePortLock;
+        _process.Dispose();
+        Interlocked.Exchange(ref _wakePortLock, null)?.Dispose();
+    }
+
+    private void ReleaseWakePortLock(object? sender, EventArgs args) =>
+        Interlocked.Exchange(ref _wakePortLock, null)?.Dispose();
 }

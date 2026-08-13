@@ -3,6 +3,21 @@ using MemSrv.Core;
 using System.Net.Http.Json;
 using System.Text.Json;
 
+bool bridgeWakeForwarder;
+if (args.Length == 0)
+{
+    bridgeWakeForwarder = false;
+}
+else if (args is ["--bridge-wake-forwarder"])
+{
+    bridgeWakeForwarder = true;
+}
+else
+{
+    WriteDiagnostic("capture_runtime_configuration_invalid", "invalid_runtime_mode");
+    return 2;
+}
+
 const string LegacySyntheticEnableValue = "synthetic-non-production";
 bool legacySyntheticDiagnostics = string.Equals(
     Environment.GetEnvironmentVariable("OVERMIND_CODEX_CAPTURE_ENABLE"),
@@ -153,11 +168,49 @@ catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
     return 2;
 }
 using var stopping = new CancellationTokenSource();
+var wakeup = new CaptureScanWakeup();
+CaptureWakeListener? wakeListener = null;
+if (!legacySyntheticDiagnostics)
+{
+    var candidate = new CaptureWakeListener(wakeup);
+    try
+    {
+        candidate.Start();
+        wakeListener = candidate;
+    }
+    catch (System.Net.Sockets.SocketException)
+    {
+        await candidate.DisposeAsync();
+        WriteDiagnostic("capture_wake_unavailable", "listener_unavailable");
+    }
+}
+await using CaptureWakeListener? wakeListenerScope = wakeListener;
 Console.CancelKeyPress += (_, eventArgs) =>
 {
     eventArgs.Cancel = true;
     stopping.Cancel();
 };
+CaptureWakeForwarder? bridgeForwarder = null;
+if (bridgeWakeForwarder && wakeListener is not null)
+{
+    try
+    {
+        bridgeForwarder = CaptureWakeForwarder.CreateForDefaultRoute();
+        bridgeForwarder.Start(stopping.Token);
+    }
+    catch (Exception ex) when (ex is IOException
+        or InvalidOperationException
+        or System.Net.Sockets.SocketException)
+    {
+        if (bridgeForwarder is not null)
+        {
+            await bridgeForwarder.DisposeAsync();
+            bridgeForwarder = null;
+        }
+        WriteDiagnostic("capture_wake_forwarder_failed");
+    }
+}
+await using CaptureWakeForwarder? bridgeForwarderScope = bridgeForwarder;
 
 try
 {
@@ -214,6 +267,7 @@ try
     await CaptureRescanScheduler.RunAsync(
         ScanCycleAsync,
         schedule,
+        wakeup: wakeup,
         cancellationToken: stopping.Token);
 }
 catch (OperationCanceledException) when (stopping.IsCancellationRequested)

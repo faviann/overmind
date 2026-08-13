@@ -7,6 +7,385 @@ namespace MemSrv.Tests;
 public sealed class CapturePackagingTests
 {
     [Fact]
+    public async Task Codex01470PublicHookLoaderAcceptsEveryBoundedWakeCommand()
+    {
+        string package = Path.Combine(
+            TestProcessRunner.RepoRoot, "packages/codex-capture-hooks/0.147.0");
+        using JsonDocument manifest = JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(package, "manifest.json")));
+        Assert.Equal("0.147.0", manifest.RootElement.GetProperty("codexCliVersion").GetString());
+        Assert.Equal(
+            "http://127.0.0.1:43191/wake",
+            manifest.RootElement.GetProperty("wakeUrl").GetString());
+        using JsonDocument document = JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(package, "hooks.json")));
+
+        Assert.Equal(["hooks"], document.RootElement.EnumerateObject().Select(item => item.Name));
+        string[] expected =
+        [
+            "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
+            "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact",
+            "SubagentStart", "SubagentStop", "Stop"
+        ];
+        JsonElement hooks = document.RootElement.GetProperty("hooks");
+        Assert.Equal(expected.Order(), hooks.EnumerateObject().Select(item => item.Name).Order());
+        foreach (JsonProperty entry in hooks.EnumerateObject())
+        {
+            JsonElement command = entry.Value[0].GetProperty("hooks")[0];
+            Assert.Equal("command", command.GetProperty("type").GetString());
+            Assert.False(command.TryGetProperty("async", out _));
+            Assert.Equal(1, command.GetProperty("timeout").GetInt32());
+            Assert.Equal(
+                "\"$HOME/.local/bin/overmind-codex-wake-0.147.0\"",
+                command.GetProperty("command").GetString());
+        }
+        string root = Path.Combine(Path.GetTempPath(), $"codex-hooks-{Guid.NewGuid():N}");
+        string home = Path.Combine(root, "home");
+        string codexHome = Path.Combine(home, ".codex");
+        Directory.CreateDirectory(codexHome);
+        try
+        {
+            var install = await TestProcessRunner.RunCommandToExitAsync(
+                Path.Combine(package, "install.sh"),
+                [codexHome],
+                "",
+                TimeSpan.Zero,
+                new Dictionary<string, string>
+                {
+                    ["HOME"] = home,
+                    ["CODEX_HOME"] = codexHome
+                },
+                TimeSpan.FromSeconds(5),
+                "Codex hook installer");
+            Assert.Equal(0, install.ExitCode);
+            Assert.Empty(install.Stdout);
+            Assert.DoesNotContain("requires codex-cli", install.Stderr, StringComparison.Ordinal);
+            Assert.Equal(
+                ["home/.codex/hooks.json", "home/.local/bin/overmind-codex-wake-0.147.0"],
+                Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                    .Select(path => Path.GetRelativePath(root, path)).Order());
+
+            string initialize = JsonSerializer.Serialize(new
+            {
+                method = "initialize",
+                id = 1,
+                @params = new
+                {
+                    clientInfo = new { name = "overmind-hook-acceptance", version = "1" },
+                    capabilities = new { experimentalApi = true }
+                }
+            });
+            string initialized = "{\"method\":\"initialized\",\"params\":{}}";
+            string list = JsonSerializer.Serialize(new
+            {
+                method = "hooks/list",
+                id = 2,
+                @params = new { cwds = new[] { TestProcessRunner.RepoRoot } }
+            });
+            var loaded = await TestProcessRunner.RunCommandToExitAsync(
+                "codex",
+                ["app-server", "--stdio"],
+                $"{initialize}\n{initialized}\n{list}\n",
+                TimeSpan.FromMilliseconds(500),
+                new Dictionary<string, string>
+                {
+                    ["HOME"] = home,
+                    ["CODEX_HOME"] = codexHome
+                },
+                TimeSpan.FromSeconds(5),
+                "Codex 0.147.0 public hook loader");
+            Assert.Equal(0, loaded.ExitCode);
+            Assert.DoesNotContain("unsupported", loaded.Stderr, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("skipping", loaded.Stderr, StringComparison.OrdinalIgnoreCase);
+            JsonElement response = loaded.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Single(line => line.TryGetProperty("id", out JsonElement id) && id.GetInt32() == 2)
+                .GetProperty("result").GetProperty("data")[0];
+            Assert.Empty(response.GetProperty("warnings").EnumerateArray());
+            Assert.Empty(response.GetProperty("errors").EnumerateArray());
+            Assert.Equal(
+                expected.Select(ToCodexEventName).Order(),
+                response.GetProperty("hooks").EnumerateArray()
+                    .Select(hook => hook.GetProperty("eventName").GetString()).Order());
+            foreach (JsonElement hook in response.GetProperty("hooks").EnumerateArray())
+            {
+                Assert.Equal("command", hook.GetProperty("handlerType").GetString());
+                Assert.Equal(1, hook.GetProperty("timeoutSec").GetInt32());
+                Assert.True(hook.GetProperty("enabled").GetBoolean());
+                Assert.Equal(
+                    "\"$HOME/.local/bin/overmind-codex-wake-0.147.0\"",
+                    hook.GetProperty("command").GetString());
+            }
+
+            var upgrade = await TestProcessRunner.RunCommandToExitAsync(
+                Path.Combine(package, "upgrade.sh"),
+                [codexHome],
+                "",
+                TimeSpan.Zero,
+                new Dictionary<string, string>
+                {
+                    ["HOME"] = home,
+                    ["CODEX_HOME"] = codexHome
+                },
+                TimeSpan.FromSeconds(5),
+                "same-version Codex hook upgrade");
+            Assert.Equal(0, upgrade.ExitCode);
+            Assert.Empty(upgrade.Stdout);
+            Assert.DoesNotContain("requires codex-cli", upgrade.Stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CodexHookInstallerRefusesExistingUnrelatedHooksWithoutChangingThem()
+    {
+        string package = Path.Combine(
+            TestProcessRunner.RepoRoot, "packages/codex-capture-hooks/0.147.0");
+        string root = Path.Combine(Path.GetTempPath(), $"codex-hooks-refusal-{Guid.NewGuid():N}");
+        string home = Path.Combine(root, "home");
+        string codexHome = Path.Combine(home, ".codex");
+        Directory.CreateDirectory(codexHome);
+        string hooks = Path.Combine(codexHome, "hooks.json");
+        const string unrelated = "{\"hooks\":{\"Stop\":[]}}\n";
+        await File.WriteAllTextAsync(hooks, unrelated);
+        try
+        {
+            var install = await TestProcessRunner.RunCommandToExitAsync(
+                Path.Combine(package, "install.sh"),
+                [codexHome],
+                "",
+                TimeSpan.Zero,
+                new Dictionary<string, string>
+                {
+                    ["HOME"] = home,
+                    ["CODEX_HOME"] = codexHome
+                },
+                TimeSpan.FromSeconds(5),
+                "Codex hook installer refusal");
+            Assert.Equal(2, install.ExitCode);
+            Assert.Empty(install.Stdout);
+            Assert.Contains("already exists", install.Stderr, StringComparison.Ordinal);
+            Assert.Equal(unrelated, await File.ReadAllTextAsync(hooks));
+            Assert.False(Directory.Exists(Path.Combine(home, ".local")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static string ToCodexEventName(string name) =>
+        char.ToLowerInvariant(name[0]) + name[1..];
+
+    [Fact]
+    public async Task PackagedWakeCommandDiscardsInputSendsNoPayloadAndNeverFailsCodex()
+    {
+        string command = Path.Combine(
+            TestProcessRunner.RepoRoot,
+            "packages/codex-capture-hooks/0.147.0/overmind-codex-wake-0.147.0");
+        string contents = await File.ReadAllTextAsync(command);
+        Assert.Contains("curl --disable ", contents, StringComparison.Ordinal);
+        Assert.Contains("--noproxy '*'", contents, StringComparison.Ordinal);
+        Assert.Contains("--max-time 0.25", contents, StringComparison.Ordinal);
+        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
+        using var listener = await ListenOnFixedWakePortAsync();
+        System.Net.IPAddress nonLoopback = Assert.IsType<System.Net.IPAddress>(
+            DiscoverNonLoopbackIpv4Address());
+        using var proxy = new System.Net.Sockets.TcpListener(nonLoopback, 0);
+        proxy.Start();
+        int proxyPort = ((System.Net.IPEndPoint)proxy.LocalEndpoint).Port;
+        Task<System.Net.Sockets.TcpClient> accepted = listener.AcceptTcpClientAsync();
+        Task<System.Net.Sockets.TcpClient> proxied = proxy.AcceptTcpClientAsync();
+        string curlHome = Path.Combine(
+            Path.GetTempPath(), $"hostile-curl-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(curlHome);
+        await File.WriteAllTextAsync(
+            Path.Combine(curlHome, ".curlrc"),
+            $"url = \"http://{nonLoopback}:{proxyPort}/from-curlrc\"\n" +
+            $"proxy = \"http://{nonLoopback}:{proxyPort}\"\n" +
+            "request = PUT\n" +
+            "data = operator-config-payload\n");
+
+        try
+        {
+            string proxyUrl = $"http://{nonLoopback}:{proxyPort}";
+            Task<(int ExitCode, string Stdout, string Stderr, TimeSpan Elapsed)> execution =
+                TestProcessRunner.RunCommandToExitAsync(
+                    command,
+                    [],
+                    "private hook payload",
+                    TimeSpan.Zero,
+                    new Dictionary<string, string>
+                    {
+                        ["HOME"] = curlHome,
+                        ["CURL_HOME"] = curlHome,
+                        ["http_proxy"] = proxyUrl,
+                        ["HTTP_PROXY"] = proxyUrl,
+                        ["all_proxy"] = proxyUrl,
+                        ["ALL_PROXY"] = proxyUrl,
+                        ["no_proxy"] = "",
+                        ["NO_PROXY"] = ""
+                    },
+                    TimeSpan.FromSeconds(2),
+                    "packaged Codex wake command");
+            using System.Net.Sockets.TcpClient client =
+                await accepted.WaitAsync(TimeSpan.FromSeconds(2));
+            using var reader = new StreamReader(client.GetStream(), leaveOpen: true);
+            string request = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+            Assert.Equal("POST /wake HTTP/1.1", request);
+            string? line;
+            while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync()))
+            {
+                Assert.DoesNotContain("Content-Length", line, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("Transfer-Encoding", line, StringComparison.OrdinalIgnoreCase);
+            }
+            byte[] response = System.Text.Encoding.ASCII.GetBytes(
+                "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+            await client.GetStream().WriteAsync(response);
+            var result = await execution;
+            Assert.Equal(0, result.ExitCode);
+            Assert.True(result.Elapsed < TimeSpan.FromMilliseconds(750), result.Elapsed.ToString());
+            Assert.Empty(result.Stdout);
+            Assert.Empty(result.Stderr);
+            await Task.Delay(100);
+            Assert.False(proxied.IsCompleted, "The wake command contacted a non-loopback proxy.");
+            Assert.False(listener.Pending(), "The wake command sent more than one loopback request.");
+        }
+        finally
+        {
+            listener.Stop();
+            proxy.Stop();
+            Directory.Delete(curlHome, recursive: true);
+        }
+
+        var absent = await TestProcessRunner.RunCommandToExitAsync(
+            command,
+            "",
+            TimeSpan.FromSeconds(2),
+            "packaged Codex wake command without listener");
+        Assert.Equal(0, absent.ExitCode);
+        Assert.True(absent.Elapsed < TimeSpan.FromSeconds(1));
+        Assert.Empty(absent.Stdout);
+        Assert.Empty(absent.Stderr);
+    }
+
+    private static async Task<FileStream> AcquireFixedWakePortLockAsync()
+    {
+        string path = Path.Combine(Path.GetTempPath(), "overmind-capture-wake-43191.lock");
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while (true)
+        {
+            try
+            {
+                return new FileStream(
+                    path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException) when (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(50);
+            }
+        }
+    }
+
+    private static async Task<System.Net.Sockets.TcpListener> ListenOnFixedWakePortAsync()
+    {
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        while (true)
+        {
+            var listener = new System.Net.Sockets.TcpListener(
+                System.Net.IPAddress.Loopback, 43191);
+            try
+            {
+                listener.Start();
+                return listener;
+            }
+            catch (System.Net.Sockets.SocketException) when (DateTime.UtcNow < deadline)
+            {
+                listener.Stop();
+                await Task.Delay(50);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task PackagedLoopbackWakeStartsCatchUpBeforeLongScheduleExpires()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-wake-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "3600000";
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            using var client = new HttpClient(
+                new SocketsHttpHandler { UseProxy = false })
+            {
+                Timeout = TimeSpan.FromMilliseconds(300)
+            };
+            HttpResponseMessage? readiness = null;
+            var readinessDeadline = System.Diagnostics.Stopwatch.StartNew();
+            while (readiness is null
+                && readinessDeadline.Elapsed < TimeSpan.FromSeconds(15))
+            {
+                try
+                {
+                    readiness = await client.PostAsync(
+                        "http://127.0.0.1:43191/wake", content: null);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+                {
+                    await Task.Delay(100);
+                }
+            }
+            Assert.True(
+                readiness is not null,
+                $"The packaged wake endpoint was not ready within " +
+                $"{readinessDeadline.Elapsed.TotalSeconds:0.0}s.");
+            Assert.Equal(System.Net.HttpStatusCode.NoContent, readiness.StatusCode);
+            readiness.Dispose();
+
+            System.Net.IPAddress? nonLoopback = DiscoverNonLoopbackIpv4Address();
+            if (nonLoopback is not null)
+            {
+                Exception? nonLoopbackFailure = await Record.ExceptionAsync(() =>
+                    client.PostAsync($"http://{nonLoopback}:43191/wake", content: null));
+                Assert.True(
+                    nonLoopbackFailure is HttpRequestException or TaskCanceledException,
+                    $"The wake endpoint was reachable through non-loopback address " +
+                    $"{nonLoopback}.");
+            }
+
+            string first = Path.Combine(sessions, "2026", "08", "11", "rollout-same.jsonl");
+            string second = Path.Combine(sessions, "2026", "08", "12", "rollout-same.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(first)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(second)!);
+            await File.WriteAllTextAsync(first, Transcript("first"));
+            await File.WriteAllTextAsync(second, Transcript("second"));
+
+            using HttpResponseMessage response = await client.PostAsync(
+                "http://127.0.0.1:43191/wake", content: null);
+            Assert.Equal(System.Net.HttpStatusCode.NoContent, response.StatusCode);
+            string diagnostic = await process.StandardError.ReadLineAsync()
+                .WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+            Assert.Contains("capture_cycle_failed", diagnostic, StringComparison.Ordinal);
+        }
+        finally
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ShippedComposeAllowsCredentiallessPairingAndDocumentsOptionalCredential()
     {
         string compose = File.ReadAllText(Path.Combine(
@@ -145,6 +524,208 @@ public sealed class CapturePackagingTests
         using var tcp = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
         tcp.Start();
         return ((System.Net.IPEndPoint)tcp.LocalEndpoint).Port;
+    }
+
+    [Fact]
+    public async Task PackagedLoopbackWakeAcceptsCaseInsensitiveZeroLengthHeadersOnly()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-wake-headers-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string baseline = Path.Combine(sessions, "2026", "08", "11", "rollout-baseline.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(baseline)!);
+        await File.WriteAllTextAsync(baseline, Transcript("startup-baseline"));
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "3600000";
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            DateTime readyDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+            while (true)
+            {
+                try
+                {
+                    Assert.Equal(
+                        "HTTP/1.1 404 Not Found",
+                        await SendWakeRequestAsync("GET /wake HTTP/1.1\r\n\r\n"));
+                    break;
+                }
+                catch (System.Net.Sockets.SocketException) when (DateTime.UtcNow < readyDeadline)
+                {
+                    await Task.Delay(100);
+                }
+            }
+            await WaitForCapturedStreamCountAsync(state, 1);
+
+            string first = Path.Combine(sessions, "2026", "08", "12", "rollout-lowercase.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(first)!);
+            await File.WriteAllTextAsync(first, Transcript("lowercase-content-length"));
+
+            string[] refused =
+            [
+                "POST /wake HTTP/1.1\r\nContent-Length: nope\r\n\r\n",
+                "POST /wake HTTP/1.1\r\nContent-Length: 1\r\n\r\n",
+                "POST /wake HTTP/1.1\r\nContent-Length: 0\r\ncontent-length: 0\r\n\r\n"
+            ];
+            foreach (string request in refused)
+            {
+                Assert.Equal("HTTP/1.1 404 Not Found", await SendWakeRequestAsync(request));
+            }
+            Assert.Equal(
+                "HTTP/1.1 404 Not Found",
+                await SendSplitWakeRequestAsync(
+                    "POST /wake HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
+                    "undeclared-body",
+                    TimeSpan.FromMilliseconds(10)));
+            await Task.Delay(TimeSpan.FromMilliseconds(750));
+            Assert.Single((await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
+
+            Assert.Equal(
+                "HTTP/1.1 204 No Content",
+                await SendWakeRequestAsync(
+                    "POST /wake HTTP/1.1\r\ncontent-length: 0\r\n\r\n"));
+            await WaitForCapturedStreamCountAsync(state, 2);
+
+            string second = Path.Combine(sessions, "2026", "08", "12", "rollout-no-space.jsonl");
+            await File.WriteAllTextAsync(second, Transcript("no-space-content-length"));
+            Assert.Equal(
+                "HTTP/1.1 204 No Content",
+                await SendWakeRequestAsync(
+                    "POST /wake HTTP/1.1\r\nContent-Length:0\r\n\r\n"));
+            await WaitForCapturedStreamCountAsync(state, 3);
+        }
+        finally
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task<string> SendWakeRequestAsync(string request)
+    {
+        using var client = new System.Net.Sockets.TcpClient();
+        await client.ConnectAsync(System.Net.IPAddress.Loopback, 43191);
+        System.Net.Sockets.NetworkStream stream = client.GetStream();
+        await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(request));
+        using var reader = new StreamReader(stream);
+        return await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+    }
+
+    private static async Task<string> SendSplitWakeRequestAsync(
+        string first,
+        string second,
+        TimeSpan delay)
+    {
+        using var client = new System.Net.Sockets.TcpClient();
+        await client.ConnectAsync(System.Net.IPAddress.Loopback, 43191);
+        System.Net.Sockets.NetworkStream stream = client.GetStream();
+        await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(first));
+        await Task.Delay(delay);
+        await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(second));
+        using var reader = new StreamReader(stream);
+        return await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+    }
+
+    private static async Task WaitForCapturedStreamCountAsync(string state, int count)
+    {
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            CaptureRuntimeSnapshot snapshot = await new FileCaptureRuntimeState(state).ReadAsync();
+            if (snapshot.Streams.Count == count)
+            {
+                return;
+            }
+            await Task.Delay(25);
+        }
+        Assert.Fail($"The wake did not capture {count} stream(s) within five seconds.");
+    }
+
+    [Fact]
+    public async Task WakeBindCollisionLeavesScheduledScanningAuthoritative()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-wake-disabled-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
+        using var collision = await ListenOnFixedWakePortAsync();
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25";
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(
+            environment,
+            coordinateWakePort: false);
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(150));
+            string transcript = Path.Combine(sessions, "2026", "08", "12", "rollout-scheduled.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(transcript)!);
+            await File.WriteAllTextAsync(transcript, Transcript("scheduled-without-wake"));
+
+            DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            CaptureRuntimeSnapshot? snapshot = null;
+            while ((snapshot is null || snapshot.Streams.Count == 0)
+                && DateTime.UtcNow < deadline)
+            {
+                snapshot = await new FileCaptureRuntimeState(state).ReadAsync();
+                await Task.Delay(25);
+            }
+            Assert.Single(Assert.IsType<CaptureRuntimeSnapshot>(snapshot).Streams);
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Assert.Contains("capture_wake_unavailable", await stderr, StringComparison.Ordinal);
+            collision.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BridgeWakeForwarderModeKeepsScheduledScanningAuthoritative()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-bridge-mode-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25";
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(
+            environment,
+            ["--bridge-wake-forwarder"]);
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            string transcript = Path.Combine(
+                sessions, "2026", "08", "13", "rollout-bridge-mode.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(transcript)!);
+            await File.WriteAllTextAsync(transcript, Transcript("bridge-mode-scheduled"));
+
+            await WaitForCapturedStreamCountAsync(state, 1);
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -730,6 +1311,21 @@ public sealed class CapturePackagingTests
                 content = new[] { new { type = "input_text", text = "public evidence" } }
             }
         }) + "\n";
+
+    private static System.Net.IPAddress? DiscoverNonLoopbackIpv4Address()
+    {
+        try
+        {
+            return System.Net.Dns.GetHostAddresses(System.Net.Dns.GetHostName())
+                .FirstOrDefault(address =>
+                    address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                    && !System.Net.IPAddress.IsLoopback(address));
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            return null;
+        }
+    }
 
     private static Dictionary<string, string> ProductionEnvironment(
         string root,

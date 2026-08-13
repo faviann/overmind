@@ -16,6 +16,15 @@ services:
       OVERMIND_CAPTURE_STATE_DIR: /state
       OVERMIND_CAPTURE_SCAN_INTERVAL_MS: ${OVERMIND_CAPTURE_SCAN_INTERVAL_MS:-1000}
       OVERMIND_CAPTURE_SCAN_JITTER_MS: ${OVERMIND_CAPTURE_SCAN_JITTER_MS:-250}
+    # Deployment-owned mode keeps the scanner active and adds the fixed bridge
+    # adapter beside its loopback-only wake listener in this same process.
+    command: [--bridge-wake-forwarder]
+    ports:
+      - name: codex-wake
+        target: 43191
+        published: "43191"
+        host_ip: 127.0.0.1
+        protocol: tcp
     volumes:
       - type: bind
         source: ${OVERMIND_CODEX_SESSIONS_ROOT:?Set the machine Codex current sessions root}

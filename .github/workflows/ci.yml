@@ -41,6 +41,11 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install pinned Codex hook test dependency
+        run: npm install --global --ignore-scripts @openai/codex@0.147.0
       - name: Verify external preflight failures and provision role
         run: |
           expect_preflight_failure() {
@@ -92,6 +97,11 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install pinned Codex hook test dependency
+        run: npm install --global --ignore-scripts @openai/codex@0.147.0
       - name: Run canonical suite with default Compose provisioning
         run: make test
 

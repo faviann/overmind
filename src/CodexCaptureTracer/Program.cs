@@ -3,31 +3,19 @@ using MemSrv.Core;
 using System.Net.Http.Json;
 using System.Text.Json;
 
-if (args is ["--wake-forwarder"])
+bool bridgeWakeForwarder;
+if (args.Length == 0)
 {
-    try
-    {
-        await using CaptureWakeForwarder forwarder = CaptureWakeForwarder.CreateForDefaultRoute();
-        using var forwarderStopping = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, eventArgs) =>
-        {
-            eventArgs.Cancel = true;
-            forwarderStopping.Cancel();
-        };
-        await forwarder.RunAsync(forwarderStopping.Token);
-        return 0;
-    }
-    catch (OperationCanceledException)
-    {
-        return 0;
-    }
-    catch (Exception ex) when (ex is IOException
-        or InvalidOperationException
-        or System.Net.Sockets.SocketException)
-    {
-        Console.Error.WriteLine("{\"event\":\"capture_wake_forwarder_failed\"}");
-        return 5;
-    }
+    bridgeWakeForwarder = false;
+}
+else if (args is ["--bridge-wake-forwarder"])
+{
+    bridgeWakeForwarder = true;
+}
+else
+{
+    WriteDiagnostic("capture_runtime_configuration_invalid", "invalid_runtime_mode");
+    return 2;
 }
 
 const string LegacySyntheticEnableValue = "synthetic-non-production";
@@ -199,6 +187,27 @@ Console.CancelKeyPress += (_, eventArgs) =>
     eventArgs.Cancel = true;
     stopping.Cancel();
 };
+CaptureWakeForwarder? bridgeForwarder = null;
+if (bridgeWakeForwarder && wakeListener is not null)
+{
+    try
+    {
+        bridgeForwarder = CaptureWakeForwarder.CreateForDefaultRoute();
+        bridgeForwarder.Start(stopping.Token);
+    }
+    catch (Exception ex) when (ex is IOException
+        or InvalidOperationException
+        or System.Net.Sockets.SocketException)
+    {
+        if (bridgeForwarder is not null)
+        {
+            await bridgeForwarder.DisposeAsync();
+            bridgeForwarder = null;
+        }
+        WriteDiagnostic("capture_wake_forwarder_failed");
+    }
+}
+await using CaptureWakeForwarder? bridgeForwarderScope = bridgeForwarder;
 
 try
 {

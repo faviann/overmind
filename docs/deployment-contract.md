@@ -270,12 +270,13 @@ reference Linux-first installation beside local Codex. Its container root is
 read-only; the current `~/.codex/sessions` tree, the
 `~/.codex/archived_sessions` retry-locator tree, and repository mounts are
 read-only; durable state is
-the only writable volume. The scanner retains ordinary isolated container
-networking and shares its namespace with a mountless, fixed-function wake
-sidecar from the same immutable image. Only host `127.0.0.1:43191` is published.
-The sidecar accepts only bridge-host traffic and relays a bounded request to the
-scanner's loopback-bound listener, so LAN clients and container peers cannot
-invoke it. Neither process has a general command surface, Docker socket,
+the only writable volume. The scanner is the container's only process and
+retains ordinary isolated bridge networking. Compose enables its fixed-function
+bridge wake adapter with a fixed command-line runtime mode and publishes only
+host `127.0.0.1:43191` to container port `43191`. The adapter accepts only the
+bridge-host gateway and relays bounded requests to the same process's
+loopback-bound listener, so LAN clients and container peers cannot invoke it.
+The runtime has no general command surface, Docker socket,
 privileged mode, or self-update behavior. Archived files are selected only for an existing
 non-empty durable queue, never as historical import. See
 `docs/codex-capture-runtime.md` for enrollment and

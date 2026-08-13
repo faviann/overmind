@@ -6,6 +6,7 @@ using CaptureAdapters;
 internal sealed class CaptureWakeListener : IAsyncDisposable
 {
     internal const int Port = 43191;
+    private static readonly TimeSpan TrailingByteProbe = TimeSpan.FromMilliseconds(25);
     private readonly TcpListener _listener;
     private readonly CaptureScanWakeup _wakeup;
     private readonly CancellationTokenSource _stopping = new();
@@ -91,8 +92,27 @@ internal sealed class CaptureWakeListener : IAsyncDisposable
             }
         }
 
+        bool framingIsEmpty = headerEnd >= 0 && headerEnd + 4 == request.Length;
+        if (framingIsEmpty)
+        {
+            using var probe = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            probe.CancelAfter(TrailingByteProbe);
+            try
+            {
+                byte[] trailing = new byte[1];
+                int read = await stream.ReadAsync(trailing, probe.Token);
+                framingIsEmpty = read == 0;
+            }
+            catch (OperationCanceledException) when (
+                probe.IsCancellationRequested && !timeout.IsCancellationRequested)
+            {
+                // A bounded quiet period establishes the empty request without
+                // allowing a keep-alive client to consume the hook deadline.
+            }
+        }
+
         bool accepted = headerEnd >= 0
-            && headerEnd + 4 == request.Length
+            && framingIsEmpty
             && lines.Length > 0
             && lines[0] is "POST /wake HTTP/1.1" or "POST /wake HTTP/1.0"
             && headersAreValid

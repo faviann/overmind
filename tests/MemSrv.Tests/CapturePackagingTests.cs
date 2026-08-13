@@ -585,6 +585,12 @@ public sealed class CapturePackagingTests
             {
                 Assert.Equal("HTTP/1.1 404 Not Found", await SendWakeRequestAsync(request));
             }
+            Assert.Equal(
+                "HTTP/1.1 404 Not Found",
+                await SendSplitWakeRequestAsync(
+                    "POST /wake HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
+                    "undeclared-body",
+                    TimeSpan.FromMilliseconds(10)));
             await Task.Delay(TimeSpan.FromMilliseconds(750));
             Assert.Single((await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
 
@@ -617,6 +623,21 @@ public sealed class CapturePackagingTests
         await client.ConnectAsync(System.Net.IPAddress.Loopback, 43191);
         System.Net.Sockets.NetworkStream stream = client.GetStream();
         await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(request));
+        using var reader = new StreamReader(stream);
+        return await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+    }
+
+    private static async Task<string> SendSplitWakeRequestAsync(
+        string first,
+        string second,
+        TimeSpan delay)
+    {
+        using var client = new System.Net.Sockets.TcpClient();
+        await client.ConnectAsync(System.Net.IPAddress.Loopback, 43191);
+        System.Net.Sockets.NetworkStream stream = client.GetStream();
+        await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(first));
+        await Task.Delay(delay);
+        await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(second));
         using var reader = new StreamReader(stream);
         return await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
     }
@@ -677,6 +698,42 @@ public sealed class CapturePackagingTests
             Assert.Empty(await stdout);
             Assert.Contains("capture_wake_unavailable", await stderr, StringComparison.Ordinal);
             collision.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BridgeWakeForwarderModeKeepsScheduledScanningAuthoritative()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-bridge-mode-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25";
+        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
+        await WaitForFixedWakePortAsync();
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(
+            environment,
+            ["--bridge-wake-forwarder"]);
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            string transcript = Path.Combine(
+                sessions, "2026", "08", "13", "rollout-bridge-mode.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(transcript)!);
+            await File.WriteAllTextAsync(transcript, Transcript("bridge-mode-scheduled"));
+
+            await WaitForCapturedStreamCountAsync(state, 1);
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
             Directory.Delete(root, recursive: true);
         }
     }

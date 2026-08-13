@@ -300,7 +300,8 @@ internal static class TestProcessRunner
     }
 
     public static CaptureTracerProcess StartCaptureTracer(
-        IReadOnlyDictionary<string, string> environment)
+        IReadOnlyDictionary<string, string> environment,
+        IReadOnlyList<string>? args = null)
     {
         string? stateDirectory = environment.GetValueOrDefault("OVERMIND_CAPTURE_STATE_DIR");
         int initialReceiptCount = 0;
@@ -320,7 +321,7 @@ internal static class TestProcessRunner
                 // The packaged child owns fail-closed validation of corrupt state.
             }
         }
-        Process process = Process.Start(CreateStartInfo(CaptureTracerPath, [], environment))
+        Process process = Process.Start(CreateStartInfo(CaptureTracerPath, args ?? [], environment))
             ?? throw new InvalidOperationException("Failed to start CodexCaptureTracer.");
         return new CaptureTracerProcess(process, stateDirectory, initialReceiptCount);
     }

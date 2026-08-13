@@ -76,30 +76,9 @@ internal static class TestProcessRunner
     {
         var startInfo = CreateStartInfo(command, args, environment);
         startInfo.RedirectStandardInput = true;
-        var elapsed = Stopwatch.StartNew();
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException($"Failed to start {description}.");
-        var stdoutPump = process.StandardOutput.ReadToEndAsync();
-        var stderrPump = process.StandardError.ReadToEndAsync();
-        using var cts = new CancellationTokenSource(timeout);
-        try
-        {
-            await process.StandardInput.WriteAsync(stdin.AsMemory(), cts.Token);
-            await process.StandardInput.FlushAsync(cts.Token);
-            await Task.Delay(stdinCloseDelay, cts.Token);
-            process.StandardInput.Close();
-            await process.WaitForExitAsync(cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
-            await Task.WhenAll(stdoutPump, stderrPump);
-            throw new Xunit.Sdk.XunitException(
-                $"{description} did not exit within {timeout.TotalSeconds:0}s.");
-        }
-        elapsed.Stop();
-        return (process.ExitCode, await stdoutPump, await stderrPump, elapsed.Elapsed);
+        ProcessResult result = await RunProcessToExitAsync(
+            startInfo, timeout, description, stdin, stdinCloseDelay);
+        return (result.ExitCode, result.Stdout, result.Stderr, result.Elapsed);
     }
 
     // Runs memctl to completion. Failure-tolerant: returns the exit code and
@@ -370,6 +349,18 @@ internal static class TestProcessRunner
     private static async Task<(int ExitCode, string Stdout, string Stderr)> RunToExitAsync(
         ProcessStartInfo startInfo, TimeSpan timeout, string description)
     {
+        ProcessResult result = await RunProcessToExitAsync(startInfo, timeout, description);
+        return (result.ExitCode, result.Stdout, result.Stderr);
+    }
+
+    private static async Task<ProcessResult> RunProcessToExitAsync(
+        ProcessStartInfo startInfo,
+        TimeSpan timeout,
+        string description,
+        string? stdin = null,
+        TimeSpan stdinCloseDelay = default)
+    {
+        var elapsed = Stopwatch.StartNew();
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Failed to start {description}.");
         // Drain both streams concurrently so a full pipe buffer can't deadlock
@@ -381,6 +372,13 @@ internal static class TestProcessRunner
         using var cts = new CancellationTokenSource(timeout);
         try
         {
+            if (stdin is not null)
+            {
+                await process.StandardInput.WriteAsync(stdin.AsMemory(), cts.Token);
+                await process.StandardInput.FlushAsync(cts.Token);
+                await Task.Delay(stdinCloseDelay, cts.Token);
+                process.StandardInput.Close();
+            }
             await process.WaitForExitAsync(cts.Token);
         }
         catch (OperationCanceledException)
@@ -392,8 +390,13 @@ internal static class TestProcessRunner
                 $"{description} did not exit within {timeout.TotalSeconds:0}s.");
         }
 
-        return (process.ExitCode, await stdoutPump, await stderrPump);
+        elapsed.Stop();
+        return new ProcessResult(
+            process.ExitCode, await stdoutPump, await stderrPump, elapsed.Elapsed);
     }
+
+    private sealed record ProcessResult(
+        int ExitCode, string Stdout, string Stderr, TimeSpan Elapsed);
 
     private static string ResolveApphost(string projectName)
     {

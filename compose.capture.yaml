@@ -16,7 +16,6 @@ services:
       OVERMIND_CAPTURE_STATE_DIR: /state
       OVERMIND_CAPTURE_SCAN_INTERVAL_MS: ${OVERMIND_CAPTURE_SCAN_INTERVAL_MS:-1000}
       OVERMIND_CAPTURE_SCAN_JITTER_MS: ${OVERMIND_CAPTURE_SCAN_JITTER_MS:-250}
-      OVERMIND_CAPTURE_WAKE_ENABLED: "true"
     # Linux host networking makes the runtime's loopback listener the host's
     # loopback listener without publishing a container port or widening its bind.
     network_mode: host

@@ -15,7 +15,6 @@ string transcriptRoot;
 string? archiveRoot;
 string stateDirectory;
 bool useLegacySyntheticDiscovery;
-int wakePort;
 try
 {
     endpoint = Required("OVERMIND_CAPTURE_URL").TrimEnd('/');
@@ -37,23 +36,6 @@ try
         Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_STATE_DIR")
         ?? transcriptRoot + ".overmind-state");
     credential = await ResolveCredentialAsync(endpoint, stateDirectory);
-    wakePort = CaptureWakeListener.Port;
-    string? diagnosticWakePort =
-        Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_WAKE_TEST_PORT");
-    if (legacySyntheticDiagnostics && !string.IsNullOrWhiteSpace(diagnosticWakePort))
-    {
-        if (!int.TryParse(
-                diagnosticWakePort,
-                System.Globalization.NumberStyles.None,
-                System.Globalization.CultureInfo.InvariantCulture,
-                out wakePort)
-            || wakePort is < 1 or > 65535
-            || wakePort == CaptureWakeListener.Port)
-        {
-            throw new InvalidOperationException(
-                "OVERMIND_CAPTURE_WAKE_TEST_PORT must be a non-production TCP port.");
-        }
-    }
 }
 catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
 {
@@ -173,22 +155,16 @@ catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
 using var stopping = new CancellationTokenSource();
 var wakeup = new CaptureScanWakeup();
 CaptureWakeListener? wakeListener = null;
-if (string.Equals(
-        Environment.GetEnvironmentVariable("OVERMIND_CAPTURE_WAKE_ENABLED"),
-        "true",
-        StringComparison.Ordinal))
+var candidate = new CaptureWakeListener(wakeup);
+try
 {
-    var candidate = new CaptureWakeListener(wakeup, wakePort);
-    try
-    {
-        candidate.Start();
-        wakeListener = candidate;
-    }
-    catch (System.Net.Sockets.SocketException)
-    {
-        await candidate.DisposeAsync();
-        WriteDiagnostic("capture_wake_unavailable", "listener_unavailable");
-    }
+    candidate.Start();
+    wakeListener = candidate;
+}
+catch (System.Net.Sockets.SocketException)
+{
+    await candidate.DisposeAsync();
+    WriteDiagnostic("capture_wake_unavailable", "listener_unavailable");
 }
 await using CaptureWakeListener? wakeListenerScope = wakeListener;
 Console.CancelKeyPress += (_, eventArgs) =>

@@ -134,7 +134,6 @@ start_runtime() {
     -e OVERMIND_CAPTURE_CREDENTIAL="$credential" \
     -e OVERMIND_CAPTURE_SCAN_INTERVAL_MS=100 \
     -e OVERMIND_CAPTURE_SCAN_JITTER_MS=0 \
-    -e OVERMIND_CAPTURE_WAKE_ENABLED=true \
     "$capture_image" >/dev/null
 }
 

@@ -11,10 +11,10 @@ internal sealed class CaptureWakeListener : IAsyncDisposable
     private readonly CancellationTokenSource _stopping = new();
     private Task? _loop;
 
-    internal CaptureWakeListener(CaptureScanWakeup wakeup, int port = Port)
+    internal CaptureWakeListener(CaptureScanWakeup wakeup)
     {
         _wakeup = wakeup;
-        _listener = new TcpListener(IPAddress.Loopback, port);
+        _listener = new TcpListener(IPAddress.Loopback, Port);
     }
 
     internal void Start()

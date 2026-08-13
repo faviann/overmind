@@ -310,21 +310,10 @@ public sealed class CapturePackagingTests
         }
     }
 
-    private static int ReserveLoopbackPort()
+    private static async Task WaitForFixedWakePortAsync()
     {
-        using var reservation = new System.Net.Sockets.TcpListener(
-            System.Net.IPAddress.Loopback, 0);
-        reservation.Start();
-        return ((System.Net.IPEndPoint)reservation.LocalEndpoint).Port;
-    }
-
-    private static void UseDiagnosticWakePort(
-        Dictionary<string, string> environment,
-        int port)
-    {
-        environment["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production";
-        environment["OVERMIND_CAPTURE_WAKE_TEST_PORT"] = port.ToString(
-            System.Globalization.CultureInfo.InvariantCulture);
+        using var listener = await ListenOnFixedWakePortAsync();
+        listener.Stop();
     }
 
     [Fact]
@@ -336,10 +325,9 @@ public sealed class CapturePackagingTests
         Directory.CreateDirectory(sessions);
         Directory.CreateDirectory(archive);
         Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
-        int wakePort = ReserveLoopbackPort();
-        UseDiagnosticWakePort(environment, wakePort);
         environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "3600000";
-        environment["OVERMIND_CAPTURE_WAKE_ENABLED"] = "true";
+        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
+        await WaitForFixedWakePortAsync();
         using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
         Task<string> stdout = process.StandardOutput.ReadToEndAsync();
         try
@@ -357,7 +345,7 @@ public sealed class CapturePackagingTests
                 try
                 {
                     readiness = await client.PostAsync(
-                        $"http://127.0.0.1:{wakePort}/wake", content: null);
+                        "http://127.0.0.1:43191/wake", content: null);
                 }
                 catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
                 {
@@ -375,7 +363,7 @@ public sealed class CapturePackagingTests
             if (nonLoopback is not null)
             {
                 Exception? nonLoopbackFailure = await Record.ExceptionAsync(() =>
-                    client.PostAsync($"http://{nonLoopback}:{wakePort}/wake", content: null));
+                    client.PostAsync($"http://{nonLoopback}:43191/wake", content: null));
                 Assert.True(
                     nonLoopbackFailure is HttpRequestException or TaskCanceledException,
                     $"The wake endpoint was reachable through non-loopback address " +
@@ -390,7 +378,7 @@ public sealed class CapturePackagingTests
             await File.WriteAllTextAsync(second, Transcript("second"));
 
             using HttpResponseMessage response = await client.PostAsync(
-                $"http://127.0.0.1:{wakePort}/wake", content: null);
+                "http://127.0.0.1:43191/wake", content: null);
             Assert.Equal(System.Net.HttpStatusCode.NoContent, response.StatusCode);
             string diagnostic = await process.StandardError.ReadLineAsync()
                 .WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
@@ -555,14 +543,10 @@ public sealed class CapturePackagingTests
         string state = Path.Combine(root, "state");
         Directory.CreateDirectory(sessions);
         Directory.CreateDirectory(archive);
-        using var collision = new System.Net.Sockets.TcpListener(
-            System.Net.IPAddress.Loopback, 0);
-        collision.Start();
-        int wakePort = ((System.Net.IPEndPoint)collision.LocalEndpoint).Port;
+        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
+        using var collision = await ListenOnFixedWakePortAsync();
         Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
-        UseDiagnosticWakePort(environment, wakePort);
         environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "25";
-        environment["OVERMIND_CAPTURE_WAKE_ENABLED"] = "true";
         using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
         Task<string> stdout = process.StandardOutput.ReadToEndAsync();
         Task<string> stderr = process.StandardError.ReadToEndAsync();

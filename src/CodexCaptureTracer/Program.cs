@@ -241,15 +241,22 @@ try
             WriteDiagnostic("capture_policy_paused");
             if (instructionPoll is not null)
             {
-                await AcknowledgeCaptureInstructionsAsync(
-                    endpoint,
-                    credential,
-                    instructionPoll.Instructions
-                        .Where(instruction =>
-                            instruction.Operation is CaptureInstructionOperations.Pause
-                                or CaptureInstructionOperations.Resume)
-                        .ToArray(),
-                    cancellationToken);
+                try
+                {
+                    await AcknowledgeCaptureInstructionsAsync(
+                        endpoint,
+                        credential,
+                        instructionPoll.Instructions
+                            .Where(instruction =>
+                                instruction.Operation is CaptureInstructionOperations.Pause
+                                    or CaptureInstructionOperations.Resume)
+                            .ToArray(),
+                        cancellationToken);
+                }
+                catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+                {
+                    WriteFailure(ex);
+                }
             }
             return;
         }
@@ -265,7 +272,8 @@ try
                 return;
             }
         }
-        await CodexTranscriptScanCycle.RunAsync(
+        bool compatibleWorkCompleted = true;
+        bool filesystemWorkCompleted = await CodexTranscriptScanCycle.RunAsync(
             streams,
             async (transcript, token) =>
             {
@@ -278,19 +286,35 @@ try
                 {
                     // One source stream or endpoint outage cannot cancel
                     // responsibility for later cycles/streams.
+                    compatibleWorkCompleted = false;
                     WriteFailure(ex);
                 }
             },
             WriteFailure,
             cancellationToken);
+        compatibleWorkCompleted &= filesystemWorkCompleted;
         if (instructionPollFailure is not null)
         {
             WriteFailure(instructionPollFailure);
         }
         if (instructionPoll is not null)
         {
-            await AcknowledgeCaptureInstructionsAsync(
-                endpoint, credential, instructionPoll.Instructions, cancellationToken);
+            try
+            {
+                await AcknowledgeCaptureInstructionsAsync(
+                    endpoint,
+                    credential,
+                    instructionPoll.Instructions
+                        .Where(instruction => compatibleWorkCompleted
+                            || instruction.Operation is CaptureInstructionOperations.Pause
+                                or CaptureInstructionOperations.Resume)
+                        .ToArray(),
+                    cancellationToken);
+            }
+            catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+            {
+                WriteFailure(ex);
+            }
         }
     }
 
@@ -635,6 +659,16 @@ static async Task AcknowledgeCaptureInstructionsAsync(
             content: null,
             cancellationToken);
         response.EnsureSuccessStatusCode();
+        CaptureInstructionAcknowledgement? acknowledgement =
+            await response.Content.ReadFromJsonAsync<CaptureInstructionAcknowledgement>(
+                cancellationToken);
+        if (acknowledgement is null
+            || acknowledgement.InstructionId != instruction.InstructionId
+            || acknowledgement.AcknowledgedAt == default)
+        {
+            throw new InvalidDataException(
+                "Capture instruction acknowledgement response is invalid.");
+        }
     }
 }
 

@@ -16,4 +16,3 @@ CREATE INDEX capture_instructions_pending
 
 GRANT SELECT, INSERT ON capture_instructions TO memsrv;
 GRANT UPDATE (acknowledged_at) ON capture_instructions TO memsrv;
-

@@ -134,17 +134,25 @@ public sealed class CaptureInstructionTests : HttpSeamTestBase
         Assert.Single(pending.GetProperty("instructions").EnumerateArray());
     }
 
-    private Task EnrollAsync(string stableName, string credential) => RunMemCtlAsync(
-        "capture", "enroll", stableName,
-        "--harness", "codex",
-        "--agent-id", $"capture:{stableName}",
-        "--credential-file", WriteCredential(credential));
-
-    private static string WriteCredential(string credential)
+    private async Task EnrollAsync(string stableName, string credential)
     {
-        string path = Path.Combine(Path.GetTempPath(), $"capture-key-{Guid.NewGuid():N}");
-        File.WriteAllText(path, credential);
-        return path;
+        string credentialPath;
+        await using (var credentialFile = await PrivateCredentialFile.CreateAsync(credential))
+        {
+            credentialPath = credentialFile.Path;
+            if (!OperatingSystem.IsWindows())
+            {
+                Assert.Equal(
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite,
+                    File.GetUnixFileMode(credentialPath));
+            }
+            await RunMemCtlAsync(
+                "capture", "enroll", stableName,
+                "--harness", "codex",
+                "--agent-id", $"capture:{stableName}",
+                "--credential-file", credentialPath);
+        }
+        Assert.False(File.Exists(credentialPath));
     }
 
     private HttpClient CaptureClient(string credential)
@@ -166,6 +174,48 @@ public sealed class CaptureInstructionTests : HttpSeamTestBase
         {
             length = 0;
             return false;
+        }
+    }
+
+    private sealed class PrivateCredentialFile : IAsyncDisposable
+    {
+        private PrivateCredentialFile(string path) => Path = path;
+
+        public string Path { get; }
+
+        public static async Task<PrivateCredentialFile> CreateAsync(string credential)
+        {
+            string path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), $"capture-key-{Guid.NewGuid():N}");
+            try
+            {
+                var options = new FileStreamOptions
+                {
+                    Access = FileAccess.Write,
+                    Mode = FileMode.CreateNew,
+                    Share = FileShare.None
+                };
+                if (!OperatingSystem.IsWindows())
+                {
+                    options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                }
+                await using var stream = new FileStream(path, options);
+                await using var writer = new StreamWriter(stream, leaveOpen: false);
+                await writer.WriteAsync(credential);
+                await writer.FlushAsync();
+                return new PrivateCredentialFile(path);
+            }
+            catch
+            {
+                File.Delete(path);
+                throw;
+            }
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            File.Delete(Path);
+            return ValueTask.CompletedTask;
         }
     }
 

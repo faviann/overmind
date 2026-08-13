@@ -336,7 +336,7 @@ public static class CodexTranscriptDiscovery
 /// </summary>
 public static class CodexTranscriptScanCycle
 {
-    public static async Task RunAsync(
+    public static async Task<bool> RunAsync(
         IReadOnlyList<CodexTranscriptStream> streams,
         Func<CodexTranscriptStream, CancellationToken, Task> scanStream,
         Action<Exception> reportFailure,
@@ -346,11 +346,13 @@ public static class CodexTranscriptScanCycle
         ArgumentNullException.ThrowIfNull(scanStream);
         ArgumentNullException.ThrowIfNull(reportFailure);
 
+        bool completed = true;
         foreach (CodexTranscriptStream stream in streams)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (stream.IdentityFailure is not null)
             {
+                completed = false;
                 reportFailure(stream.IdentityFailure);
                 continue;
             }
@@ -361,8 +363,10 @@ public static class CodexTranscriptScanCycle
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
+                completed = false;
                 reportFailure(ex);
             }
         }
+        return completed;
     }
 }

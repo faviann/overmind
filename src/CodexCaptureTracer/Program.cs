@@ -697,10 +697,23 @@ static async Task PersistInstructionPolicyAsync(
         new { paused }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
     try
     {
-        await File.WriteAllTextAsync(temporary, serialized, cancellationToken);
+        var options = new FileStreamOptions
+        {
+            Access = FileAccess.Write,
+            Mode = FileMode.CreateNew,
+            Share = FileShare.None,
+            BufferSize = 16 * 1024,
+            Options = FileOptions.Asynchronous | FileOptions.WriteThrough
+        };
         if (!OperatingSystem.IsWindows())
-            File.SetUnixFileMode(
-                temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        await using (var stream = new FileStream(temporary, options))
+        {
+            await stream.WriteAsync(
+                System.Text.Encoding.UTF8.GetBytes(serialized), cancellationToken);
+            await stream.FlushAsync(cancellationToken);
+            stream.Flush(flushToDisk: true);
+        }
         File.Move(temporary, path, overwrite: true);
     }
     finally

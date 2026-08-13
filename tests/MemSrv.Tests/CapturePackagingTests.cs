@@ -742,6 +742,70 @@ public sealed class CapturePackagingTests
         }) + "\n";
 
     [Fact]
+    public async Task LegacyEnableWithProductionRootsStillPollsServerPolicyBeforeObservation()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-mixed-legacy-production-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string transcriptDirectory = Path.Combine(sessions, "2026", "08", "13");
+        Directory.CreateDirectory(transcriptDirectory);
+        Directory.CreateDirectory(archive);
+        await File.WriteAllTextAsync(
+            Path.Combine(transcriptDirectory, "rollout.jsonl"),
+            Transcript("mixed-legacy-production-session"));
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Task<(string Method, string Path)> firstRequest = Task.Run(async () =>
+        {
+            HttpListenerContext request = await listener.GetContextAsync();
+            var observed = (
+                request.Request.HttpMethod,
+                request.Request.Url!.AbsolutePath);
+            if (observed.AbsolutePath == "/capture/v1/instructions")
+            {
+                await RespondJsonAsync(request, new
+                {
+                    paused = false,
+                    instructions = Array.Empty<object>()
+                });
+            }
+            else
+            {
+                request.Response.StatusCode = 503;
+                request.Response.Close();
+            }
+            return (observed.HttpMethod, observed.AbsolutePath);
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, sessions, archive);
+        environment["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production";
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            using var process = TestProcessRunner.StartCaptureTracer(environment);
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            (string method, string path) = await firstRequest.WaitAsync(TimeSpan.FromSeconds(5));
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+
+            Assert.Equal("GET", method);
+            Assert.Equal("/capture/v1/instructions", path);
+            Assert.Empty(await stdout);
+            _ = await stderr;
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task LegacySyntheticTracerDeliversObservationsWithoutPollingInstructions()
     {
         string root = Path.Combine(

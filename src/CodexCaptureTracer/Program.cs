@@ -182,7 +182,7 @@ try
             return;
         }
         bool? persistedPaused = null;
-        if (!legacySyntheticDiagnostics)
+        if (!useLegacySyntheticDiscovery)
         {
             try
             {
@@ -217,11 +217,11 @@ try
 
         IReadOnlyList<CodexTranscriptStream>? streams = null;
 
-        CaptureInstructionPoll? instructionPoll = legacySyntheticDiagnostics
+        CaptureInstructionPoll? instructionPoll = useLegacySyntheticDiscovery
             ? new CaptureInstructionPoll(false, Array.Empty<CaptureInstruction>())
             : null;
         Exception? instructionPollFailure = null;
-        if (!legacySyntheticDiagnostics)
+        if (!useLegacySyntheticDiscovery)
         {
             try
             {

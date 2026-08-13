@@ -143,7 +143,9 @@ internal static class TestProcessRunner
     public static async Task<(int ExitCode, string Stdout, string Stderr)>
         RunCaptureTracerToExitAsync(IReadOnlyDictionary<string, string> environment)
     {
-        await using FileStream wakePortLock = AcquireCaptureWakePortLock();
+        await using FileStream? wakePortLock = UsesProductionCaptureRuntime(environment)
+            ? AcquireCaptureWakePortLock()
+            : null;
         return await RunToExitAsync(
             CreateStartInfo(CaptureTracerPath, [], environment),
             TimeSpan.FromSeconds(60),
@@ -307,7 +309,7 @@ internal static class TestProcessRunner
         IReadOnlyList<string>? args = null,
         bool coordinateWakePort = true)
     {
-        FileStream? wakePortLock = coordinateWakePort
+        FileStream? wakePortLock = coordinateWakePort && UsesProductionCaptureRuntime(environment)
             ? AcquireCaptureWakePortLock()
             : null;
         string? stateDirectory = environment.GetValueOrDefault("OVERMIND_CAPTURE_STATE_DIR");
@@ -362,6 +364,13 @@ internal static class TestProcessRunner
             }
         }
     }
+
+    private static bool UsesProductionCaptureRuntime(
+        IReadOnlyDictionary<string, string> environment) =>
+        !string.Equals(
+            environment.GetValueOrDefault("OVERMIND_CODEX_CAPTURE_ENABLE"),
+            "synthetic-non-production",
+            StringComparison.Ordinal);
 
     private static ProcessStartInfo CreateStartInfo(
         string apphostPath, IReadOnlyList<string> args, IReadOnlyDictionary<string, string> environment)
@@ -485,7 +494,7 @@ internal sealed class CaptureTracerProcess : IDisposable
 {
     private readonly Process _process;
     private readonly string? _stateDirectory;
-    private readonly FileStream? _wakePortLock;
+    private FileStream? _wakePortLock;
 
     public CaptureTracerProcess(
         Process process,
@@ -496,6 +505,12 @@ internal sealed class CaptureTracerProcess : IDisposable
         _process = process;
         _stateDirectory = stateDirectory;
         _wakePortLock = wakePortLock;
+        _process.EnableRaisingEvents = true;
+        _process.Exited += ReleaseWakePortLock;
+        if (_process.HasExited)
+        {
+            ReleaseWakePortLock(_process, EventArgs.Empty);
+        }
         InitialReceiptCount = initialReceiptCount;
     }
 
@@ -529,7 +544,11 @@ internal sealed class CaptureTracerProcess : IDisposable
     public void WaitForExit() => _process.WaitForExit();
     public void Dispose()
     {
+        _process.Exited -= ReleaseWakePortLock;
         _process.Dispose();
-        _wakePortLock?.Dispose();
+        Interlocked.Exchange(ref _wakePortLock, null)?.Dispose();
     }
+
+    private void ReleaseWakePortLock(object? sender, EventArgs args) =>
+        Interlocked.Exchange(ref _wakePortLock, null)?.Dispose();
 }

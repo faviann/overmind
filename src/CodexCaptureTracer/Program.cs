@@ -170,16 +170,19 @@ catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
 using var stopping = new CancellationTokenSource();
 var wakeup = new CaptureScanWakeup();
 CaptureWakeListener? wakeListener = null;
-var candidate = new CaptureWakeListener(wakeup);
-try
+if (!legacySyntheticDiagnostics)
 {
-    candidate.Start();
-    wakeListener = candidate;
-}
-catch (System.Net.Sockets.SocketException)
-{
-    await candidate.DisposeAsync();
-    WriteDiagnostic("capture_wake_unavailable", "listener_unavailable");
+    var candidate = new CaptureWakeListener(wakeup);
+    try
+    {
+        candidate.Start();
+        wakeListener = candidate;
+    }
+    catch (System.Net.Sockets.SocketException)
+    {
+        await candidate.DisposeAsync();
+        WriteDiagnostic("capture_wake_unavailable", "listener_unavailable");
+    }
 }
 await using CaptureWakeListener? wakeListenerScope = wakeListener;
 Console.CancelKeyPress += (_, eventArgs) =>

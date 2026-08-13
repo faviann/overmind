@@ -350,7 +350,6 @@ internal static class TestProcessRunner
         // subprocess tests share one cross-process boundary. Otherwise a wake
         // from one test can spuriously interrupt a different tracer shard.
         string path = Path.Combine(Path.GetTempPath(), "overmind-capture-wake-43191.lock");
-        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
         while (true)
         {
             try
@@ -358,7 +357,7 @@ internal static class TestProcessRunner
                 return new FileStream(
                     path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
             }
-            catch (IOException) when (DateTime.UtcNow < deadline)
+            catch (IOException)
             {
                 Thread.Sleep(50);
             }

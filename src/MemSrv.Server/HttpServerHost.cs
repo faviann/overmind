@@ -59,6 +59,7 @@ public static class HttpServerHost
             provider.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton(provider =>
             new CaptureIngestion(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
+        builder.Services.AddSingleton(_ => new CaptureInstructions(options.ConnectionString));
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddAntiforgery(antiforgery =>
@@ -355,7 +356,80 @@ public static class HttpServerHost
                     ? Results.NoContent()
                     : Results.StatusCode(StatusCodes.Status410Gone);
             }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
+
+            app.MapPost("/capture/console/api/instructions", async (
+                CaptureInstructionCreateRequest request,
+                CaptureInstructions instructions,
+                CaptureConsoleOperatorAuthorization authorization,
+                HttpContext http) =>
+            {
+                try
+                {
+                    CaptureConsoleOperator @operator = authorization.RequireOperator();
+                    Guid instructionId = await instructions.CreateAsync(
+                        request.StableName,
+                        request.Operation,
+                        @operator.ProviderSubject,
+                        http.RequestAborted);
+                    return Results.Created(
+                        $"/capture/console/api/instructions/{instructionId}",
+                        new { instructionId });
+                }
+                catch (KeyNotFoundException) { return Results.NotFound(); }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }).RequireAuthorization(CaptureConsoleAuthentication.OperatorPolicy);
         }
+
+        app.MapGet("/capture/v1/instructions", async (
+            HttpContext http,
+            CaptureAuthority authority,
+            CaptureInstructions instructions) =>
+        {
+            string? credential = Bearer(http);
+            CaptureBindingContext? binding = credential is null
+                ? null
+                : await authority.ResolveAsync(credential, http.RequestAborted);
+            return binding is null
+                ? Results.Unauthorized()
+                : Results.Ok(await instructions.PollAsync(binding, http.RequestAborted));
+        });
+
+        // Resolve capture authority before touching the acknowledgement body.
+        // The operation has no body: the stable instruction identity is the
+        // complete idempotency key and an acknowledgement carries no diagnostics.
+        app.MapPost("/capture/v1/instructions/{instructionId:guid}/acknowledge", async (
+            Guid instructionId,
+            HttpContext http,
+            CaptureAuthority authority,
+            CaptureInstructions instructions) =>
+        {
+            string? credential = Bearer(http);
+            CaptureBindingContext? binding = credential is null
+                ? null
+                : await authority.ResolveAsync(credential, http.RequestAborted);
+            if (binding is null) return Results.Unauthorized();
+            if (!await instructions.IsOwnedByAsync(
+                    binding, instructionId, http.RequestAborted))
+            {
+                return Results.NotFound();
+            }
+            var body = await http.Request.BodyReader.ReadAsync(http.RequestAborted);
+            bool hasBody = !body.Buffer.IsEmpty;
+            http.Request.BodyReader.AdvanceTo(body.Buffer.Start, body.Buffer.End);
+            if (hasBody)
+            {
+                return Results.StatusCode(StatusCodes.Status400BadRequest);
+            }
+            CaptureInstructionAcknowledgement? acknowledgement =
+                await instructions.AcknowledgeAsync(
+                    binding, instructionId, http.RequestAborted);
+            return acknowledgement is null
+                ? Results.NotFound()
+                : Results.Ok(acknowledgement);
+        });
 
         // Deliberately outside MCP authentication: capture credentials are a
         // separate capability resolved only by CaptureAuthority. Capture

@@ -35,6 +35,49 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
     };
 
     [Fact]
+    public async Task OidcOperatorCreatesSameClosedBindingScopedInstructionAsMemctl()
+    {
+        string stableName = $"console-instruction-{Guid.NewGuid():N}";
+        string credential = $"mcap_{Guid.NewGuid():N}";
+        string credentialPath = Path.Combine(
+            Path.GetTempPath(), $"capture-console-key-{Guid.NewGuid():N}");
+        await File.WriteAllTextAsync(credentialPath, credential);
+        try
+        {
+            await RunMemCtlAsync(
+                "capture", "enroll", stableName,
+                "--harness", "codex",
+                "--agent-id", $"capture:{stableName}",
+                "--credential-file", credentialPath);
+            using var provider = ConfigureFakeOidcProvider("authentik|instruction-operator");
+            OidcSignIn signIn = await CompleteOidcSignInAsync(provider);
+            using var console = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+            console.DefaultRequestHeaders.Add("Cookie", signIn.CookieHeader);
+            console.DefaultRequestHeaders.Add("X-Forwarded-Proto", "https");
+            using HttpResponseMessage created = await console.PostAsJsonAsync(
+                "/capture/console/api/instructions",
+                new { stableName, operation = "retry" });
+            Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+            Guid instructionId = (await created.Content.ReadFromJsonAsync<JsonElement>())
+                .GetProperty("instructionId").GetGuid();
+
+            using var runtime = new HttpClient { BaseAddress = new Uri(_baseUrl) };
+            runtime.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", credential);
+            JsonElement polled = await runtime.GetFromJsonAsync<JsonElement>(
+                "/capture/v1/instructions");
+            JsonElement instruction = Assert.Single(
+                polled.GetProperty("instructions").EnumerateArray());
+            Assert.Equal(instructionId, instruction.GetProperty("instructionId").GetGuid());
+            Assert.Equal("retry", instruction.GetProperty("operation").GetString());
+        }
+        finally
+        {
+            File.Delete(credentialPath);
+        }
+    }
+
+    [Fact]
     public async Task AuthenticatedOperatorPairsRuntimeWithoutDisclosingCredentialFromApproval()
     {
         using var provider = ConfigureFakeOidcProvider("authentik|pairing-operator");

@@ -731,6 +731,222 @@ public sealed class CapturePackagingTests
             }
         }) + "\n";
 
+    [Fact]
+    public async Task PackagedTracerPersistsPauseBeforeAcknowledgingAndDoesNotScan()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-instruction-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Guid instructionId = Guid.NewGuid();
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Task server = Task.Run(async () =>
+        {
+            HttpListenerContext poll = await listener.GetContextAsync();
+            Assert.Equal("/capture/v1/instructions", poll.Request.Url!.AbsolutePath);
+            Assert.StartsWith("Bearer mcap_", poll.Request.Headers["Authorization"]);
+            await JsonSerializer.SerializeAsync(poll.Response.OutputStream, new
+            {
+                paused = true,
+                instructions = new[]
+                {
+                    new { instructionId, operation = "pause", createdAt = DateTimeOffset.UtcNow }
+                }
+            });
+            poll.Response.StatusCode = 200;
+            poll.Response.Close();
+
+            HttpListenerContext acknowledgement = await listener.GetContextAsync();
+            Assert.Equal(
+                $"/capture/v1/instructions/{instructionId}/acknowledge",
+                acknowledgement.Request.Url!.AbsolutePath);
+            Assert.Equal(0, acknowledgement.Request.ContentLength64);
+            await JsonSerializer.SerializeAsync(acknowledgement.Response.OutputStream, new
+            {
+                instructionId,
+                acknowledgedAt = DateTimeOffset.UtcNow
+            });
+            acknowledgement.Response.StatusCode = 200;
+            acknowledgement.Response.Close();
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_policy_paused\"");
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Empty(result.Stdout);
+            JsonElement state = JsonDocument.Parse(await File.ReadAllTextAsync(
+                Path.Combine(root, "state", "capture-instruction-policy.json"))).RootElement;
+            Assert.True(state.GetProperty("paused").GetBoolean());
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerRetainsQueueWhenPersistedPauseCannotBePolled()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-persisted-pause-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "13");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string transcript = Path.Combine(sessions, "rollout-paused.jsonl");
+        await File.WriteAllTextAsync(transcript, Transcript("paused-session"));
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+
+        try
+        {
+            _ = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
+            string beforePause = await File.ReadAllTextAsync(
+                Path.Combine(state, "capture-state.json"));
+            await File.WriteAllTextAsync(
+                Path.Combine(state, "capture-instruction-policy.json"),
+                "{\"paused\":true}");
+            await File.AppendAllTextAsync(
+                transcript,
+                JsonSerializer.Serialize(new
+                {
+                    type = "response_item",
+                    payload = new
+                    {
+                        type = "message",
+                        role = "assistant",
+                        content = new[]
+                        {
+                            new { type = "output_text", text = "must remain unclaimed" }
+                        }
+                    }
+                }) + "\n");
+
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
+
+            Assert.Empty(result.Stdout);
+            Assert.Contains("\"reason\":\"endpoint_unavailable\"", result.Stderr);
+            Assert.Equal(
+                beforePause,
+                await File.ReadAllTextAsync(Path.Combine(state, "capture-state.json")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("{not-json")]
+    [InlineData("{}")]
+    [InlineData("{\"paused\":\"true\"}")]
+    [InlineData("{\"paused\":true,\"paused\":false}")]
+    public async Task PackagedTracerFailsClosedOnMalformedPersistedPolicy(
+        string policy)
+    {
+        const string privateContent = "must-not-be-scanned-from-malformed-policy";
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-invalid-policy-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "13");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Directory.CreateDirectory(state);
+        await File.WriteAllTextAsync(
+            Path.Combine(sessions, "rollout-invalid-policy.jsonl"),
+            Transcript("invalid-policy-session").Replace(
+                "public evidence", privateContent, StringComparison.Ordinal));
+        await File.WriteAllTextAsync(
+            Path.Combine(state, "capture-instruction-policy.json"), policy);
+
+        try
+        {
+            var result = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                ProductionEnvironment(root, Path.Combine(root, "sessions"), archive),
+                "\"event\":\"capture_cycle_failed\"");
+
+            Assert.Empty(result.Stdout);
+            Assert.False(File.Exists(Path.Combine(state, "capture-state.json")));
+            Assert.DoesNotContain(privateContent, result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain(root, result.Stderr, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PackagedTracerCurrentResumeClearsPersistedPauseAndRestoresScanning()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-current-resume-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "13");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Directory.CreateDirectory(state);
+        await File.WriteAllTextAsync(
+            Path.Combine(sessions, "rollout-resumed.jsonl"),
+            Transcript("resumed-session"));
+        await File.WriteAllTextAsync(
+            Path.Combine(state, "capture-instruction-policy.json"),
+            "{\"paused\":true}");
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Task server = Task.Run(async () =>
+        {
+            HttpListenerContext poll = await listener.GetContextAsync();
+            Assert.Equal("/capture/v1/instructions", poll.Request.Url!.AbsolutePath);
+            await JsonSerializer.SerializeAsync(poll.Response.OutputStream, new
+            {
+                paused = false,
+                instructions = Array.Empty<object>()
+            });
+            poll.Response.StatusCode = 200;
+            poll.Response.Close();
+            listener.Stop();
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+
+        try
+        {
+            _ = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
+
+            JsonElement policy = JsonDocument.Parse(await File.ReadAllTextAsync(
+                Path.Combine(state, "capture-instruction-policy.json"))).RootElement;
+            Assert.False(policy.GetProperty("paused").GetBoolean());
+            CaptureRuntimeStreamState resumed = Assert.Single(
+                (await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
+            Assert.Equal(2, resumed.Queue.Count);
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static Dictionary<string, string> ProductionEnvironment(
         string root,
         string sessions,

@@ -312,6 +312,14 @@ static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
             }
             return 0;
 
+        case "instruct":
+            RequireArgs(args, 4);
+            Guid instructionUuid = await new CaptureInstructions(options.ConnectionString)
+                .CreateAsync(args[2], args[3], RequireOption(args, "--by"));
+            Console.WriteLine(
+                $"capture instruction {instructionUuid} binding={args[2]} operation={args[3]}");
+            return 0;
+
         case "replay":
             RequireArgs(args, 3);
             var replay = await new OperatorCaptureReads(options.ConnectionString)
@@ -445,6 +453,8 @@ static void Usage()
         "memctl capture enroll <stable_name> --harness harness --agent-id id " +
         "--credential-file path");
     Console.Error.WriteLine("memctl capture receipt <observation_uuid>");
+    Console.Error.WriteLine(
+        "memctl capture instruct <stable_name> <scan|retry|pause|resume> --by operator");
     Console.Error.WriteLine("memctl capture replay <source_stream_uuid>");
     Console.Error.WriteLine(
         "memctl capture navigate <source_stream_uuid> --namespace namespace " +

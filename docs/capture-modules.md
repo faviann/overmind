@@ -16,6 +16,7 @@ Source interpretation before this spine is described by the
 | `CapturePairing` | create/poll/cancel plus code-based operator inspection and approval → one installation binding and one-time credential delivery | `/capture/v1/pairing-requests`, `/capture/console/pair/{userCode}` |
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
 | `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
+| `CaptureInstructions` | operator `CreateAsync(stableName, operation, operatorIdentity)`; binding-scoped `PollAsync` and idempotent `AcknowledgeAsync` | `memctl capture instruct`, OIDC console API, capture runtime HTTP polling |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement + trusted source provenance\|CaptureObservationRequest\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `ContainsUnsupportedBinaryOmission(command)`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
 | `CaptureOutcomeAggregation` | `FidelityOmission` / `SafetyFailure`; `Summarize` / `FromCanonical` → content-free health, fidelity, and counters | capture runtime state, capture HTTP responses, `memctl capture receipt` |
@@ -31,6 +32,14 @@ Source interpretation before this spine is described by the
 `CaptureLedger` is internal: the single reader over the durable capture ledger
 rows — observations, events, relationships — that ingestion and operator reads
 both project into canonical facts.
+
+`CaptureInstructions` accepts only `scan`, `retry`, `pause`, and `resume`.
+Instruction UUIDs are durable replay identities. Poll and acknowledgement first
+resolve the restricted capture credential and then operate only on its binding;
+acknowledgement has no request body or diagnostic payload. Pause/resume is
+server-owned policy. The runtime persists that policy before acknowledging it,
+and pause prevents transcript scanning and queue delivery without modifying or
+discarding durable queued responsibility.
 
 ## Invariants each interface hides
 

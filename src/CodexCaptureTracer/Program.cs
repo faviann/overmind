@@ -78,7 +78,8 @@ var adapter = new CodexJsonlAdapter();
 
 async Task ScanAndDeliverAsync(
     CodexTranscriptStream transcript,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    bool deliveryAuthorized)
 {
     await CodexCaptureClaimer.ClaimCompletedAsync(
         adapter,
@@ -90,6 +91,11 @@ async Task ScanAndDeliverAsync(
         transcript.TerminalAtEndOfFile,
         transcript.TranscriptIdentity,
         transcript.SourceIdentity);
+
+    if (!deliveryAuthorized)
+    {
+        return;
+    }
 
     CaptureRuntimeStreamState? stream = (await runtimeState.ReadAsync(cancellationToken))
         .Streams.SingleOrDefault(value =>
@@ -163,34 +169,106 @@ try
 {
     async Task ScanCycleAsync(CancellationToken cancellationToken)
     {
-        IReadOnlyList<CodexTranscriptStream> streams;
+        // Validate durable responsibility before any network activity. This is
+        // content-free local state and does not scan transcript material.
+        CaptureRuntimeSnapshot durableSnapshot;
         try
         {
-            if (useLegacySyntheticDiscovery)
-            {
-                streams = CodexTranscriptDiscovery.Enumerate(transcriptRoot);
-            }
-            else
-            {
-                CaptureRuntimeSnapshot snapshot =
-                    await runtimeState.ReadAsync(cancellationToken);
-                var responsibleSourceStreamsByTranscriptIdentity = snapshot.Streams
-                    .Where(stream => stream.Queue.Count > 0)
-                    .ToDictionary(
-                        stream => stream.TranscriptIdentity,
-                        stream => stream.SourceStream,
-                        StringComparer.Ordinal);
-                streams = CodexTranscriptDiscovery
-                    .EnumerateCurrentSessionsAndResponsibleArchives(
-                        transcriptRoot,
-                        archiveRoot!,
-                        responsibleSourceStreamsByTranscriptIdentity);
-            }
+            durableSnapshot = await runtimeState.ReadAsync(cancellationToken);
         }
         catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
         {
             WriteFailure(ex);
             return;
+        }
+        bool? persistedPaused;
+        try
+        {
+            persistedPaused = await LoadInstructionPolicyAsync(
+                stateDirectory, cancellationToken);
+        }
+        catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+        {
+            WriteFailure(ex);
+            return;
+        }
+
+        IReadOnlyList<CodexTranscriptStream> DiscoverStreams()
+        {
+            if (useLegacySyntheticDiscovery)
+            {
+                return CodexTranscriptDiscovery.Enumerate(transcriptRoot);
+            }
+            var responsibleSourceStreamsByTranscriptIdentity = durableSnapshot.Streams
+                .Where(stream => stream.Queue.Count > 0)
+                .ToDictionary(
+                    stream => stream.TranscriptIdentity,
+                    stream => stream.SourceStream,
+                    StringComparer.Ordinal);
+            return CodexTranscriptDiscovery
+                .EnumerateCurrentSessionsAndResponsibleArchives(
+                    transcriptRoot,
+                    archiveRoot!,
+                    responsibleSourceStreamsByTranscriptIdentity);
+        }
+
+        IReadOnlyList<CodexTranscriptStream>? streams = null;
+        if (persistedPaused != true)
+        {
+            try
+            {
+                streams = DiscoverStreams();
+            }
+            catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+            {
+                WriteFailure(ex);
+                return;
+            }
+        }
+
+        CaptureInstructionPoll? instructionPoll = null;
+        Exception? instructionPollFailure = null;
+        try
+        {
+            instructionPoll = await PollCaptureInstructionsAsync(
+                endpoint, credential, cancellationToken);
+            await PersistInstructionPolicyAsync(
+                stateDirectory, instructionPoll.Paused, cancellationToken);
+        }
+        catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+        {
+            // An unavailable policy server cannot authorize delivery. Local
+            // claiming may continue so durable queue responsibility is not
+            // discarded during an outage.
+            instructionPollFailure = ex;
+        }
+
+        bool paused = instructionPoll?.Paused ?? persistedPaused ?? false;
+        if (paused)
+        {
+            if (instructionPollFailure is not null)
+            {
+                WriteFailure(instructionPollFailure);
+            }
+            WriteDiagnostic("capture_policy_paused");
+            if (instructionPoll is not null)
+            {
+                await AcknowledgeCaptureInstructionsAsync(
+                    endpoint, credential, instructionPoll.Instructions, cancellationToken);
+            }
+            return;
+        }
+        if (streams is null)
+        {
+            try
+            {
+                streams = DiscoverStreams();
+            }
+            catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+            {
+                WriteFailure(ex);
+                return;
+            }
         }
         await CodexTranscriptScanCycle.RunAsync(
             streams,
@@ -198,7 +276,8 @@ try
             {
                 try
                 {
-                    await ScanAndDeliverAsync(transcript, token);
+                    await ScanAndDeliverAsync(
+                        transcript, token, deliveryAuthorized: instructionPoll is not null);
                 }
                 catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
                 {
@@ -209,6 +288,15 @@ try
             },
             WriteFailure,
             cancellationToken);
+        if (instructionPollFailure is not null)
+        {
+            WriteFailure(instructionPollFailure);
+        }
+        if (instructionPoll is not null)
+        {
+            await AcknowledgeCaptureInstructionsAsync(
+                endpoint, credential, instructionPoll.Instructions, cancellationToken);
+        }
     }
 
     await CaptureRescanScheduler.RunAsync(
@@ -510,6 +598,103 @@ static async Task WritePrivateFileAsync(string path, string content)
     await using var writer = new StreamWriter(stream, leaveOpen: false);
     await writer.WriteAsync(content);
     await writer.FlushAsync();
+}
+
+static async Task<CaptureInstructionPoll> PollCaptureInstructionsAsync(
+    string endpoint,
+    string credential,
+    CancellationToken cancellationToken)
+{
+    using var client = new HttpClient { BaseAddress = new Uri(endpoint + "/") };
+    client.DefaultRequestHeaders.Authorization =
+        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", credential);
+    using HttpResponseMessage response = await client.GetAsync(
+        "capture/v1/instructions", cancellationToken);
+    response.EnsureSuccessStatusCode();
+    CaptureInstructionPoll? poll =
+        await response.Content.ReadFromJsonAsync<CaptureInstructionPoll>(cancellationToken);
+    if (poll?.Instructions is null)
+        throw new InvalidDataException("Capture instruction poll response is invalid.");
+    foreach (CaptureInstruction instruction in poll.Instructions)
+    {
+        if (instruction.InstructionId == Guid.Empty)
+            throw new InvalidDataException("Capture instruction identity is invalid.");
+        _ = CaptureInstructionOperations.Require(instruction.Operation);
+    }
+    return poll;
+}
+
+static async Task AcknowledgeCaptureInstructionsAsync(
+    string endpoint,
+    string credential,
+    IReadOnlyList<CaptureInstruction> instructions,
+    CancellationToken cancellationToken)
+{
+    using var client = new HttpClient { BaseAddress = new Uri(endpoint + "/") };
+    client.DefaultRequestHeaders.Authorization =
+        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", credential);
+    foreach (CaptureInstruction instruction in instructions)
+    {
+        using HttpResponseMessage response = await client.PostAsync(
+            $"capture/v1/instructions/{instruction.InstructionId}/acknowledge",
+            content: null,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+    }
+}
+
+static async Task PersistInstructionPolicyAsync(
+    string stateDirectory,
+    bool paused,
+    CancellationToken cancellationToken)
+{
+    Directory.CreateDirectory(stateDirectory);
+    string path = Path.Combine(stateDirectory, "capture-instruction-policy.json");
+    string temporary = Path.Combine(
+        stateDirectory, $"capture-instruction-policy-{Guid.NewGuid():N}.tmp");
+    string serialized = JsonSerializer.Serialize(
+        new { paused }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+    try
+    {
+        await File.WriteAllTextAsync(temporary, serialized, cancellationToken);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(
+                temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.Move(temporary, path, overwrite: true);
+    }
+    finally
+    {
+        if (File.Exists(temporary)) File.Delete(temporary);
+    }
+}
+
+static async Task<bool?> LoadInstructionPolicyAsync(
+    string stateDirectory,
+    CancellationToken cancellationToken)
+{
+    string path = Path.Combine(stateDirectory, "capture-instruction-policy.json");
+    if (!File.Exists(path))
+    {
+        return null;
+    }
+
+    await using FileStream stream = File.OpenRead(path);
+    using JsonDocument document = await JsonDocument.ParseAsync(
+        stream, cancellationToken: cancellationToken);
+    JsonElement root = document.RootElement;
+    if (root.ValueKind != JsonValueKind.Object)
+    {
+        throw new InvalidDataException("Capture instruction policy is invalid.");
+    }
+    JsonProperty[] properties = root.EnumerateObject().ToArray();
+    if (properties.Length != 1
+        || properties[0].Name != "paused"
+        || properties[0].Value.ValueKind is not JsonValueKind.True
+            and not JsonValueKind.False)
+    {
+        throw new InvalidDataException("Capture instruction policy is invalid.");
+    }
+    return properties[0].Value.GetBoolean();
 }
 
 sealed record PairingCreated(

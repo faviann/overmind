@@ -80,6 +80,26 @@ side, an outage, or an ambiguous response leaves unresolved responsibility in
 the state volume; later cycles retry the same deterministic locator until the
 server returns a conclusive `new` or `already_accepted` receipt.
 
+At the beginning of each cycle the runtime validates its durable queue and
+polls `GET /capture/v1/instructions` outbound with the capture credential. The
+server returns only pending instructions for that credential's source binding.
+The closed instruction vocabulary is `scan`, `retry`, `pause`, and `resume`;
+there are no command strings, paths, payload bundles, credentials, terminal
+controls, or host/container controls. Each instruction carries a durable UUID.
+The runtime persists pause/resume policy before posting its bodyless,
+idempotent acknowledgement. A paused cycle neither scans transcripts nor
+delivers queued observations, but the queue remains intact in the durable state
+volume. Resume restores ordinary scan and delivery on a later cycle.
+
+Operators create instructions through either the OIDC-authenticated capture
+console API (`POST /capture/console/api/instructions`, with operator identity
+derived from the OIDC subject) or the equivalent break-glass command:
+
+```sh
+memctl capture instruct my-codex-runtime pause --by operator-name
+memctl capture instruct my-codex-runtime resume --by operator-name
+```
+
 Machine-owned configuration is limited to mount locations, the state volume,
 server URL, credential, image digest/version, and scan cadence. Capture routing
 and safety policy are server-owned. Future server-issued instructions or policy

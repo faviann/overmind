@@ -23,7 +23,8 @@ public static class SchemaVerifier
         "capture_source_bindings", "capture_source_streams",
         "capture_route_policies", "capture_observations",
         "captured_events", "captured_event_relationships",
-        "capture_pairing_requests", "capture_pairing_audit"
+        "capture_pairing_requests", "capture_pairing_audit",
+        "capture_instructions"
     ];
 
     private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab", "capture/unscoped"];
@@ -47,6 +48,7 @@ public static class SchemaVerifier
         ("captured_event_relationships", ["SELECT", "INSERT"]),
         ("capture_pairing_requests", ["SELECT", "INSERT", "UPDATE"]),
         ("capture_pairing_audit", ["SELECT", "INSERT"]),
+        ("capture_instructions", ["SELECT", "INSERT"]),
     ];
 
     public static async Task<SchemaVerificationResult> VerifyAsync(string adminConnectionString)
@@ -313,7 +315,8 @@ public static class SchemaVerifier
         foreach (var (table, allowedColumns) in new[]
         {
             ("capture_source_bindings", Array.Empty<string>()),
-            ("capture_source_streams", new[] { "checkpoint_position", "updated_at" })
+            ("capture_source_streams", new[] { "checkpoint_position", "updated_at" }),
+            ("capture_instructions", new[] { "acknowledged_at" })
         })
         {
             if (!existingTables.Contains(table))

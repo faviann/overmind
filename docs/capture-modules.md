@@ -15,7 +15,7 @@ Source interpretation before this spine is described by the
 | `CaptureEnrollment` | `EnrollAsync(stableName, harness, agentId, credential)` → binding uuid | `memctl capture enroll` |
 | `CapturePairing` | create/poll/cancel plus code-based operator inspection and approval → one installation binding and one-time credential delivery | `/capture/v1/pairing-requests`, `/capture/console/pair/{userCode}` |
 | `CaptureRoutePolicyStore` | `ReplaceAsync(stableName, policy)` → policy uuid | `memctl capture route-policy` |
-| `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations` |
+| `CaptureAuthority` | `ResolveAsync(credential)` → `CaptureBindingContext?` | `POST /capture/v1/observations`, `GET /capture/v1/instructions`, `POST /capture/v1/instructions/{instructionId}/acknowledge` |
 | `CaptureInstructions` | operator `CreateAsync(stableName, operation, operatorIdentity)`; binding-scoped `PollAsync` and idempotent `AcknowledgeAsync` | `memctl capture instruct`, OIDC console API, capture runtime HTTP polling |
 | `CaptureIngestion` | `ImportAsync(CaptureBindingContext, CaptureObservationCommand)` → `CaptureImportReceipt` | `POST /capture/v1/observations` |
 | `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement + trusted source provenance\|CaptureObservationRequest\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `ContainsUnsupportedBinaryOmission(command)`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
@@ -25,7 +25,7 @@ Source interpretation before this spine is described by the
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
 | `CodexTranscriptDiscovery` | `EnumerateCurrentSessionsAndResponsibleArchives(sessionsRoot, archiveRoot, responsibleSourceStreamsByTranscriptIdentity)` for production current rollouts plus identity-bound responsibility-filtered archive retries; `Enumerate(configuredLocation)` for the legacy synthetic fixture seam → streams with explicit Codex source identity | `CodexCaptureTracer` |
-| `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` | `CodexCaptureTracer` |
+| `CodexTranscriptScanCycle` | `RunAsync(streams, scanStream, reportFailure)` → `bool` completion (`false` on an isolated identity or filesystem failure, used to withhold work-instruction acknowledgement) | `CodexCaptureTracer` |
 | `CaptureRescanScheduler` | `RunAsync(scanCycle, schedule, jitterSource, delay)` | `CodexCaptureTracer` |
 | `CaptureRescanConfiguration` | `Load(readEnvironment)` → `CaptureRescanSchedule` | `CodexCaptureTracer` |
 

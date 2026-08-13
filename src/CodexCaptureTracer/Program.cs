@@ -274,7 +274,17 @@ try
                 return;
             }
         }
-        bool compatibleWorkCompleted = true;
+        bool compatibleWorkCompleted = durableSnapshot.Streams
+            .Where(stream => stream.Queue.Count > 0)
+            .All(responsible => streams.Any(discovered =>
+                string.Equals(
+                    discovered.TranscriptIdentity,
+                    responsible.TranscriptIdentity,
+                    StringComparison.Ordinal)
+                && string.Equals(
+                    discovered.SourceStream,
+                    responsible.SourceStream,
+                    StringComparison.Ordinal)));
         bool filesystemWorkCompleted = await CodexTranscriptScanCycle.RunAsync(
             streams,
             async (transcript, token) =>

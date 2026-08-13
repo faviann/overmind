@@ -535,6 +535,108 @@ public sealed class CapturePackagingTests
     }
 
     [Fact]
+    public async Task PackagedLoopbackWakeAcceptsCaseInsensitiveZeroLengthHeadersOnly()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"capture-wake-headers-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        string baseline = Path.Combine(sessions, "2026", "08", "11", "rollout-baseline.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(baseline)!);
+        await File.WriteAllTextAsync(baseline, Transcript("startup-baseline"));
+        Dictionary<string, string> environment = ProductionEnvironment(root, sessions, archive);
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "3600000";
+        await using FileStream portLock = await AcquireFixedWakePortLockAsync();
+        await WaitForFixedWakePortAsync();
+        using CaptureTracerProcess process = TestProcessRunner.StartCaptureTracer(environment);
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        try
+        {
+            DateTime readyDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+            while (true)
+            {
+                try
+                {
+                    Assert.Equal(
+                        "HTTP/1.1 404 Not Found",
+                        await SendWakeRequestAsync("GET /wake HTTP/1.1\r\n\r\n"));
+                    break;
+                }
+                catch (System.Net.Sockets.SocketException) when (DateTime.UtcNow < readyDeadline)
+                {
+                    await Task.Delay(100);
+                }
+            }
+            await WaitForCapturedStreamCountAsync(state, 1);
+
+            string first = Path.Combine(sessions, "2026", "08", "12", "rollout-lowercase.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(first)!);
+            await File.WriteAllTextAsync(first, Transcript("lowercase-content-length"));
+
+            string[] refused =
+            [
+                "POST /wake HTTP/1.1\r\nContent-Length: nope\r\n\r\n",
+                "POST /wake HTTP/1.1\r\nContent-Length: 1\r\n\r\n",
+                "POST /wake HTTP/1.1\r\nContent-Length: 0\r\ncontent-length: 0\r\n\r\n"
+            ];
+            foreach (string request in refused)
+            {
+                Assert.Equal("HTTP/1.1 404 Not Found", await SendWakeRequestAsync(request));
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(750));
+            Assert.Single((await new FileCaptureRuntimeState(state).ReadAsync()).Streams);
+
+            Assert.Equal(
+                "HTTP/1.1 204 No Content",
+                await SendWakeRequestAsync(
+                    "POST /wake HTTP/1.1\r\ncontent-length: 0\r\n\r\n"));
+            await WaitForCapturedStreamCountAsync(state, 2);
+
+            string second = Path.Combine(sessions, "2026", "08", "12", "rollout-no-space.jsonl");
+            await File.WriteAllTextAsync(second, Transcript("no-space-content-length"));
+            Assert.Equal(
+                "HTTP/1.1 204 No Content",
+                await SendWakeRequestAsync(
+                    "POST /wake HTTP/1.1\r\nContent-Length:0\r\n\r\n"));
+            await WaitForCapturedStreamCountAsync(state, 3);
+        }
+        finally
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            Assert.Empty(await stdout);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task<string> SendWakeRequestAsync(string request)
+    {
+        using var client = new System.Net.Sockets.TcpClient();
+        await client.ConnectAsync(System.Net.IPAddress.Loopback, 43191);
+        System.Net.Sockets.NetworkStream stream = client.GetStream();
+        await stream.WriteAsync(System.Text.Encoding.ASCII.GetBytes(request));
+        using var reader = new StreamReader(stream);
+        return await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2)) ?? "";
+    }
+
+    private static async Task WaitForCapturedStreamCountAsync(string state, int count)
+    {
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            CaptureRuntimeSnapshot snapshot = await new FileCaptureRuntimeState(state).ReadAsync();
+            if (snapshot.Streams.Count == count)
+            {
+                return;
+            }
+            await Task.Delay(25);
+        }
+        Assert.Fail($"The wake did not capture {count} stream(s) within five seconds.");
+    }
+
+    [Fact]
     public async Task WakeBindCollisionLeavesScheduledScanningAuthoritative()
     {
         string root = Path.Combine(Path.GetTempPath(), $"capture-wake-disabled-{Guid.NewGuid():N}");

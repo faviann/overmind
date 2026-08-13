@@ -270,11 +270,13 @@ reference Linux-first installation beside local Codex. Its container root is
 read-only; the current `~/.codex/sessions` tree, the
 `~/.codex/archived_sessions` retry-locator tree, and repository mounts are
 read-only; durable state is
-the only writable volume. Linux host networking makes the Codex wake endpoint
-available at host loopback `127.0.0.1:43191` without Docker port publication;
-the listener remains loopback-bound and has no remotely reachable or
-general command surface, Docker socket, privileged mode,
-or self-update behavior. Archived files are selected only for an existing
+the only writable volume. The scanner retains ordinary isolated container
+networking and shares its namespace with a mountless, fixed-function wake
+sidecar from the same immutable image. Only host `127.0.0.1:43191` is published.
+The sidecar accepts only bridge-host traffic and relays a bounded request to the
+scanner's loopback-bound listener, so LAN clients and container peers cannot
+invoke it. Neither process has a general command surface, Docker socket,
+privileged mode, or self-update behavior. Archived files are selected only for an existing
 non-empty durable queue, never as historical import. See
 `docs/codex-capture-runtime.md` for enrollment and
 the machine-owned/server-owned configuration boundary.

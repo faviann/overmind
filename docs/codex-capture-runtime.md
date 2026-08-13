@@ -10,8 +10,13 @@ same transcript and locator evidence before retrying it.
 There is no Claude production adapter, arbitrary listener, Docker socket,
 database credential, privileged mode, or self-update path. The only inbound
 surface is the fixed `POST /wake` endpoint on host loopback `127.0.0.1:43191`.
-The reference Linux Compose service uses host networking so the runtime's
-loopback bind is the host loopback bind; it publishes no Docker port.
+The reference Linux Compose topology keeps the scanner on ordinary isolated
+container networking. A fixed-function sidecar from the same immutable image
+shares the scanner's network namespace and publishes only host
+`127.0.0.1:43191`. It accepts connections only from the bridge's host gateway
+and relays one bounded request to the scanner's still-loopback-only listener;
+container peers cannot invoke that listener or adapter. The sidecar has no
+mounts, credentials, configurable destination, or general proxy surface.
 
 ## Install the version-pinned Codex hooks
 
@@ -91,11 +96,13 @@ chmod 0600 .env.capture
 docker compose --env-file .env.capture -f compose.capture.yaml up -d
 ```
 
-The reference runtime has a read-only container filesystem and exactly four
-declared mounts: the read-only `~/.codex/sessions` tree, the read-only
+The reference scanner runtime has a read-only container filesystem and exactly
+four declared mounts: the read-only `~/.codex/sessions` tree, the read-only
 `~/.codex/archived_sessions` tree, a read-only repository root, and one writable
-durable-state volume. Linux host networking exposes only the runtime's loopback-bound
-wake endpoint and publishes no container port. Restarting either
+durable-state volume. The mountless wake sidecar publishes only
+`127.0.0.1:43191` from the host into their ordinary bridge namespace; its
+source gate rejects container peers before reaching the scanner's loopback-bound
+wake endpoint. Restarting either
 side, an outage, or an ambiguous response leaves unresolved responsibility in
 the state volume; later cycles retry the same deterministic locator until the
 server returns a conclusive `new` or `already_accepted` receipt.

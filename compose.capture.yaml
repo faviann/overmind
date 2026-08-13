@@ -16,9 +16,12 @@ services:
       OVERMIND_CAPTURE_STATE_DIR: /state
       OVERMIND_CAPTURE_SCAN_INTERVAL_MS: ${OVERMIND_CAPTURE_SCAN_INTERVAL_MS:-1000}
       OVERMIND_CAPTURE_SCAN_JITTER_MS: ${OVERMIND_CAPTURE_SCAN_JITTER_MS:-250}
-    # Linux host networking makes the runtime's loopback listener the host's
-    # loopback listener without publishing a container port or widening its bind.
-    network_mode: host
+    # Share only the fixed-function adapter's ordinary bridge namespace. The
+    # scanner still binds its handler exclusively to namespace loopback.
+    network_mode: service:codex-capture-wake
+    depends_on:
+      codex-capture-wake:
+        condition: service_started
     volumes:
       - type: bind
         source: ${OVERMIND_CODEX_SESSIONS_ROOT:?Set the machine Codex current sessions root}
@@ -41,6 +44,21 @@ services:
       - type: volume
         source: codex-capture-state
         target: /state
+    restart: unless-stopped
+
+  codex-capture-wake:
+    image: ${OVERMIND_CAPTURE_IMAGE:?Set an immutable version or digest; no latest default is provided}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    entrypoint: [dotnet, /app/CodexCaptureTracer.dll]
+    command: [--wake-forwarder]
+    ports:
+      - name: codex-wake
+        target: 43191
+        published: "43191"
+        host_ip: 127.0.0.1
+        protocol: tcp
     restart: unless-stopped
 
 volumes:

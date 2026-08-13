@@ -3,6 +3,33 @@ using MemSrv.Core;
 using System.Net.Http.Json;
 using System.Text.Json;
 
+if (args is ["--wake-forwarder"])
+{
+    try
+    {
+        await using CaptureWakeForwarder forwarder = CaptureWakeForwarder.CreateForDefaultRoute();
+        using var forwarderStopping = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            forwarderStopping.Cancel();
+        };
+        await forwarder.RunAsync(forwarderStopping.Token);
+        return 0;
+    }
+    catch (OperationCanceledException)
+    {
+        return 0;
+    }
+    catch (Exception ex) when (ex is IOException
+        or InvalidOperationException
+        or System.Net.Sockets.SocketException)
+    {
+        Console.Error.WriteLine("{\"event\":\"capture_wake_forwarder_failed\"}");
+        return 5;
+    }
+}
+
 const string LegacySyntheticEnableValue = "synthetic-non-production";
 bool legacySyntheticDiagnostics = string.Equals(
     Environment.GetEnvironmentVariable("OVERMIND_CODEX_CAPTURE_ENABLE"),

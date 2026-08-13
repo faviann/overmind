@@ -181,16 +181,19 @@ try
             WriteFailure(ex);
             return;
         }
-        bool? persistedPaused;
-        try
+        bool? persistedPaused = null;
+        if (!legacySyntheticDiagnostics)
         {
-            persistedPaused = await LoadInstructionPolicyAsync(
-                stateDirectory, cancellationToken);
-        }
-        catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
-        {
-            WriteFailure(ex);
-            return;
+            try
+            {
+                persistedPaused = await LoadInstructionPolicyAsync(
+                    stateDirectory, cancellationToken);
+            }
+            catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+            {
+                WriteFailure(ex);
+                return;
+            }
         }
 
         IReadOnlyList<CodexTranscriptStream> DiscoverStreams()
@@ -214,23 +217,28 @@ try
 
         IReadOnlyList<CodexTranscriptStream>? streams = null;
 
-        CaptureInstructionPoll? instructionPoll = null;
+        CaptureInstructionPoll? instructionPoll = legacySyntheticDiagnostics
+            ? new CaptureInstructionPoll(false, Array.Empty<CaptureInstruction>())
+            : null;
         Exception? instructionPollFailure = null;
-        try
+        if (!legacySyntheticDiagnostics)
         {
-            CaptureInstructionPoll candidateInstructionPoll =
-                await PollCaptureInstructionsAsync(
-                endpoint, credential, cancellationToken);
-            await PersistInstructionPolicyAsync(
-                stateDirectory, candidateInstructionPoll.Paused, cancellationToken);
-            instructionPoll = candidateInstructionPoll;
-        }
-        catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
-        {
-            // An unavailable policy server cannot authorize delivery. Local
-            // claiming may continue so durable queue responsibility is not
-            // discarded during an outage.
-            instructionPollFailure = ex;
+            try
+            {
+                CaptureInstructionPoll candidateInstructionPoll =
+                    await PollCaptureInstructionsAsync(
+                    endpoint, credential, cancellationToken);
+                await PersistInstructionPolicyAsync(
+                    stateDirectory, candidateInstructionPoll.Paused, cancellationToken);
+                instructionPoll = candidateInstructionPoll;
+            }
+            catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
+            {
+                // An unavailable policy server cannot authorize delivery. Local
+                // claiming may continue so durable queue responsibility is not
+                // discarded during an outage.
+                instructionPollFailure = ex;
+            }
         }
 
         bool paused = instructionPoll?.Paused ?? persistedPaused ?? false;

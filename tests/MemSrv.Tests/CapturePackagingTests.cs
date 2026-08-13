@@ -742,6 +742,55 @@ public sealed class CapturePackagingTests
         }) + "\n";
 
     [Fact]
+    public async Task LegacySyntheticTracerDeliversObservationsWithoutPollingInstructions()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-legacy-no-instruction-{Guid.NewGuid():N}");
+        string transcript = Path.Combine(root, "rollout.jsonl");
+        string state = Path.Combine(root, "state");
+        Directory.CreateDirectory(root);
+        await File.WriteAllTextAsync(transcript, Transcript("legacy-synthetic-session"));
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Guid sourceStreamUuid = Guid.NewGuid();
+        Task server = Task.Run(async () =>
+        {
+            for (int delivered = 0; delivered < 2; delivered++)
+            {
+                HttpListenerContext observation = await listener.GetContextAsync();
+                Assert.Equal("/capture/v1/observations", observation.Request.Url!.AbsolutePath);
+                await RespondWithObservationReceiptAsync(observation, sourceStreamUuid);
+            }
+        });
+        var environment = new Dictionary<string, string>
+        {
+            ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
+            ["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}",
+            ["OVERMIND_CAPTURE_CREDENTIAL"] = $"mcap_{Guid.NewGuid():N}",
+            ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = root,
+            ["OVERMIND_CAPTURE_STATE_DIR"] = state
+        };
+
+        try
+        {
+            var result = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(environment);
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(result.Succeeded);
+            Assert.Empty(result.Stdout);
+            Assert.DoesNotContain("capture_cycle_failed", result.Stderr,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PackagedTracerPersistsPauseBeforeAcknowledgingAndDoesNotScan()
     {
         string root = Path.Combine(Path.GetTempPath(), $"capture-instruction-{Guid.NewGuid():N}");

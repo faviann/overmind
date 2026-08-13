@@ -1332,6 +1332,188 @@ public sealed class CapturePackagingTests
         }
     }
 
+    [Fact]
+    public async Task FailedPausePersistenceDoesNotPublishOrAcknowledgePauseAndRestartRemainsUnpaused()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-failed-pause-persist-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "13");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        string policy = Path.Combine(state, "capture-instruction-policy.json");
+        string savedPolicy = Path.Combine(state, "saved-instruction-policy.json");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Directory.CreateDirectory(state);
+        string transcript = Path.Combine(sessions, "rollout-failed-pause.jsonl");
+        await File.WriteAllTextAsync(transcript, Transcript("failed-pause-session"));
+        await File.WriteAllTextAsync(policy, "{\"paused\":false}");
+        Guid instructionId = Guid.NewGuid();
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Task<string?> server = Task.Run(async () =>
+        {
+            HttpListenerContext poll = await listener.GetContextAsync();
+            Assert.Equal("/capture/v1/instructions", poll.Request.Url!.AbsolutePath);
+            File.Move(policy, savedPolicy);
+            Directory.CreateDirectory(policy);
+            await RespondJsonAsync(poll, new
+            {
+                paused = true,
+                instructions = new[]
+                {
+                    new { instructionId, operation = "pause", createdAt = DateTimeOffset.UtcNow }
+                }
+            });
+            try
+            {
+                HttpListenerContext unexpected = await listener.GetContextAsync()
+                    .WaitAsync(TimeSpan.FromSeconds(1));
+                string path = unexpected.Request.Url!.AbsolutePath;
+                unexpected.Response.StatusCode = 503;
+                unexpected.Response.Close();
+                return path;
+            }
+            catch (TimeoutException)
+            {
+                return null;
+            }
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000";
+
+        try
+        {
+            using (var process = TestProcessRunner.StartCaptureTracer(environment))
+            {
+                Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+                Assert.Null(await server.WaitAsync(TimeSpan.FromSeconds(5)));
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+                Assert.Empty(await stdout);
+                Assert.Contains("capture_cycle_failed", await stderr, StringComparison.Ordinal);
+            }
+
+            Assert.True(File.Exists(Path.Combine(state, "capture-state.json")));
+            Directory.Delete(policy);
+            File.Move(savedPolicy, policy);
+            await File.AppendAllTextAsync(
+                transcript,
+                Transcript("failed-pause-restart-session"));
+            string beforeRestart = await File.ReadAllTextAsync(
+                Path.Combine(state, "capture-state.json"));
+            environment["OVERMIND_CAPTURE_URL"] = "http://127.0.0.1:1";
+            var restart = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
+
+            Assert.Empty(restart.Stdout);
+            Assert.NotEqual(
+                beforeRestart,
+                await File.ReadAllTextAsync(Path.Combine(state, "capture-state.json")));
+            Assert.Equal("{\"paused\":false}", await File.ReadAllTextAsync(policy));
+        }
+        finally
+        {
+            listener.Stop();
+            if (Directory.Exists(policy)) Directory.Delete(policy);
+            if (File.Exists(savedPolicy) && !File.Exists(policy)) File.Move(savedPolicy, policy);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FailedResumePersistenceDoesNotPublishOrAcknowledgeResumeAndRestartRemainsPaused()
+    {
+        string root = Path.Combine(
+            Path.GetTempPath(), $"capture-failed-resume-persist-{Guid.NewGuid():N}");
+        string sessions = Path.Combine(root, "sessions", "2026", "08", "13");
+        string archive = Path.Combine(root, "archive");
+        string state = Path.Combine(root, "state");
+        string policy = Path.Combine(state, "capture-instruction-policy.json");
+        string savedPolicy = Path.Combine(state, "saved-instruction-policy.json");
+        Directory.CreateDirectory(sessions);
+        Directory.CreateDirectory(archive);
+        Directory.CreateDirectory(state);
+        await File.WriteAllTextAsync(
+            Path.Combine(sessions, "rollout-failed-resume.jsonl"),
+            Transcript("failed-resume-session"));
+        await File.WriteAllTextAsync(policy, "{\"paused\":true}");
+        Guid instructionId = Guid.NewGuid();
+        using var listener = new HttpListener();
+        int port = FreePort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Task<string?> server = Task.Run(async () =>
+        {
+            HttpListenerContext poll = await listener.GetContextAsync();
+            Assert.Equal("/capture/v1/instructions", poll.Request.Url!.AbsolutePath);
+            File.Move(policy, savedPolicy);
+            Directory.CreateDirectory(policy);
+            await RespondJsonAsync(poll, new
+            {
+                paused = false,
+                instructions = new[]
+                {
+                    new { instructionId, operation = "resume", createdAt = DateTimeOffset.UtcNow }
+                }
+            });
+            try
+            {
+                HttpListenerContext unexpected = await listener.GetContextAsync()
+                    .WaitAsync(TimeSpan.FromSeconds(1));
+                string path = unexpected.Request.Url!.AbsolutePath;
+                unexpected.Response.StatusCode = 503;
+                unexpected.Response.Close();
+                return path;
+            }
+            catch (TimeoutException)
+            {
+                return null;
+            }
+        });
+        Dictionary<string, string> environment = ProductionEnvironment(
+            root, Path.Combine(root, "sessions"), archive);
+        environment["OVERMIND_CAPTURE_URL"] = $"http://127.0.0.1:{port}";
+        environment["OVERMIND_CAPTURE_SCAN_INTERVAL_MS"] = "60000";
+
+        try
+        {
+            using (var process = TestProcessRunner.StartCaptureTracer(environment))
+            {
+                Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+                Assert.Null(await server.WaitAsync(TimeSpan.FromSeconds(5)));
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+                Assert.Empty(await stdout);
+                Assert.Contains("capture_cycle_failed", await stderr, StringComparison.Ordinal);
+            }
+
+            Assert.False(File.Exists(Path.Combine(state, "capture-state.json")));
+            Directory.Delete(policy);
+            File.Move(savedPolicy, policy);
+            environment["OVERMIND_CAPTURE_URL"] = "http://127.0.0.1:1";
+            var restart = await TestProcessRunner.RunCaptureTracerUntilDiagnosticAsync(
+                environment, "\"event\":\"capture_cycle_failed\"");
+
+            Assert.Empty(restart.Stdout);
+            Assert.False(File.Exists(Path.Combine(state, "capture-state.json")));
+            Assert.Equal("{\"paused\":true}", await File.ReadAllTextAsync(policy));
+        }
+        finally
+        {
+            listener.Stop();
+            if (Directory.Exists(policy)) Directory.Delete(policy);
+            if (File.Exists(savedPolicy) && !File.Exists(policy)) File.Move(savedPolicy, policy);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("{not-json")]
     [InlineData("{}")]

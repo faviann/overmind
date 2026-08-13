@@ -218,10 +218,12 @@ try
         Exception? instructionPollFailure = null;
         try
         {
-            instructionPoll = await PollCaptureInstructionsAsync(
+            CaptureInstructionPoll candidateInstructionPoll =
+                await PollCaptureInstructionsAsync(
                 endpoint, credential, cancellationToken);
             await PersistInstructionPolicyAsync(
-                stateDirectory, instructionPoll.Paused, cancellationToken);
+                stateDirectory, candidateInstructionPoll.Paused, cancellationToken);
+            instructionPoll = candidateInstructionPoll;
         }
         catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
         {

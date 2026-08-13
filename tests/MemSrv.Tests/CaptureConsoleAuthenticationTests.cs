@@ -41,9 +41,13 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
         string credential = $"mcap_{Guid.NewGuid():N}";
         string credentialPath = Path.Combine(
             Path.GetTempPath(), $"capture-console-key-{Guid.NewGuid():N}");
-        await File.WriteAllTextAsync(credentialPath, credential);
         try
         {
+            await WritePrivateCredentialAsync(credentialPath, credential);
+            if (!OperatingSystem.IsWindows())
+                Assert.Equal(
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite,
+                    File.GetUnixFileMode(credentialPath));
             await RunMemCtlAsync(
                 "capture", "enroll", stableName,
                 "--harness", "codex",
@@ -74,6 +78,7 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
         finally
         {
             File.Delete(credentialPath);
+            Assert.False(File.Exists(credentialPath));
         }
     }
 
@@ -739,6 +744,22 @@ public sealed class CaptureConsoleAuthenticationTests : HttpSeamTestBase
         public void RequestRefresh()
         {
         }
+    }
+
+    private static async Task WritePrivateCredentialAsync(string path, string credential)
+    {
+        var options = new FileStreamOptions
+        {
+            Access = FileAccess.Write,
+            Mode = FileMode.CreateNew,
+            Share = FileShare.None,
+            Options = FileOptions.Asynchronous,
+        };
+        if (!OperatingSystem.IsWindows())
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        await using var stream = new FileStream(path, options);
+        await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+        await writer.WriteAsync(credential);
     }
 
     private sealed record OidcSignIn(string CookieHeader, string ProtectedTicket);

@@ -2,9 +2,12 @@
 
 Research for [Inventory local Codex and Claude Code capture surfaces](https://github.com/faviann/overmind/issues/59), checked 2026-07-14.
 
-> **Historical.** Recorded design analysis for the superseded Overmind-owned
-> capture direction (2026-08-20 course-correction). Retained as provenance; it
-> decides nothing now. Current authority:
+> **Partly superseded (2026-08-20 course-correction).** The inventory of Codex
+> and Claude Code hook, transcript, and session surfaces is factual and stays
+> true regardless of who owns capture. What is superseded is this document's
+> Overmind-side capture recommendations — the hook-hint and catch-up-reader
+> design for an Overmind-owned capture runtime. Those decide nothing now.
+> Current authority:
 > [`../evidence-and-knowledge-boundary.md`](../evidence-and-knowledge-boundary.md).
 
 ## Question and method

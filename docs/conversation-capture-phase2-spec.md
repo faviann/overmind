@@ -1,4 +1,4 @@
-# Conversation capture — Phase 2 authority
+# Conversation capture — Phase 2 authority (superseded)
 
 Status: **superseded — non-binding**. The 2026-08-20 course-correction (#203,
 #205) moved durable capture of external agent conversations out of Overmind;

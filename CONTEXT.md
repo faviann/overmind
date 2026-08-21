@@ -10,6 +10,11 @@ shipped, frozen capture code means by a word. It decides nothing about new
 capture work; current authority for that is
 [`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md).
 The memory, identity, and governance vocabulary is unaffected and still binding.
+Where a capture term states an authorization, isolation, or append-only
+invariant, that invariant is still binding too: the freeze is about which
+architecture gets built, not about relaxing a guarantee. Where the boundary
+document decides a question differently from how the shipped code named it, the
+boundary governs.
 
 **Namespace** — the isolation unit for memories and traces. Every row belongs to
 exactly one namespace. Isolation is enforced server-side from the caller's

@@ -14,8 +14,9 @@
   canonical conversation storage for that external evidence.
 - `docs/conversation-capture-phase2-spec.md` and its subordinate capture
   documents are **superseded/frozen**, retained as provenance for the capture
-  code that still exists. That code is not deleted before #206 proves the
-  replacement path, and its existence alone justifies no new capture work.
+  code that still exists. Per #203's recorded guardrails, that code is not
+  deleted before #206 proves the replacement path; its existence alone
+  justifies no new capture work.
 - Phase 1 memory and governance invariants remain binding; capture-specific
   Phase 2 amendments do not remain binding merely because they were
   implemented. Current authority is

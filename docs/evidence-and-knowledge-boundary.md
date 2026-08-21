@@ -53,9 +53,12 @@ owns what happened, Overmind owns what was concluded and governed.
   classification**, not a canonical capture namespace decision for the current
   single-user milestone.
 - **Existing Phase 2 capture code and documents are historical evidence.** They
-  are not authority over the new direction, and they are not deleted before
+  are not authority over the new direction. Per
+  [#203](https://github.com/faviann/overmind/issues/203)'s recorded guardrails,
+  that code is not deleted before
   [#206](https://github.com/faviann/overmind/issues/206) proves the replacement
-  path. Documents describing them stay available as provenance, marked frozen.
+  path, and documents describing it stay available as provenance, marked
+  frozen.
 
 ## Out of scope here
 

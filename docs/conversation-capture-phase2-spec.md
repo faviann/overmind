@@ -1,6 +1,12 @@
 # Conversation capture — Phase 2 authority
 
-Status: **binding for conversation-capture work**.
+Status: **superseded — non-binding**. The 2026-08-20 course-correction (#203,
+#205) moved durable capture of external agent conversations out of Overmind;
+see [evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md),
+which is the current authority. This document is retained as historical
+evidence: it explains the capture code that still exists and the decisions
+that produced it. Do not start new capture work against it, and do not treat
+its Phase 1 amendments as still in force.
 
 This document promotes the approved Phase 2 capture decisions into repository
 authority. It is intentionally narrow. The Phase 1 spec continues to govern

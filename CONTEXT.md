@@ -9,6 +9,11 @@ exactly one namespace. Isolation is enforced server-side from the caller's
 identity, never trusted from tool arguments. Path-style names give hierarchy
 (`homelab`, `repo/<owner>/<name>`) without schema support.
 
+The capture terms that follow are vocabulary for capture code that already
+exists and is frozen. They define what the shipped system means by a word; they
+decide nothing about new capture work. Current authority for that is
+[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md).
+
 **Unscoped capture namespace (`capture/unscoped`)** — the fallback namespace
 for a captured conversation whose repository or configured semantic route
 cannot be determined. It records an unknown destination; it does not imply

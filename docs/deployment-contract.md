@@ -5,6 +5,14 @@ stated here is not a contract. Every section is now **FINAL**: the Session 2
 HTTP transport has landed, so the service runtime shape (port, health, bind
 address, key file) is defined below rather than deferred.
 
+The capture material in this document — capture schema verification, the
+capture-console OIDC variables, the `/capture/console`, pairing, and observation
+endpoints, and the per-user Codex catch-up runtime — describes capture code
+and deployment surface that already ship. It stays accurate because that code is
+still deployed, and it is frozen: it authorizes no new capture work. Current
+authority for capture is
+[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
+
 ## Image — FINAL
 
 - `ghcr.io/faviann/overmind:<version>` — immutable tags, published by CI on git

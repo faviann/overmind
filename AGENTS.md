@@ -6,10 +6,18 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
 
 ## Authority
 
-1. `docs/conversation-capture-phase2-spec.md` — binding for conversation-capture work and its explicit Phase 1 amendments
-2. `docs/memory-server-phase1-spec.md` — binding for Phase 1 contracts and every area the Phase 2 capture spec does not amend
-3. `docs/agent-memory-handoff-v4.md` — intent and architecture where the applicable spec is silent
+1. `docs/evidence-and-knowledge-boundary.md` — binding for the evidence /
+   knowledge / governance ownership split (2026-08-20 course-correction)
+2. `docs/memory-server-phase1-spec.md` — binding for Phase 1 contracts and
+   every area the boundary document does not amend
+3. `docs/agent-memory-handoff-v4.md` — intent and architecture where the
+   applicable spec is silent
 4. This file and `docs/` conventions
+
+The Phase 2 capture spec (`docs/conversation-capture-phase2-spec.md`) is
+superseded and no longer binding. Phase 1 memory and governance invariants
+remain binding; capture-specific Phase 2 amendments do not remain binding
+merely because they were implemented.
 
 ## Always-on invariants
 
@@ -32,13 +40,15 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
   `reference/csharp-sdk/`. Trust that evidence over memory. Remote transport
   uses Streamable HTTP, never legacy SSE.
 - Tests or refactors → `docs/testing.md`
-- Capture runtime packaging, hooks, console/OIDC, operations, or historical
-  backfill → `docs/conversation-capture-phase2-spec.md`
-- Capture enrollment, ingestion, or operator receipt reads →
-  `docs/capture-modules.md`
-- Capture adapters or fixture parsing → `docs/capture-adapter-contract.md`
+- Anything touching conversation capture, evidence storage, or captured
+  history → `docs/evidence-and-knowledge-boundary.md` first. The capture
+  documents below describe frozen existing code and decide nothing new:
+  `docs/conversation-capture-phase2-spec.md` (superseded),
+  `docs/capture-modules.md` (enrollment, ingestion, receipt reads),
+  `docs/capture-adapter-contract.md` (adapters, fixture parsing),
+  `docs/codex-capture-runtime.md`, `docs/capture-synthetic-slice.md`.
 - Never-store rules, scan budgets, or redaction markers →
-  `docs/capture-safety-budgets.md`
+  `docs/capture-safety-budgets.md` (current and binding for that gate)
 - Schema, retrieval, dependencies, or scope → `docs/design-rules.md`
 - Deployment or deployment configuration → `docs/deployment-contract.md`
 - Domain terminology or domain documentation → `CONTEXT.md` and

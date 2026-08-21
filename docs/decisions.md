@@ -1,5 +1,23 @@
 # Decisions
 
+## 2026-08-20 — Capture is evidence; Moraine owns it (#203, #205)
+
+- A conversation is **evidence**, not governed knowledge. Two datastores are
+  acceptable only when they do not claim authority over the same fact:
+  Moraine/ClickHouse owns what happened; Overmind/PostgreSQL owns what was
+  concluded and governed.
+- Durable capture and storage of external agent conversations and traces move
+  to **Moraine** (adoption tracked by #206). Overmind does not own duplicate
+  canonical conversation storage for that evidence.
+- `docs/conversation-capture-phase2-spec.md` and its subordinate capture
+  documents are **superseded/frozen**, retained as provenance for the capture
+  code that still exists. That code is not deleted before #206 proves the
+  replacement path, and its existence alone justifies no new capture work.
+- Phase 1 memory and governance invariants remain binding; capture-specific
+  Phase 2 amendments do not remain binding merely because they were
+  implemented. Current authority is
+  `docs/evidence-and-knowledge-boundary.md`.
+
 ## 2026-07-13 — Phase 1 data access is Npgsql + Dapper, no ORM (#44)
 
 - Phase 1 canonical persistence uses **Npgsql + Dapper with hand-written

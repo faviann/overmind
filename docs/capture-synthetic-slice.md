@@ -1,5 +1,11 @@
 # Historical synthetic capture slice
 
+Status: **frozen — non-binding for new capture work**. It describes capture
+code that still exists and remains accurate for maintaining it. Durable
+capture of external agent conversations is owned by Moraine, not Overmind;
+the current authority is
+[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
+
 This document records the earlier #74/#75 tracer-bullet contract. Issue #83
 supersedes its packaging and enable-gate limitations. Supported installation is
 now documented in [codex-capture-runtime.md](codex-capture-runtime.md); the

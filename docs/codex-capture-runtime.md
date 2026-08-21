@@ -1,5 +1,11 @@
 # Codex catch-up runtime
 
+Status: **frozen — non-binding for new capture work**. It describes capture
+code that still exists and remains accurate for maintaining it. Durable
+capture of external agent conversations is owned by Moraine, not Overmind;
+the current authority is
+[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
+
 The supported Linux-first baseline is one headless, Codex-only OCI runtime per
 user. It scans the explicitly mounted Codex current-session rollout tree immediately at
 startup and on a non-overlapping jittered schedule, claims completed records in

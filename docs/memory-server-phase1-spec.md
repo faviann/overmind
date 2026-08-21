@@ -328,10 +328,12 @@ Plus mechanical tests: UPDATE/DELETE on traces fails **both** via trigger and vi
 ## 11. Do Not Build (binding)
 
 These restrictions remain binding for Phase 1 and for all later work unless an
-applicable binding spec explicitly amends one. For local conversation capture,
-`conversation-capture-phase2-spec.md` narrowly authorizes the capture runtime,
-harness hooks, and focused OIDC capture console while preserving the other
-restrictions and existing Phase 1 contracts.
+applicable binding spec explicitly amends one. The capture-runtime,
+harness-hook, and OIDC capture-console authorization that
+`conversation-capture-phase2-spec.md` once granted is **superseded and no
+longer in force** (2026-08-20 course-correction, #203/#205 — see
+`evidence-and-knowledge-boundary.md`). The code it produced still exists and is
+frozen; the list below applies unamended to new work.
 
 - ❌ Embeddings, pgvector, or any embedding model integration (the `jobs` table and lane registry are the future seams; that's all)
 - ❌ Graph storage or graph lanes

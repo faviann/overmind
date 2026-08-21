@@ -13,6 +13,10 @@ The repository also publishes a separate Codex-only catch-up runtime for
 scanner-first capture beside local Codex. See
 [docs/codex-capture-runtime.md](docs/codex-capture-runtime.md). It talks only to
 the central capture API and is not part of the server/database trust boundary.
+It is existing, frozen capture work: durable capture of external agent
+conversations is now owned by Moraine, not Overmind, so the runtime is
+maintained where it ships and extended nowhere — see
+[docs/evidence-and-knowledge-boundary.md](docs/evidence-and-knowledge-boundary.md).
 
 ## Core commitments
 
@@ -42,6 +46,7 @@ trusted local agents, and includes the `memctl` operator CLI.
 | Doc | Role |
 |---|---|
 | [`docs/north-star.md`](docs/north-star.md) | What the mature system is (orientation; never wins conflicts) |
+| [`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md) | **Binding** evidence / knowledge / governance ownership split |
 | [`docs/memory-server-phase1-spec.md`](docs/memory-server-phase1-spec.md) | **Binding** build spec, schema, tool contracts, Do-Not-Build list |
 | [`docs/agent-memory-handoff-v4.md`](docs/agent-memory-handoff-v4.md) | Intent and architecture where the spec is silent |
 | [`CONTEXT.md`](CONTEXT.md) | Domain vocabulary |

@@ -20,8 +20,10 @@ identity, never trusted from tool arguments. Path-style names give hierarchy
 external agent conversation evidence. It sits outside Overmind's server and
 database boundary: Overmind neither stores that evidence nor treats Moraine as
 one of its own datastores. What the split decides lives in
-[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md);
-this repository states nothing further about Moraine.
+[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md),
+and that is the repository's only binding statement about Moraine's role.
+Non-binding observations of its schema and behavior are recorded in
+[`docs/research/moraine-trace-event-model.md`](docs/research/moraine-trace-event-model.md).
 
 **Unscoped capture namespace (`capture/unscoped`)** — the fallback namespace
 for a captured conversation whose repository or configured semantic route

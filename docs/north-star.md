@@ -113,7 +113,10 @@ hand. None of this is promised; none of it is ruled out.
 
 Ruled out of the destination outright (unchanged from the standing
 rejections): a second datastore, harness-owned memory logic, agent-facing
-approval, auto-injection, and RLS absent its tripwires (above).
+approval, auto-injection, and RLS absent its tripwires (above). The
+second-datastore rejection is about what Overmind stores; external evidence
+owned outside Overmind is a different question, settled in
+[`evidence-and-knowledge-boundary.md`](evidence-and-knowledge-boundary.md).
 
 ## One-line test
 

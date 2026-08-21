@@ -5,10 +5,13 @@
 - A conversation is **evidence**, not governed knowledge. Two datastores are
   acceptable only when they do not claim authority over the same fact:
   Moraine/ClickHouse owns what happened; Overmind/PostgreSQL owns what was
-  concluded and governed.
-- Durable capture and storage of external agent conversations and traces move
-  to **Moraine** (adoption tracked by #206). Overmind does not own duplicate
-  canonical conversation storage for that evidence.
+  concluded and governed. This does not loosen spec §11/§13: those govern
+  Overmind's *own* persistence, and Overmind still keeps one PostgreSQL
+  database and gains no second store of its own.
+- Durable capture and storage of the conversations and traces external agent
+  harnesses emit move to **Moraine** (adoption tracked by #206). Overmind's own
+  append-only `traces` ledger is unaffected. Overmind does not own duplicate
+  canonical conversation storage for that external evidence.
 - `docs/conversation-capture-phase2-spec.md` and its subordinate capture
   documents are **superseded/frozen**, retained as provenance for the capture
   code that still exists. That code is not deleted before #206 proves the
@@ -17,6 +20,12 @@
   Phase 2 amendments do not remain binding merely because they were
   implemented. Current authority is
   `docs/evidence-and-knowledge-boundary.md`.
+- Evidence door: reopen if external evidence living outside Overmind proves
+  unusable for the governance work that needs it — a governed fact that cannot
+  be grounded in its conversation without Overmind storing that conversation,
+  or a provenance question the split makes unanswerable in practice. Adoption
+  friction in #206 is not that evidence; it argues about the substrate, not the
+  boundary.
 
 ## 2026-07-13 — Phase 1 data access is Npgsql + Dapper, no ORM (#44)
 

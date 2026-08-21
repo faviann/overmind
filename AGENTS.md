@@ -40,15 +40,18 @@ merely because they were implemented.
   `reference/csharp-sdk/`. Trust that evidence over memory. Remote transport
   uses Streamable HTTP, never legacy SSE.
 - Tests or refactors → `docs/testing.md`
-- Anything touching conversation capture, evidence storage, or captured
-  history → `docs/evidence-and-knowledge-boundary.md` first. The capture
-  documents below describe frozen existing code and decide nothing new:
-  `docs/conversation-capture-phase2-spec.md` (superseded),
+- New conversation-capture or evidence-storage work →
+  `docs/evidence-and-knowledge-boundary.md`. It decides who owns what; read it
+  before proposing any capture change.
+- Maintaining the capture code that already ships → the frozen capture
+  documents, which stay accurate for that purpose and decide nothing new:
   `docs/capture-modules.md` (enrollment, ingestion, receipt reads),
   `docs/capture-adapter-contract.md` (adapters, fixture parsing),
-  `docs/codex-capture-runtime.md`, `docs/capture-synthetic-slice.md`.
+  `docs/codex-capture-runtime.md` (catch-up runtime),
+  `docs/capture-synthetic-slice.md` (synthetic fixture),
+  `docs/conversation-capture-phase2-spec.md` (superseded; provenance only).
 - Never-store rules, scan budgets, or redaction markers →
-  `docs/capture-safety-budgets.md` (current and binding for that gate)
+  `docs/capture-safety-budgets.md` (unchanged by the course-correction)
 - Schema, retrieval, dependencies, or scope → `docs/design-rules.md`
 - Deployment or deployment configuration → `docs/deployment-contract.md`
 - Domain terminology or domain documentation → `CONTEXT.md` and

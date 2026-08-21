@@ -2,6 +2,11 @@
 
 Research for [Inventory local Codex and Claude Code capture surfaces](https://github.com/faviann/overmind/issues/59), checked 2026-07-14.
 
+> **Historical.** Recorded design analysis for the superseded Overmind-owned
+> capture direction (2026-08-20 course-correction). Retained as provenance; it
+> decides nothing now. Current authority:
+> [`../evidence-and-knowledge-boundary.md`](../evidence-and-knowledge-boundary.md).
+
 ## Question and method
 
 What supported hooks, transcript records, session and subagent relationships, compaction and instruction signals, tool calls/results/failures, and per-event model/provider fields do current local Codex and Claude Code expose? What format drift must capture adapters tolerate?

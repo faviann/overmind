@@ -1,5 +1,12 @@
 # Testing conventions (load before writing or changing tests)
 
+The capture coverage this document requires — capture-ledger mechanical checks,
+the safety-boundary and scheduled-synthetic-capture module seams, and the
+packaged-apphost proof — describes required coverage for capture code that
+already exists and is frozen. Those rules stand for that code and are unchanged;
+they authorize no new capture work. Current authority for capture is
+[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
+
 ## What a good test is here
 - Calls the public surface: an MCP tool (`log_trace`, `save_note`, `search_memory`,
   `get_by_id`, ...) or a `memctl` command. Asserts on the response or on subsequent

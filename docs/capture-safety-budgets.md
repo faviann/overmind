@@ -1,11 +1,10 @@
 # Capture safety budgets and rule-set contract
 
-Status: **current and binding** for the never-store gate. The budgets and rule
-set below are the contract that Phase 1 spec §5 cites for the deterministic
-scan on *every* write path, memory and trace alike; they are unaffected by the
-capture course-correction. Only new capture work falls outside this document's
-authority: durable capture of external agent conversations is owned by Moraine,
-not Overmind — see
+Status: **unchanged by the capture course-correction.** Phase 1 spec §5 cites
+this document as the budget and rule-set contract for the never-store gate on
+*every* write path, memory and trace alike, and it still does. Only new capture
+work falls outside it: durable capture of external agent conversation evidence
+is owned by Moraine, not Overmind — see
 [evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
 
 Published defaults for the deterministic never-store detector (issue #76). The

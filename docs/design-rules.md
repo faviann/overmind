@@ -166,7 +166,7 @@ Committed — do not re-litigate without the maintainer:
 - **Harnesses remain thin clients.** Memory logic stays behind the MCP surface.
   The existing version-pinned, non-blocking capture hooks that wake the local
   capture runtime are frozen code, not a standing authorization to extend the
-  harness surface.
+  harness surface (the boundary).
 - **Source-of-truth hierarchy resolves conflicts**: Git/IaC > approved memory
   > proposed memory > raw trace inference. Propose the *why*; the *what*
   lives in the repo, where memory would only rot against it (handoff "Update

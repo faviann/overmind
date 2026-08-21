@@ -4,15 +4,24 @@ Glossary of domain terms. Implementation details live in `docs/`, not here.
 
 ## Terms
 
+Capture terminology anywhere in this glossary — routes, source streams,
+observations, captured events, receipts, and the rest — defines what the
+shipped, frozen capture code means by a word. It decides nothing about new
+capture work; current authority for that is
+[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md).
+The memory, identity, and governance vocabulary is unaffected and still binding.
+
 **Namespace** — the isolation unit for memories and traces. Every row belongs to
 exactly one namespace. Isolation is enforced server-side from the caller's
 identity, never trusted from tool arguments. Path-style names give hierarchy
 (`homelab`, `repo/<owner>/<name>`) without schema support.
 
-The capture terms that follow are vocabulary for capture code that already
-exists and is frozen. They define what the shipped system means by a word; they
-decide nothing about new capture work. Current authority for that is
-[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md).
+**Moraine** — the external system that owns durable capture and storage of
+external agent conversation evidence. It sits outside Overmind's server and
+database boundary: Overmind neither stores that evidence nor treats Moraine as
+one of its own datastores. What the split decides lives in
+[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md);
+this repository states nothing further about Moraine.
 
 **Unscoped capture namespace (`capture/unscoped`)** — the fallback namespace
 for a captured conversation whose repository or configured semantic route

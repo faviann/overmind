@@ -14,8 +14,8 @@ scanner-first capture beside local Codex. See
 [docs/codex-capture-runtime.md](docs/codex-capture-runtime.md). It talks only to
 the central capture API and is not part of the server/database trust boundary.
 It is existing, frozen capture work: durable capture of external agent
-conversations is now owned by Moraine, not Overmind, so the runtime is
-maintained where it ships and extended nowhere — see
+conversation evidence is now owned by Moraine, not Overmind, and no new capture
+work is authorized against this runtime — see
 [docs/evidence-and-knowledge-boundary.md](docs/evidence-and-knowledge-boundary.md).
 
 ## Core commitments

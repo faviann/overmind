@@ -12,11 +12,14 @@ does not design a replacement capture subsystem.
 
 ## The split
 
-- **Evidence — what happened.** Durable capture and storage of external agent
-  conversations and traces belong to Moraine. Moraine is the intended evidence
-  substrate for Codex and Claude Code conversation history; adoption is tracked
-  by [#206](https://github.com/faviann/overmind/issues/206) ("Adopt Moraine for
-  Codex V1 evidence capture and historical backfill").
+- **Evidence — what happened.** Durable capture and storage of the
+  conversations and traces that external agent harnesses emit belong to
+  Moraine, the intended evidence substrate for Codex and Claude Code
+  conversation history; adoption is tracked by
+  [#206](https://github.com/faviann/overmind/issues/206) ("Adopt Moraine for
+  Codex V1 evidence capture and historical backfill"). Overmind's own
+  append-only `traces` ledger is not that evidence and is unaffected: it stays
+  in Overmind's database, joinable against memories.
 - **Knowledge — what was concluded.** Deriving propositions and facts from
   external evidence is a projection problem owned by Overmind, when and if that
   capability is built. Nothing here authorizes building it now.
@@ -40,12 +43,12 @@ owns what happened, Overmind owns what was concluded and governed.
   Phase 2 amendments to those invariants do **not** remain binding merely
   because they were implemented.
 - **The datastore rules still bind Overmind's own persistence.** Phase 1 spec
-  §11 ("additional datastores") and §13 ("ClickHouse … never as the system of
-  record") govern what Overmind stores: Overmind keeps one PostgreSQL database
-  and gains no broker, cache, object store, or second database of its own.
-  They are not a prohibition on an external system owning external evidence
-  that Overmind does not store. Moraine is such a system, not a second
-  datastore behind the Overmind server.
+  §11 ("additional datastores", naming ClickHouse) and §13 ("ClickHouse …
+  never as the system of record") govern what Overmind stores: Overmind keeps
+  one PostgreSQL database and gains no broker, cache, object store, or second
+  database of its own. They are not a prohibition on an external system owning
+  external evidence that Overmind does not store. Moraine — ClickHouse-backed —
+  is such a system, not a second datastore behind the Overmind server.
 - **Repository or project association of a captured conversation is a derived
   classification**, not a canonical capture namespace decision for the current
   single-user milestone.

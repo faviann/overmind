@@ -8,6 +8,10 @@ evidence: it explains the capture code that still exists and the decisions
 that produced it. Do not start new capture work against it, and do not treat
 its Phase 1 amendments as still in force.
 
+*Everything below records the position as it stood before the
+course-correction; the authority and override claims it makes are historical,
+not current.*
+
 This document promotes the approved Phase 2 capture decisions into repository
 authority. It is intentionally narrow. The Phase 1 spec continues to govern
 the existing memory server, MCP tools, canonical ledger, and deployment

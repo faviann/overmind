@@ -22,6 +22,19 @@ treats Moraine as one of its own datastores. What the split decides lives in
 [`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md);
 adoption is tracked by [#206](https://github.com/faviann/overmind/issues/206).
 
+**Local Capture Proof** — the first Moraine adoption milestone: one producer
+captures, retains, and exposes its own persisted harness evidence locally well
+enough to prove the evidence replacement path. It does not include aggregation
+across producers or Overmind consumption of that evidence.
+
+**Central Evidence Aggregation** — collecting evidence from multiple local
+Moraine producers into a central long-term evidence surface. It follows Local
+Capture Proof and is not knowledge derivation or governance.
+
+**Knowledge Provenance Integration** — the future boundary through which
+Overmind resolves and cites Moraine evidence when deriving governed knowledge.
+It does not make Overmind an owner or duplicate store of the cited evidence.
+
 **Unscoped capture namespace (`capture/unscoped`)** — the fallback namespace
 for a captured conversation whose repository or configured semantic route
 cannot be determined. It records an unknown destination; it does not imply

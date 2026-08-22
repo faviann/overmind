@@ -24,7 +24,6 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > **v1.6 changelog (2026-08-20 — capture authorization withdrawn, issue #205, see `docs/decisions.md`):**
 > §11's narrow authorization of a capture runtime, harness hooks, and an OIDC capture console — granted by `conversation-capture-phase2-spec.md`, now superseded — is withdrawn; the Do Not Build list applies unamended to new work, and the code that authorization produced still exists and is frozen. Italic scope notes added to §11's additional-datastores entry and §13's scale-out seam: both govern Overmind's own persistence, and an external system owning external evidence Overmind does not store is not what they prohibit. See `evidence-and-knowledge-boundary.md`. Consequence for v1.3: the #15 conversation-capture wayfinder that import-time session preservation was deferred to is superseded, so that deferral no longer has a live destination; the requirement itself stands, uncancelled, and needs re-triage to a current tracker.
 
-Companion doc: `ansible-integration-checklist.md` (first consumer wiring).
 Background: the project handoff (`agent-memory-handoff-v4.md`) governs intent; where this spec is silent, the handoff decides.
 
 ---

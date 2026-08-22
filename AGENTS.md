@@ -12,9 +12,20 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
    separation it keeps in force (2026-08-20 course-correction)
 2. `docs/memory-server-phase1-spec.md` — binding for Phase 1 contracts and
    every area whose ownership the boundary does not decide
-3. `docs/agent-memory-handoff-v4.md` — intent and architecture where the
-   applicable spec is silent
-4. This file and `docs/` conventions
+3. `docs/decisions.md` (dated entries) and `docs/adr/` — decisions that refine
+   the above; a decision changes binding scope only after an applicable spec
+   records it
+
+This file and `docs/design-rules.md` summarize and route. They introduce no
+independent authority: where either differs from the documents above, those
+documents win. `docs/north-star.md` orients and never wins conflicts.
+
+Where all three tiers are silent, nothing else decides for them: do not treat
+an older or informational document as authority. Raise the gap with the
+operator only when it is a **material policy or architecture decision** — one
+that changes a contract, an invariant, or a binding scope. Ordinary
+implementation choices that the binding documents deliberately leave open stay
+with the implementer.
 
 The Phase 2 capture spec (`docs/conversation-capture-phase2-spec.md`) is
 superseded and no longer binding. Phase 1 memory and governance invariants

@@ -1,8 +1,8 @@
 # North star — what the mature Overmind memory system is
 
 > **Status: informational.** This doc orients; it never wins conflicts.
-> `memory-server-phase1-spec.md` stays binding on build details,
-> `agent-memory-handoff-v4.md` on intent and architecture. Provenance:
+> `evidence-and-knowledge-boundary.md` and `memory-server-phase1-spec.md` are
+> the binding documents. Provenance:
 > wayfinder ticket [#13](https://github.com/faviann/overmind/issues/13),
 > grounded in the article-corpus distillation from wayfinder ticket
 > [#12](https://github.com/faviann/overmind/issues/12), settled in a grilling
@@ -16,11 +16,11 @@ operator — design trade-offs favor the single-operator case, and anything
 that only benefits hypothetical other tenants is waste until proven
 otherwise.
 
-The mature system is what the handoff already names — a durable, inspectable,
-self-hosted memory ledger with derived projections — with one identity fact
-made explicit: **the working agent is the extractor, and the human is the
-quality gate.** There is no ingestion pipeline pouring facts in; memories are
-deliberate, typed, provenance-carrying atoms written at the moment of work
+The mature system is a durable, inspectable, self-hosted memory ledger with
+derived projections — with one identity fact made explicit: **the working
+agent is the extractor, and the human is the quality gate.** There is no
+ingestion pipeline pouring facts in; memories are deliberate, typed,
+provenance-carrying atoms written at the moment of work
 and admitted through review. Traces are the archive (append-only, outside
 the search path, reached by reference); memories are the shelf (searchable,
 human-curated). The shelf grows only as fast as the operator reads.

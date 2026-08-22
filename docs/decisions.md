@@ -23,6 +23,10 @@
   Phase 2 amendments do not remain binding merely because they were
   implemented. Current authority is
   `docs/evidence-and-knowledge-boundary.md`.
+- Supersedes the #15 conversation-capture track that the 2026-07-10 `log_trace`
+  session-selection entry deferred import-time session preservation to. That
+  requirement itself stands, uncancelled, and needs re-triage to a current
+  tracker.
 - Evidence door: reopen if external evidence living outside Overmind proves
   unusable for the governance work that needs it — a governed fact that cannot
   be grounded in its conversation without Overmind storing that conversation,

@@ -43,6 +43,18 @@ what happened, Overmind owns what was concluded and governed.
   database door, and the Phase 1 spec §11 `Do Not Build` list. Capture-specific
   Phase 2 amendments to those invariants do **not** remain binding merely
   because they were implemented.
+- **No capture term or capture document grants authority to build.** The
+  Phase 2 capture authorizations are withdrawn (Phase 1 spec §11). Where the
+  frozen capture vocabulary restates one of the invariants above, the binding
+  force is Phase 1's, not the capture term's.
+- **Credential and identity separation remains binding** for the capture
+  endpoints that still ship. A capture credential grants no MCP tool access, no
+  operator action, and no read of captured content; an agent bearer key imports
+  no capture observations and performs no capture-console action. Agent
+  identity, capture source binding, capture credential, and interactive
+  operator identity stay separate authorities, and imported content grants
+  none of them. This is a preserved authorization invariant over deployed
+  endpoints; it authorizes no new capture work.
 - **The datastore rules still bind Overmind's own persistence.** Phase 1 spec
   §11 ("additional datastores", naming ClickHouse) and §13 ("ClickHouse …
   never as the system of record") govern what Overmind stores: Overmind keeps

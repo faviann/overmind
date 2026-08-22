@@ -4,23 +4,11 @@ Glossary of domain terms. Implementation details live in `docs/`, not here.
 
 ## Terms
 
-Capture terminology anywhere in this glossary — routes, source streams,
-observations, captured events, receipts, and the rest — defines what the
-shipped, frozen capture code means by a word. It decides nothing about new
-capture work; current authority for that is
-[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md).
-The memory, identity, and governance vocabulary is unaffected and still binding.
-No capture term is a grant of authority to build anything: the Phase 2 capture
-authorizations are withdrawn (Phase 1 spec §11 and the boundary), so a term
-naming a capability, credential, or approval flow describes what the shipped
-code has, not what may be built. No capture term creates a binding obligation of
-its own either. Where one restates a Phase 1 invariant — namespace isolation,
-append-only history, the server as the only database door — the binding force is
-Phase 1's, not the term's. Where one describes how the shipped capture code
-separates its credentials and identities, that describes that code's behavior;
-it is neither a standing authority nor an exception to the freeze. Where the
-boundary document decides a question differently from how the shipped code named
-it, the boundary governs.
+Capture terminology anywhere in this glossary describes the shipped, frozen
+capture code and grants nothing. Current authority for capture is
+[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md),
+which governs on any conflict. The memory, identity, and governance vocabulary
+is unaffected and still binding.
 
 **Namespace** — the isolation unit for memories and traces. Every row belongs to
 exactly one namespace. Isolation is enforced server-side from the caller's
@@ -32,9 +20,8 @@ of external agent conversation evidence; adoption is tracked by #206 and nothing
 is deployed yet. It sits outside Overmind's server and database boundary:
 Overmind does not own that evidence going forward, and never treats Moraine as
 one of its own datastores. What the split decides lives in
-[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md),
-and that is the repository's only binding statement about Moraine's role.
-Non-binding observations of its schema and behavior are recorded in
+[`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md).
+Observations of its schema and behavior are recorded in
 [`docs/research/moraine-trace-event-model.md`](docs/research/moraine-trace-event-model.md).
 
 **Unscoped capture namespace (`capture/unscoped`)** — the fallback namespace

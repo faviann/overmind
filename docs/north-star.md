@@ -17,9 +17,10 @@ that only benefits hypothetical other tenants is waste until proven
 otherwise.
 
 The mature system is a durable, inspectable, self-hosted memory ledger with
-derived projections — with one identity fact made explicit: **the working agent is the extractor, and the human is the
-quality gate.** There is no ingestion pipeline pouring facts in; memories are
-deliberate, typed, provenance-carrying atoms written at the moment of work
+derived projections — with one identity fact made explicit: **the working
+agent is the extractor, and the human is the quality gate.** There is no
+ingestion pipeline pouring facts in; memories are deliberate, typed,
+provenance-carrying atoms written at the moment of work
 and admitted through review. Traces are the archive (append-only, outside
 the search path, reached by reference); memories are the shelf (searchable,
 human-curated). The shelf grows only as fast as the operator reads.

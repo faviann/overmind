@@ -7,7 +7,7 @@ wins over this summary wherever they differ. Choices the sources genuinely
 leave open are listed under "Open boundaries" for human resolution, not
 settled here.
 
-Authority order (as in `AGENTS.md`, with the decision log spelled out):
+Authority order (identical to `AGENTS.md`):
 
 1. `docs/evidence-and-knowledge-boundary.md` ("the boundary") — binding for
    the evidence / knowledge / governance ownership split, for the Phase 1
@@ -185,15 +185,12 @@ Committed — do not re-litigate without the maintainer:
 
 - **Does provenance-first require a concrete source event for every durable
   memory, or are explicitly actor/session-provenanced private notes allowed to
-  have no `source_id`?** The two positions in the repo genuinely disagree.
-  Provenance-first is a core principle, and the deleted handoff called a memory
-  written without a source event architectural debt. But the Phase 1 contract
-  deliberately permits it: `save_note` defaults to `source_type='human'` with a
-  null `source_id`, `memories.source_id` is nullable, `get_by_id` has a
-  documented `next` hint for the null case (spec §8), and the behavior is
-  tested. Until the maintainer decides, **current behavior stands unchanged** —
-  no writer is required to supply a source event, and no code enforces one.
-  Raised by the 2026-08-22 authority collapse; see `docs/decisions.md`.
+  have no `source_id`?** Provenance-first is a core principle, yet the Phase 1
+  contract deliberately permits a source-less private note: `save_note`
+  defaults to `source_type='human'` with a null `source_id` (spec §5, §8).
+  Until the maintainer decides, **current behavior stands unchanged** — no
+  writer is required to supply a source event, and no code enforces one. Full
+  record: `docs/decisions.md`, 2026-08-22.
 
 ## Not owned here
 

@@ -4,9 +4,12 @@
 
 - `docs/agent-memory-handoff-v4.md` is **deleted**, and the authority chain
   collapses from four tiers to three: the boundary, the Phase 1 spec, then this
-  file and `docs/` conventions. The tier whose job was "decides where the spec
-  is silent" is gone, not renamed — a successor intent document would recreate
-  the same attention tax and the same second place to look for a rule.
+  file and `docs/adr/`. The tier whose job was "decides where the spec is
+  silent" is gone, not renamed — a successor intent document would recreate the
+  same attention tax and the same second place to look for a rule.
+- `AGENTS.md` and `design-rules.md` now carry the **same** three-tier list and
+  both say plainly that they summarize and route without introducing
+  independent authority. Previously the two lists diverged at the last tier.
 - **Material silence now routes to the operator.** Where the boundary and the
   spec are both silent, no document decides. An unresolved question that
   changes a contract, an invariant, or a binding scope goes to the maintainer;

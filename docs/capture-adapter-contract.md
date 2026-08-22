@@ -1,5 +1,11 @@
 # Harness-neutral capture adapter contract
 
+Status: **frozen — non-binding for new capture work**. It describes capture
+code that still exists and remains accurate for maintaining it. Durable
+capture of external agent conversations is owned by Moraine, not Overmind;
+the current authority is
+[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
+
 Issue #75 introduces one adapter seam in `src/CaptureAdapters`. It interprets
 trusted local source material; authentication, routing, deterministic safety
 scanning, persistence, and checkpoint advancement remain owned by the capture

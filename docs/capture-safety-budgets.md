@@ -1,5 +1,15 @@
 # Capture safety budgets and rule-set contract
 
+Status: **unchanged by the capture course-correction.** Phase 1 spec §5 cites
+this document as the budget and rule-set contract for the never-store gate on
+*every* Overmind write path, memory and trace alike, and it still does. Nothing
+falls outside that gate. The course-correction changed only who performs
+external conversation capture — Moraine, not Overmind (see
+[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md)) — and
+changed nothing here. Any Overmind-side write is still scanned under these
+budgets and rules, a future projection of externally captured evidence
+included.
+
 Published defaults for the deterministic never-store detector (issue #76). The
 numbers below are versioned runtime constants in
 [`SafetyBudgets`](../src/MemSrv.Core/SafetyBudgets.cs), not configuration: an

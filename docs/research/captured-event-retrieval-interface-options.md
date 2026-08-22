@@ -2,6 +2,11 @@
 
 Design analysis for [Define the canonical captured-event envelope](https://github.com/faviann/overmind/issues/68), recorded 2026-07-14.
 
+> **Historical.** Recorded design analysis for the superseded Overmind-owned
+> capture direction (2026-08-20 course-correction). Retained as provenance; it
+> decides nothing now. Current authority:
+> [`../evidence-and-knowledge-boundary.md`](../evidence-and-knowledge-boundary.md).
+
 ## Decision in brief
 
 Phase 2 should expose a canonical-only captured-event contract. It returns the

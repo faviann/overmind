@@ -1,5 +1,11 @@
 # Capture modules
 
+Status: **frozen — non-binding for new capture work**. It describes capture
+code that still exists and remains accurate for maintaining it. Durable
+capture of external agent conversations is owned by Moraine, not Overmind;
+the current authority is
+[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
+
 The capture spine (issue #74, stabilized by #120 and routed by #77) comprises
 the public modules listed below. Capture paths cross the never-store gate
 (#76). No module requires a caller to understand another's rules. This note

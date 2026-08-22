@@ -2,6 +2,15 @@
 
 Research for [Evaluate deterministic secret detection for raw transcript ingestion](https://github.com/faviann/overmind/issues/65), checked 2026-07-14.
 
+> **Partly superseded (2026-08-20 course-correction).** The never-store
+> detector analysis stands and is still live: Phase 1 spec §5 and
+> [`../capture-safety-budgets.md`](../capture-safety-budgets.md) keep that gate
+> binding on every Overmind write path. What is superseded is this document's
+> assignment of downstream obligations to the Overmind-owned capture issues and
+> its framing as constraints on a Phase 2 capture specification. Current
+> authority for capture:
+> [`../evidence-and-knowledge-boundary.md`](../evidence-and-knowledge-boundary.md).
+
 ## Question and method
 
 Does the current non-LLM never-store gate cover raw prompts and tool results adequately, and which deterministic additions improve recall without unacceptable false positives or ingestion cost?

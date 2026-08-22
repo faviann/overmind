@@ -2,6 +2,16 @@
 
 Research for [Define the canonical captured-event envelope](https://github.com/faviann/overmind/issues/68), checked 2026-07-14.
 
+> **Partly superseded (2026-08-20 course-correction).** The observations of
+> Moraine itself — what it indexes, its schema, UID scheme, checkpoint/replay
+> behavior, and redaction pipeline — stand as pinned prior-art research and
+> carry no current authority. What is superseded is this document's
+> Overmind-side transfer recommendations: the
+> "Transfer decisions for Overmind" Adopt/Adapt/Reject table and the canonical
+> `capture_observations` model it proposes for Overmind's own database. Those
+> decide nothing now. Current authority:
+> [`../evidence-and-knowledge-boundary.md`](../evidence-and-knowledge-boundary.md).
+
 ## Question and method
 
 How does Moraine represent captured agent activity, and which parts should

@@ -9,10 +9,13 @@ settled here.
 
 Authority order (same as `AGENTS.md`):
 
-1. `docs/conversation-capture-phase2-spec.md` ("the capture spec") — binding
-   for conversation-capture work and its explicit Phase 1 amendments
+1. `docs/evidence-and-knowledge-boundary.md` ("the boundary") — binding for
+   the evidence / knowledge / governance ownership split, for the Phase 1
+   invariants it preserves, and for the transitional legacy-capture credential
+   and identity separation it keeps in force
 2. `docs/memory-server-phase1-spec.md` ("the Phase 1 spec", cited by §) —
-   binding for Phase 1 contracts and every area the capture spec does not amend
+   binding for Phase 1 contracts and every area whose ownership the boundary
+   does not decide
 3. `docs/agent-memory-handoff-v4.md` ("the handoff") — intent and
    architecture where the applicable spec is silent
 4. `docs/decisions.md` (dated entries) and `docs/adr/` — decisions that refine
@@ -21,11 +24,15 @@ Authority order (same as `AGENTS.md`):
 
 ## Scope boundaries
 
-- **The Phase 1 Do Not Build list remains binding** (Phase 1 spec §11), except
-  for the capture spec's narrow authorization of a capture runtime, harness
-  hooks, and an OIDC-authenticated capture console. Those exceptions apply only
-  to conversation capture; they do not authorize a general dashboard, a new
-  MCP authentication model, or other Phase 1 expansion.
+- **The Phase 1 Do Not Build list remains binding** (Phase 1 spec §11). The
+  Phase 2 capture spec's narrow exceptions for a capture runtime, harness
+  hooks, and an OIDC-authenticated capture console are superseded and no longer
+  authorize anything new (see the boundary); the code they produced is frozen,
+  not authority.
+- **Overmind does not own external conversation evidence.** Moraine is the
+  intended substrate for durable capture of external agent conversations
+  (adoption tracked by #206); Overmind stays authoritative for governed
+  knowledge and governance history (the boundary).
 - **Forward seams are documented, not built** (spec §13): vector lane,
   `memctl export` projection boundary, nightly reconciliation worker,
   event-date recency, trigram-lane completion, tiering mechanics, dedup,
@@ -121,7 +128,9 @@ Committed — do not re-litigate without the maintainer:
 - **One datastore, period.** No ClickHouse, Redis, vector DB, or queue as a
   second store: trace↔memory joins are load-bearing (acceptance tests 1 and
   4 *are* joins), and scale-out, if ever needed, is partitioning in place
-  (spec §11, §13; handoff "Important architectural preferences").
+  (spec §11, §13; handoff "Important architectural preferences"). This governs
+  what *Overmind* stores; it does not prohibit an external system owning
+  external evidence Overmind does not store (the boundary).
 - **Full-text is built-in `tsvector` + GIN**, with `pg_trgm` optional for the
   identifier/exact lane; no pgvector yet (spec §2).
 - **Migrations are DbUp plain-SQL**, journaled in the `schemaversions` table,
@@ -159,9 +168,9 @@ Committed — do not re-litigate without the maintainer:
   and compacted views are derived artifacts that point back into it and never
   replace it (handoff "The two paradigm commitments").
 - **Harnesses remain thin clients.** Memory logic stays behind the MCP surface.
-  The capture spec separately permits version-pinned, non-blocking capture
-  hooks that wake the local capture runtime; they do not contain memory logic
-  or replace scheduled transcript catch-up.
+  The existing version-pinned, non-blocking capture hooks that wake the local
+  capture runtime are frozen code, not a standing authorization to extend the
+  harness surface (the boundary).
 - **Source-of-truth hierarchy resolves conflicts**: Git/IaC > approved memory
   > proposed memory > raw trace inference. Propose the *why*; the *what*
   lives in the repo, where memory would only rot against it (handoff "Update

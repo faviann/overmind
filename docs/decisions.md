@@ -1,5 +1,45 @@
 # Decisions
 
+## 2026-08-20 — Capture is evidence; Moraine owns it (#203, #205)
+
+- A conversation is **evidence**, not governed knowledge. Two datastores are
+  acceptable when they do not claim authority over the same fact:
+  Moraine/ClickHouse owns what happened; Overmind/PostgreSQL owns what was
+  concluded and governed. This does not loosen spec §11/§13: those govern
+  Overmind's *own* persistence, and Overmind still keeps one PostgreSQL
+  database and gains no second store of its own.
+- Durable capture and storage of the conversations and traces external agent
+  harnesses emit move to **Moraine** (adoption tracked by #206). Overmind's own
+  append-only `traces` ledger is unaffected. Overmind does not own duplicate
+  canonical conversation storage for that external evidence.
+- `docs/conversation-capture-phase2-spec.md` and its subordinate capture
+  documents are **superseded/frozen**. Per #203's recorded guardrails, the
+  capture code is not deleted before #206 proves the replacement path; its
+  existence alone justifies no new capture work. Retention in the active tree
+  is narrow, not a general provenance allowance: the Phase 2 spec stays because
+  #205 requires that historical specification to remain and be clearly
+  non-binding, and the concrete legacy-operational capture documents stay while
+  the shipped code they describe still exists. Research notes, plans,
+  intermediate analyses, and process artifacts are not entitled to remain on
+  `main` merely for their history — Git history, issues, and PRs preserve those.
+  `docs/capture-safety-budgets.md` is the one exception to the freeze: it
+  remains binding, because spec §5 cites it for the never-store gate on every
+  Overmind write path.
+- Phase 1 memory and governance invariants remain binding; capture-specific
+  Phase 2 amendments do not remain binding merely because they were
+  implemented. Current authority is
+  `docs/evidence-and-knowledge-boundary.md`.
+- Supersedes the #15 conversation-capture track that the 2026-07-10 `log_trace`
+  session-selection entry deferred import-time session preservation to. That
+  requirement itself stands, uncancelled, and needs re-triage to a current
+  tracker.
+- Evidence door: reopen if external evidence living outside Overmind proves
+  unusable for the governance work that needs it — a governed fact that cannot
+  be grounded in its conversation without Overmind storing that conversation,
+  or a provenance question the split makes unanswerable in practice. Adoption
+  friction in #206 is not that evidence; it argues about the substrate, not the
+  boundary.
+
 ## 2026-07-13 — Phase 1 data access is Npgsql + Dapper, no ORM (#44)
 
 - Phase 1 canonical persistence uses **Npgsql + Dapper with hand-written

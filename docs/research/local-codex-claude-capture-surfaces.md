@@ -2,6 +2,14 @@
 
 Research for [Inventory local Codex and Claude Code capture surfaces](https://github.com/faviann/overmind/issues/59), checked 2026-07-14.
 
+> **Partly superseded (2026-08-20 course-correction).** The inventory of Codex
+> and Claude Code hook, transcript, and session surfaces is factual and stays
+> true regardless of who owns capture. What is superseded is this document's
+> Overmind-side capture recommendations — the hook-hint and catch-up-reader
+> design for an Overmind-owned capture runtime. Those decide nothing now.
+> Current authority:
+> [`../evidence-and-knowledge-boundary.md`](../evidence-and-knowledge-boundary.md).
+
 ## Question and method
 
 What supported hooks, transcript records, session and subagent relationships, compaction and instruction signals, tool calls/results/failures, and per-event model/provider fields do current local Codex and Claude Code expose? What format drift must capture adapters tolerate?

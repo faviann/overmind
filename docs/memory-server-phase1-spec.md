@@ -1,4 +1,4 @@
-# Memory Server — Phase 1 Build Spec (v1.4)
+# Memory Server — Phase 1 Build Spec (v1.6)
 
 This is a build spec for a Claude Code session. It is deliberately narrow. The **Do Not Build** section is as binding as the requirements. The goal is a working v0 spine in 1–2 sessions that the homelab project can consume immediately.
 
@@ -20,6 +20,9 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 
 > **v1.4 changelog (2026-07-10 — provenance-carrying retirement, issue #18):**
 > Retirement joins the trace taxonomy as a distinct operator action. `memctl retire` now requires operator identity and a reason, and atomically records the `approved` → `retired` transition with its trace event. See §6c.
+
+> **v1.6 changelog (2026-08-20 — capture authorization withdrawn, issue #205, see `docs/decisions.md`):**
+> §11's narrow authorization of a capture runtime, harness hooks, and an OIDC capture console — granted by `conversation-capture-phase2-spec.md`, now superseded — is withdrawn; the Do Not Build list applies unamended to new work, and the code that authorization produced still exists and is frozen. Italic scope notes added to §11's additional-datastores entry and §13's scale-out seam: both govern Overmind's own persistence, and an external system owning external evidence Overmind does not store is not what they prohibit. See `evidence-and-knowledge-boundary.md`. Consequence for v1.3: the #15 conversation-capture wayfinder that import-time session preservation was deferred to is superseded, so that deferral no longer has a live destination; the requirement itself stands, uncancelled, and needs re-triage to a current tracker.
 
 Companion doc: `ansible-integration-checklist.md` (first consumer wiring).
 Background: the project handoff (`agent-memory-handoff-v4.md`) governs intent; where this spec is silent, the handoff decides.
@@ -328,17 +331,21 @@ Plus mechanical tests: UPDATE/DELETE on traces fails **both** via trigger and vi
 ## 11. Do Not Build (binding)
 
 These restrictions remain binding for Phase 1 and for all later work unless an
-applicable binding spec explicitly amends one. For local conversation capture,
-`conversation-capture-phase2-spec.md` narrowly authorizes the capture runtime,
-harness hooks, and focused OIDC capture console while preserving the other
-restrictions and existing Phase 1 contracts.
+applicable binding spec explicitly amends one. The capture-runtime,
+harness-hook, and OIDC capture-console authorization that
+`conversation-capture-phase2-spec.md` once granted is **superseded and no
+longer in force** (2026-08-20 course-correction, #203/#205 — see
+`evidence-and-knowledge-boundary.md`). The code it produced still exists and is
+frozen; the list below applies unamended to new work. The italic scope notes on
+the datastore entry below and on the §13 scale-out seam clarify what those
+entries already govern; they amend nothing.
 
 - ❌ Embeddings, pgvector, or any embedding model integration (the `jobs` table and lane registry are the future seams; that's all)
 - ❌ Graph storage or graph lanes
 - ❌ Any LLM-calling worker (no extraction, no consolidation, no reconciliation) — the `jobs` table stays empty
 - ❌ Tiering *mechanics* (promotion/demotion/TTL) — the `tier` column exists, nothing moves rows between tiers yet
 - ❌ Web UI or dashboard — `memctl` only
-- ❌ Additional datastores (**ClickHouse, TimescaleDB**, Redis, vector DBs, queues) or multi-node anything — one server process, one Postgres database, one systemd unit. Ease of deployment is not the cost of a second datastore; the second schema, the backup story, and the broken trace↔memory join are. Acceptance tests 1 and 4 are joins.
+- ❌ Additional datastores (**ClickHouse, TimescaleDB**, Redis, vector DBs, queues) or multi-node anything — one server process, one Postgres database, one systemd unit. Ease of deployment is not the cost of a second datastore; the second schema, the backup story, and the broken trace↔memory join are. Acceptance tests 1 and 4 are joins. *(This governs Overmind's own persistence. An external system owning external evidence Overmind does not store is not a second datastore behind this server — see `evidence-and-knowledge-boundary.md`.)*
 - ❌ Auth beyond static bearer keys mapped to agent_ids
 - ❌ Dispatcher/orchestrator logic of any kind (its design corpus is `deferred-knowledge-and-dispatcher-notes.md`; it stays a document)
 - ❌ Harness extensions (Pi/Claude Code compaction hooks) — `trace_snapshots` + `log_trace(compaction_boundary)` are the landing pads; integration is a later, separate task
@@ -363,4 +370,4 @@ If mid-session an idea appears that isn't in this spec: `save_note` it into name
 - **Tiering mechanics:** write-time classification first (supermemory-style), demotion via recency states.
 - **Dedup:** the first consumer of `content_hash` is a cheap exact-duplicate check at propose time (warn, don't block); LLM-assisted near-dup synthesis comes with the workers.
 - **Harness integration:** thin Pi/Claude Code extensions (~100 lines) calling this surface; trace-first compaction writes `trace_snapshots` before deleting.
-- **Scale-out:** if trace volume ever hurts, the first move is **in-place** — native partitioning or a Timescale hypertable on `traces`, same database, causal joins intact. ClickHouse enters only if Moraine-scale trace *analytics* ever becomes a real workload, and then strictly as a **downstream replica fed from `traces`** — never as the system of record. Immutability makes either move the easiest migration in the system.
+- **Scale-out:** if trace volume ever hurts, the first move is **in-place** — native partitioning or a Timescale hypertable on `traces`, same database, causal joins intact. ClickHouse enters only if Moraine-scale trace *analytics* ever becomes a real workload, and then strictly as a **downstream replica fed from `traces`** — never as the system of record. *(This is about Overmind's own persistence. An external system owning external evidence Overmind does not store is a different arrangement and is not what this prohibits — see `evidence-and-knowledge-boundary.md`.)* Immutability makes either move the easiest migration in the system.

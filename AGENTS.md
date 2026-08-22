@@ -7,9 +7,9 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
 ## Authority
 
 1. `docs/evidence-and-knowledge-boundary.md` — binding for the evidence /
-   knowledge / governance ownership split and for the Phase 1 invariants it
-   preserves, including capture credential and identity separation
-   (2026-08-20 course-correction)
+   knowledge / governance ownership split, for the Phase 1 invariants it
+   preserves, and for the transitional legacy-capture credential and identity
+   separation it keeps in force (2026-08-20 course-correction)
 2. `docs/memory-server-phase1-spec.md` — binding for Phase 1 contracts and
    every area whose ownership the boundary does not decide
 3. `docs/agent-memory-handoff-v4.md` — intent and architecture where the
@@ -50,8 +50,8 @@ merely because they were implemented.
   `docs/capture-modules.md` (enrollment, ingestion, receipt reads),
   `docs/capture-adapter-contract.md` (adapters, fixture parsing),
   `docs/codex-capture-runtime.md` (catch-up runtime),
-  `docs/capture-synthetic-slice.md` (synthetic fixture),
-  `docs/conversation-capture-phase2-spec.md` (superseded; provenance only).
+  `docs/capture-synthetic-slice.md` (synthetic fixture).
+  The superseded Phase 2 spec is not part of this route.
 - Never-store rules, scan budgets, or redaction markers →
   `docs/capture-safety-budgets.md` (unchanged by the course-correction)
 - Schema, retrieval, dependencies, or scope → `docs/design-rules.md`

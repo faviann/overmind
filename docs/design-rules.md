@@ -10,9 +10,9 @@ settled here.
 Authority order (same as `AGENTS.md`):
 
 1. `docs/evidence-and-knowledge-boundary.md` ("the boundary") — binding for
-   the evidence / knowledge / governance ownership split and for the Phase 1
-   invariants it preserves, capture credential and identity separation among
-   them
+   the evidence / knowledge / governance ownership split, for the Phase 1
+   invariants it preserves, and for the transitional legacy-capture credential
+   and identity separation it keeps in force
 2. `docs/memory-server-phase1-spec.md` ("the Phase 1 spec", cited by §) —
    binding for Phase 1 contracts and every area whose ownership the boundary
    does not decide

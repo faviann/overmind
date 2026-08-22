@@ -4,9 +4,9 @@ Research for [Define the canonical captured-event envelope](https://github.com/f
 
 > **Partly superseded (2026-08-20 course-correction).** The observations of
 > Moraine itself — what it indexes, its schema, UID scheme, checkpoint/replay
-> behavior, and redaction pipeline — stand as prior-art research, and are what
-> [`../../CONTEXT.md`](../../CONTEXT.md) points at for that vocabulary. What is
-> superseded is this document's Overmind-side transfer recommendations: the
+> behavior, and redaction pipeline — stand as pinned prior-art research and
+> carry no current authority. What is superseded is this document's
+> Overmind-side transfer recommendations: the
 > "Transfer decisions for Overmind" Adopt/Adapt/Reject table and the canonical
 > `capture_observations` model it proposes for Overmind's own database. Those
 > decide nothing now. Current authority:

@@ -47,14 +47,17 @@ what happened, Overmind owns what was concluded and governed.
   Phase 2 capture authorizations are withdrawn (Phase 1 spec §11). Where the
   frozen capture vocabulary restates one of the invariants above, the binding
   force is Phase 1's, not the capture term's.
-- **Credential and identity separation remains binding** for the capture
-  endpoints that still ship. A capture credential grants no MCP tool access, no
-  operator action, and no read of captured content; an agent bearer key imports
-  no capture observations and performs no capture-console action. Agent
-  identity, capture source binding, capture credential, and interactive
-  operator identity stay separate authorities, and imported content grants
-  none of them. This is a preserved authorization invariant over deployed
-  endpoints; it authorizes no new capture work.
+- **Credential and identity separation remains binding** for the legacy
+  capture endpoints that are still deployed. A capture credential grants no MCP
+  tool access, no operator action, and no read of captured content; an agent
+  bearer key imports no capture observations and performs no capture-console
+  action. Agent identity, capture source binding, capture credential, and
+  interactive operator identity stay separate authorities, and imported content
+  grants none of them. This is a **transitional** binding safety invariant over
+  those endpoints, not a Phase 1 invariant and not of Phase 1 origin: it binds
+  while the endpoints exist, authorizes no new capture architecture or capture
+  feature work, and lapses when the legacy capture endpoints and their code are
+  retired after the Moraine replacement is proven.
 - **The datastore rules still bind Overmind's own persistence.** Phase 1 spec
   §11 ("additional datastores", naming ClickHouse) and §13 ("ClickHouse …
   never as the system of record") govern what Overmind stores: Overmind keeps
@@ -70,8 +73,17 @@ what happened, Overmind owns what was concluded and governed.
   [#203](https://github.com/faviann/overmind/issues/203)'s recorded guardrails,
   that code is not deleted before
   [#206](https://github.com/faviann/overmind/issues/206) proves the replacement
-  path, and documents describing it stay available as provenance, marked
-  frozen. One exception to the freeze: the capture safety budgets and
+  path. Which documents stay in the active tree is narrower than "anything with
+  provenance value":
+  [`conversation-capture-phase2-spec.md`](conversation-capture-phase2-spec.md)
+  stays because [#205](https://github.com/faviann/overmind/issues/205)
+  requires that historical specification to remain and be clearly non-binding;
+  the concrete legacy-operational capture documents stay while the shipped code
+  they describe still exists, and go with it. Research notes, plans,
+  intermediate analyses, and process artifacts earn no place in the active tree
+  merely by containing history — Git history, issues, and PRs are the
+  preservation layer for those. Marking a document frozen is not a decision to
+  keep it. One exception to the freeze: the capture safety budgets and
   never-store rule set (`capture-safety-budgets.md`) remain binding, because
   Phase 1 spec §5 cites them for the never-store gate on every Overmind write
   path.

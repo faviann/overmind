@@ -13,12 +13,18 @@
   append-only `traces` ledger is unaffected. Overmind does not own duplicate
   canonical conversation storage for that external evidence.
 - `docs/conversation-capture-phase2-spec.md` and its subordinate capture
-  documents are **superseded/frozen**, retained as provenance for the capture
-  code that still exists. Per #203's recorded guardrails, that code is not
-  deleted before #206 proves the replacement path; its existence alone
-  justifies no new capture work. `docs/capture-safety-budgets.md` is the one
-  exception to the freeze: it remains binding, because spec §5 cites it for the
-  never-store gate on every Overmind write path.
+  documents are **superseded/frozen**. Per #203's recorded guardrails, the
+  capture code is not deleted before #206 proves the replacement path; its
+  existence alone justifies no new capture work. Retention in the active tree
+  is narrow, not a general provenance allowance: the Phase 2 spec stays because
+  #205 requires that historical specification to remain and be clearly
+  non-binding, and the concrete legacy-operational capture documents stay while
+  the shipped code they describe still exists. Research notes, plans,
+  intermediate analyses, and process artifacts are not entitled to remain on
+  `main` merely for their history — Git history, issues, and PRs preserve those.
+  `docs/capture-safety-budgets.md` is the one exception to the freeze: it
+  remains binding, because spec §5 cites it for the never-store gate on every
+  Overmind write path.
 - Phase 1 memory and governance invariants remain binding; capture-specific
   Phase 2 amendments do not remain binding merely because they were
   implemented. Current authority is

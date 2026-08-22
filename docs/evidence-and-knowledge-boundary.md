@@ -28,8 +28,8 @@ does not design a replacement capture subsystem.
   retirement, and the durable history of those decisions.
 
 A conversation is evidence, not governed knowledge. Two datastores are
-acceptable only because they do not claim authority over the same fact: Moraine
-owns what happened, Overmind owns what was concluded and governed.
+acceptable when they do not claim authority over the same fact: Moraine owns
+what happened, Overmind owns what was concluded and governed.
 
 ## What this decides
 
@@ -58,7 +58,10 @@ owns what happened, Overmind owns what was concluded and governed.
   that code is not deleted before
   [#206](https://github.com/faviann/overmind/issues/206) proves the replacement
   path, and documents describing it stay available as provenance, marked
-  frozen.
+  frozen. One exception to the freeze: the capture safety budgets and
+  never-store rule set (`capture-safety-budgets.md`) remain binding, because
+  Phase 1 spec §5 cites them for the never-store gate on every Overmind write
+  path.
 
 ## Out of scope here
 

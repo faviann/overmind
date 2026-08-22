@@ -333,9 +333,9 @@ harness-hook, and OIDC capture-console authorization that
 `conversation-capture-phase2-spec.md` once granted is **superseded and no
 longer in force** (2026-08-20 course-correction, #203/#205 — see
 `evidence-and-knowledge-boundary.md`). The code it produced still exists and is
-frozen; the list below applies unamended to new work. The italic notes inside
-two entries below clarify what those entries already govern; they amend
-nothing.
+frozen; the list below applies unamended to new work. The italic notes added to
+the datastore entry below and to the §13 scale-out seam clarify what those
+entries already govern; they amend nothing.
 
 - ❌ Embeddings, pgvector, or any embedding model integration (the `jobs` table and lane registry are the future seams; that's all)
 - ❌ Graph storage or graph lanes

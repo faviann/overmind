@@ -26,9 +26,10 @@ Authority order (same as `AGENTS.md`):
   hooks, and an OIDC-authenticated capture console are superseded and no longer
   authorize anything new (see the boundary); the code they produced is frozen,
   not authority.
-- **Overmind does not own external conversation evidence.** Durable capture of
-  external agent conversations belongs to Moraine; Overmind stays authoritative
-  for governed knowledge and governance history (the boundary).
+- **Overmind does not own external conversation evidence.** Moraine is the
+  intended substrate for durable capture of external agent conversations
+  (adoption tracked by #206); Overmind stays authoritative for governed
+  knowledge and governance history (the boundary).
 - **Forward seams are documented, not built** (spec §13): vector lane,
   `memctl export` projection boundary, nightly reconciliation worker,
   event-date recency, trigram-lane completion, tiering mechanics, dedup,

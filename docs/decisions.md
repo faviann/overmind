@@ -3,7 +3,7 @@
 ## 2026-08-20 — Capture is evidence; Moraine owns it (#203, #205)
 
 - A conversation is **evidence**, not governed knowledge. Two datastores are
-  acceptable only when they do not claim authority over the same fact:
+  acceptable when they do not claim authority over the same fact:
   Moraine/ClickHouse owns what happened; Overmind/PostgreSQL owns what was
   concluded and governed. This does not loosen spec §11/§13: those govern
   Overmind's *own* persistence, and Overmind still keeps one PostgreSQL
@@ -16,7 +16,9 @@
   documents are **superseded/frozen**, retained as provenance for the capture
   code that still exists. Per #203's recorded guardrails, that code is not
   deleted before #206 proves the replacement path; its existence alone
-  justifies no new capture work.
+  justifies no new capture work. `docs/capture-safety-budgets.md` is the one
+  exception to the freeze: it remains binding, because spec §5 cites it for the
+  never-store gate on every Overmind write path.
 - Phase 1 memory and governance invariants remain binding; capture-specific
   Phase 2 amendments do not remain binding merely because they were
   implemented. Current authority is

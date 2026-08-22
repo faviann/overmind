@@ -8,14 +8,15 @@ supersedes
 the authority over conversation capture.
 
 This document states an ownership boundary. It is not a specification and it
-does not design a replacement capture subsystem.
+designs no subsystem — but where it decides ownership it governs, and the specs
+are read subject to those decisions.
 
 ## The split
 
 - **Evidence — what happened.** Durable capture and storage of the
   conversations and traces that external agent harnesses emit belong to
-  Moraine, the intended evidence substrate for Codex and Claude Code
-  conversation history; adoption is tracked by
+  Moraine, the intended substrate for external agent conversation evidence,
+  Codex first; adoption is tracked by
   [#206](https://github.com/faviann/overmind/issues/206) ("Adopt Moraine for
   Codex V1 evidence capture and historical backfill"). Overmind's own
   append-only `traces` ledger is not that evidence and is unaffected: it stays

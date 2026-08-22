@@ -132,7 +132,7 @@ No fully autonomous god agent. No silent production deployments. No replacing Gi
 - **Anonymous or agent-borrowed approval events.** Rejected: an approval without a distinct reviewer identity is fake provenance. (Now enforced — spec §6b.)
 - **Reject-on-secret for trace writes.** Rejected in favor of redact-in-place: dropping the event trades a secrets risk for an audit hole. (Now spec §5.)
 - **Storing chain-of-thought as decision provenance.** Rejected: store *observable decision summaries* (decision, rationale summary, alternatives considered, source refs). Auditability must not depend on private reasoning being retained.
-- **A second datastore for anything** (ClickHouse, Redis, dedicated vector DB, queue). Standing rejection from the spec's Do Not Build; the predecessor docs agreed. Trace↔memory joins are load-bearing.
+- **A second datastore for anything** (ClickHouse, Redis, dedicated vector DB, queue). Standing rejection from the spec's Do Not Build; the predecessor docs agreed. Trace↔memory joins are load-bearing. Scope: what Overmind itself stores — external evidence owned outside Overmind is a different question, settled in `docs/evidence-and-knowledge-boundary.md`.
 - **Building the harness/orchestrator before ≥2 memory consumers exist.** Both projects independently concluded the dispatcher comes last.
 ---
  

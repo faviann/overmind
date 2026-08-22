@@ -16,7 +16,7 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > Postgres major pinned to **18** everywhere (was "15+"). Migrations no longer create the `memsrv` role — provisioning owns roles (Ansible in prod, the Compose bootstrap in dev/CI). Image contract: `ghcr.io/faviann/overmind:<version>`, immutable tags. Service runtime contract (HTTP port/health) explicitly deferred to Session 2.
 
 > **v1.3 changelog (2026-07-10 — `log_trace` session selection, issue #17, see `docs/decisions.md`):**
-> `session_id` removed from the `log_trace` input schema; session identity is always server-derived (Mcp-Session-Id over HTTP; `MEMSRV_SESSION_ID` or a generated per-process id over stdio). A caller-supplied `session_id` is ignored; the response now returns `{traceUuid, sessionId}`. Import-time session preservation is an operator-path feature deferred to the conversation-capture wayfinder (#15). Must land before the v1.0.0 tag.
+> `session_id` removed from the `log_trace` input schema; session identity is always server-derived (Mcp-Session-Id over HTTP; `MEMSRV_SESSION_ID` or a generated per-process id over stdio). A caller-supplied `session_id` is ignored; the response now returns `{traceUuid, sessionId}`. Import-time session preservation is an operator-path feature deferred to the conversation-capture wayfinder (#15). Must land before the v1.0.0 tag. *(2026-08-20: that wayfinder's Overmind-owned capture track is superseded. The requirement stands and is not cancelled, but it no longer rides on that architecture; the deferral now resolves against `evidence-and-knowledge-boundary.md`.)*
 
 > **v1.4 changelog (2026-07-10 — provenance-carrying retirement, issue #18):**
 > Retirement joins the trace taxonomy as a distinct operator action. `memctl retire` now requires operator identity and a reason, and atomically records the `approved` → `retired` transition with its trace event. See §6c.
@@ -333,8 +333,8 @@ harness-hook, and OIDC capture-console authorization that
 `conversation-capture-phase2-spec.md` once granted is **superseded and no
 longer in force** (2026-08-20 course-correction, #203/#205 — see
 `evidence-and-knowledge-boundary.md`). The code it produced still exists and is
-frozen; the list below applies unamended to new work. The italic notes added to
-the datastore entry below and to the §13 scale-out seam clarify what those
+frozen; the list below applies unamended to new work. The italic scope notes on
+the datastore entry below and on the §13 scale-out seam clarify what those
 entries already govern; they amend nothing.
 
 - ❌ Embeddings, pgvector, or any embedding model integration (the `jobs` table and lane registry are the future seams; that's all)

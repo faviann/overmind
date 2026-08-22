@@ -7,7 +7,9 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
 ## Authority
 
 1. `docs/evidence-and-knowledge-boundary.md` — binding for the evidence /
-   knowledge / governance ownership split (2026-08-20 course-correction)
+   knowledge / governance ownership split and for the Phase 1 invariants it
+   preserves, including capture credential and identity separation
+   (2026-08-20 course-correction)
 2. `docs/memory-server-phase1-spec.md` — binding for Phase 1 contracts and
    every area whose ownership the boundary does not decide
 3. `docs/agent-memory-handoff-v4.md` — intent and architecture where the

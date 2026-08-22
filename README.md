@@ -49,7 +49,6 @@ trusted local agents, and includes the `memctl` operator CLI.
 | [`docs/north-star.md`](docs/north-star.md) | What the mature system is (orientation; never wins conflicts) |
 | [`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md) | **Binding** evidence / knowledge / governance ownership split, and the Phase 1 invariants it preserves |
 | [`docs/memory-server-phase1-spec.md`](docs/memory-server-phase1-spec.md) | **Binding** build spec, schema, tool contracts, Do-Not-Build list |
-| [`docs/agent-memory-handoff-v4.md`](docs/agent-memory-handoff-v4.md) | Intent and architecture where the spec is silent |
 | [`CONTEXT.md`](CONTEXT.md) | Domain vocabulary |
 
 ## Watch the authorized issue queue while AFK

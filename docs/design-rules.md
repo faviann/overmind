@@ -7,7 +7,7 @@ wins over this summary wherever they differ. Choices the sources genuinely
 leave open are listed under "Open boundaries" for human resolution, not
 settled here.
 
-Authority order (same as `AGENTS.md`):
+Authority order (as in `AGENTS.md`, with the decision log spelled out):
 
 1. `docs/evidence-and-knowledge-boundary.md` ("the boundary") — binding for
    the evidence / knowledge / governance ownership split, for the Phase 1
@@ -16,9 +16,7 @@ Authority order (same as `AGENTS.md`):
 2. `docs/memory-server-phase1-spec.md` ("the Phase 1 spec", cited by §) —
    binding for Phase 1 contracts and every area whose ownership the boundary
    does not decide
-3. `docs/agent-memory-handoff-v4.md` ("the handoff") — intent and
-   architecture where the applicable spec is silent
-4. `docs/decisions.md` (dated entries) and `docs/adr/` — decisions that refine
+3. `docs/decisions.md` (dated entries) and `docs/adr/` — decisions that refine
    the above; a decision changes binding scope only after an applicable spec
    records it
 
@@ -52,18 +50,18 @@ Authority order (same as `AGENTS.md`):
   (spec §4).
 - **Memories version by append-and-archive**: a new row `supersedes` the old
   uuid; superseded and retired rows are never deleted and remain queryable
-  (spec §4–5; handoff "Update semantics").
+  (spec §4–5).
 - **Provenance columns are v1 schema, not a retrofit**: identity (uuid,
   version, `content_hash`), source (`source_type`, `source_id`, agent,
   session), causal consumption logging, and versioning are required now
-  (handoff "Provenance: the concrete spec, not a slogan").
+  (spec §4, §6).
 - **Causal provenance is captured server-side**: `get_by_id` logs
   `memory_consumed`, writes log `memory_proposed`/`memory_written`; never
   rely on agents to report what they used (spec §6).
 - **Write-time signals are persisted**: `content_hash` is computed
   server-side on every write/version, and `metadata JSONB` is the
-  migration-free landing pad for future write-time signals (spec §4; handoff:
-  "if a signal is computed at write time, persist it").
+  migration-free landing pad for future write-time signals — persist any
+  signal computed at write time rather than discarding it (spec §4).
 - **Status and visibility state machines** (spec §5): shared memories are
   born `proposed`; private notes are auto-`approved` and owner-scoped;
   approving a superseding memory flips the old row to `superseded`; only
@@ -96,7 +94,7 @@ Authority order (same as `AGENTS.md`):
   touching fusion (spec §7).
 - **Per-lane ranks and scores are preserved on every result** — one fused
   score for ordering, one score per lane for debugging; never discard lane
-  scores (spec §7; handoff "Retrieval: the agent decides what it sees").
+  scores (spec §7).
 - **No vector lane yet**: pgvector is a documented seam in the same database,
   added when dogfooding shows semantic misses hurting — not before (spec §2,
   §13).
@@ -107,10 +105,9 @@ Authority order (same as `AGENTS.md`):
 - **Per-consumer retrieval differences are `retrieval_config` rows, not code
   forks** (spec §4).
 - **Recency is a first-class ranking lane** (exponential decay from
-  `recency_half_life_h`) and doubles as soft demotion (spec §7; handoff).
+  `recency_half_life_h`) and doubles as soft demotion (spec §7).
 - **Memory is a tool surface the agent calls, not middleware**: no
-  auto-injection, no predicting what the agent needs (handoff "Retrieval:
-  the agent decides what it sees").
+  auto-injection, no predicting what the agent needs (spec §11).
 
 ## Dependencies and stack
 
@@ -128,7 +125,7 @@ Committed — do not re-litigate without the maintainer:
 - **One datastore, period.** No ClickHouse, Redis, vector DB, or queue as a
   second store: trace↔memory joins are load-bearing (acceptance tests 1 and
   4 *are* joins), and scale-out, if ever needed, is partitioning in place
-  (spec §11, §13; handoff "Important architectural preferences"). This governs
+  (spec §11, §13). This governs
   what *Overmind* stores; it does not prohibit an external system owning
   external evidence Overmind does not store (the boundary).
 - **Full-text is built-in `tsvector` + GIN**, with `pg_trgm` optional for the
@@ -152,8 +149,7 @@ Committed — do not re-litigate without the maintainer:
 - **The server is the only database door.** Exactly one app role (`memsrv`)
   holds a connection string; consumers get bearer keys, never connection
   strings. A direct connection silently bypasses the never-store gate, causal
-  logging, namespace isolation, and the write policy (spec §1–2; handoff
-  "Important architectural preferences").
+  logging, namespace isolation, and the write policy (spec §1–2).
 - **Approve / edit-then-approve / reject / retire are `memctl`-only operator
   actions**, deliberately not agent-facing tools (spec §5, §8–9).
 - **Governance lives in code, not prompts.** The never-store gate runs on
@@ -162,25 +158,42 @@ Committed — do not re-litigate without the maintainer:
   hole (spec §5).
 - **Canonical ledger, derived projections.** Truth is the trace + proposal +
   approved-memory ledgers; every index, export, wiki, or external memory tool
-  is a rebuildable projection over them, never a candidate owner (handoff
-  "What the project is really about"; spec §13).
+  is a rebuildable projection over them, never a candidate owner
+  (`CONTEXT.md`, "Canonical ledger"; spec §13).
 - **The raw trace store is primary and immutable**; summaries, extractions,
   and compacted views are derived artifacts that point back into it and never
-  replace it (handoff "The two paradigm commitments").
+  replace it (spec §4, `trace_snapshots`; `AGENTS.md` always-on invariants).
 - **Harnesses remain thin clients.** Memory logic stays behind the MCP surface.
   The existing version-pinned, non-blocking capture hooks that wake the local
   capture runtime are frozen code, not a standing authorization to extend the
   harness surface (the boundary).
-- **Source-of-truth hierarchy resolves conflicts**: Git/IaC > approved memory
-  > proposed memory > raw trace inference. Propose the *why*; the *what*
-  lives in the repo, where memory would only rot against it (handoff "Update
-  semantics" and "Memory placement discipline").
+- **Source-of-truth hierarchy resolves conflicts**: the current authoritative
+  source (Git/IaC and equivalents) > approved memory > proposed memory > raw
+  trace inference. It decides which record wins and mandates no mechanism;
+  dependents need only stay identifiable via `source_id` (spec §5, §10
+  acceptance test 2). Automated re-validation is the Phase 3 reconciliation
+  worker (spec §13), not a current obligation.
+- **Propose the *why*, not the *what*** — rationale, constraints, pitfalls, and
+  rollback notes belong in memory; config values, file contents, and mappings
+  stay in the repo, where memory would only rot against them. Convention, held
+  by agent discipline and edit-then-approve review, not by code
+  (`north-star.md`, "Write-side quality").
 - **Tool responses are self-guiding JSON**: camelCase properties on the wire,
   ending with a `next` hint (spec §8; decisions 2026-07-12 camelCase).
 
 ## Open boundaries (surface to the human; do not settle silently)
 
-None currently.
+- **Does provenance-first require a concrete source event for every durable
+  memory, or are explicitly actor/session-provenanced private notes allowed to
+  have no `source_id`?** The two positions in the repo genuinely disagree.
+  Provenance-first is a core principle, and the deleted handoff called a memory
+  written without a source event architectural debt. But the Phase 1 contract
+  deliberately permits it: `save_note` defaults to `source_type='human'` with a
+  null `source_id`, `memories.source_id` is nullable, `get_by_id` has a
+  documented `next` hint for the null case (spec §8), and the behavior is
+  tested. Until the maintainer decides, **current behavior stands unchanged** —
+  no writer is required to supply a source event, and no code enforces one.
+  Raised by the 2026-08-22 authority collapse; see `docs/decisions.md`.
 
 ## Not owned here
 

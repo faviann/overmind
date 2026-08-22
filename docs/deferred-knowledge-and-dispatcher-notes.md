@@ -1,6 +1,6 @@
 # Deferred Knowledge & Dispatcher Notes
  
-> **Provenance:** salvaged 2026-07 from four retired predecessor documents — `memory-substrate-research.md`, `overmind-future-plan.md`, `memory-ledger-principles.md`, `harness-seam.md` — which are now deleted. Everything build-relevant *now* was merged into `agent-memory-handoff-v4.md` and `memory-server-phase1-spec.md` v1.1. This document holds what is pertinent **later**: deferred conventions, the dispatcher design corpus (build phase 4), and ideas that were considered and deliberately rejected, recorded so they are not re-litigated.
+> **Provenance:** salvaged 2026-07 from four retired predecessor documents — `memory-substrate-research.md`, `overmind-future-plan.md`, `memory-ledger-principles.md`, `harness-seam.md` — which are now deleted. Everything build-relevant *now* was merged into `memory-server-phase1-spec.md` (the project handoff `agent-memory-handoff-v4.md` also carried some of it until it was deleted in v1.7; see that changelog). This document holds what is pertinent **later**: deferred conventions, the dispatcher design corpus (build phase 4), and ideas that were considered and deliberately rejected, recorded so they are not re-litigated.
 >
 > Also notable: the predecessor project independently converged on the same core architecture (append-only trace as truth, proposal→approval, provenance-mandatory, Postgres-first, async write-time work, harness-as-client). Independent convergence is the strongest validation signal the research corpus recognizes. The current design is not a first draft; it is a second arrival at the same place.
  
@@ -71,7 +71,7 @@ Two failure modes it exists to avoid: (a) one bloated main brain that knows ever
 - **Personal ops agent owns:** calendar, email, comms, reminders, follow-ups, daily planning. A specialist, not the front door — morning planning starts at the dispatcher, which delegates.
 - **Project agents own:** repo-local context, implementation slices, issue breakdowns, code/config changes, tests, PR creation, task logs.
 - **Source-of-truth systems own:** Git history, issues, PRs, docs, deployment state, calendar/email records.
-The split maps directly onto memory namespaces: dispatcher memory = routing map + preferences + policies + commitments + high-level summaries (thin, hot-tier-shaped); project memory = rationale, conventions, pitfalls, decisions; task/episode memory = the trace. The anti-bloat rule is the placement discipline already in the handoff: the *why* goes to memory, the *what* stays in the repo, routing facts go global, and the narrowest namespace wins.
+The split maps directly onto memory namespaces: dispatcher memory = routing map + preferences + policies + commitments + high-level summaries (thin, hot-tier-shaped); project memory = rationale, conventions, pitfalls, decisions; task/episode memory = the trace. The anti-bloat rule is the placement discipline recorded in `design-rules.md` and `north-star.md`: the *why* goes to memory, the *what* stays in the repo, routing facts go global, and the narrowest namespace wins.
  
 ### 2.3 Project registry
 A lightweight registry of projects and ownership is what lets the dispatcher route without deep context:
@@ -142,16 +142,16 @@ For future archaeology — what moved out of the retired docs and where it lives
  
 | Idea | Landed in |
 |---|---|
-| Projection principle / "ledger with projections" | handoff v4 (framing + preferences), spec §13 (export seam) |
-| Review event convention (reviewer identity, synthetic session) | spec §6b, handoff provenance section |
-| Edit-then-approve lifecycle | spec §5/§9, handoff typology section |
+| Projection principle / "ledger with projections" | `CONTEXT.md` ("Canonical ledger"), spec §13 (export seam) |
+| Review event convention (reviewer identity, synthetic session) | spec §6b |
+| Edit-then-approve lifecycle | spec §5/§9 |
 | `metadata` JSONB + `content_hash` + 3 new types | spec §4 |
 | Redact-vs-reject never-store split | spec §5 |
 | Trace metadata conventions (model/provider, repo/branch) | spec §4 taxonomy |
-| Memory placement discipline (why-not-what, narrowest namespace) | handoff v4, checklist §2 |
+| Memory placement discipline (why-not-what, narrowest namespace) | `north-star.md` (write-side quality), `design-rules.md` (convention) |
 | Durable-artifact / no-shadow-work rule | checklist §2, §2.5 here |
-| Seeding discipline (seeds carry source traces) | checklist §3, handoff provenance |
+| Seeding discipline (seeds carry source traces) | unresolved — `design-rules.md` open boundaries, decisions 2026-08-22 |
 | Decision content convention (rationale + alternatives) | checklist §3 |
 | Hierarchical path-style namespace names | spec §3 |
-| Harness-as-client seam | handoff harness directive (was already there; predecessor confirmed) |
+| Harness-as-client seam | spec §11 (no harness extensions), `north-star.md` (harness-owned memory logic ruled out) |
 | Everything dispatcher-shaped | §2 here, build phase 4 |

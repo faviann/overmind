@@ -1,5 +1,52 @@
 # Decisions
 
+## 2026-08-22 — The project handoff leaves the authority chain
+
+- `docs/agent-memory-handoff-v4.md` is **deleted**, and the authority chain
+  collapses from four tiers to three: the boundary, the Phase 1 spec, then this
+  file and `docs/` conventions. The tier whose job was "decides where the spec
+  is silent" is gone, not renamed — a successor intent document would recreate
+  the same attention tax and the same second place to look for a rule.
+- **Material silence now routes to the operator.** Where the boundary and the
+  spec are both silent, no document decides. An unresolved question that
+  changes a contract, an invariant, or a binding scope goes to the maintainer;
+  ordinary implementation choices the binding documents deliberately leave open
+  stay with the implementer. `north-star.md` keeps its informational status and
+  never wins conflicts.
+- Two clauses were binding and had no other home. They move into the Phase 1
+  spec (v1.7) and are binding there, one tier higher than before: the
+  **source-of-truth hierarchy** (§5 — the current authoritative source >
+  approved > proposed > raw trace inference; conflict resolution only, no new
+  mechanism, dependents need only stay identifiable) and **no auto-injection**
+  (§11 — memory is a tool surface the agent calls, never middleware that
+  prepends).
+- **"Propose the *why*, not the *what*" is not promoted.** It stays a
+  convention held by agent discipline and edit-then-approve review, already
+  represented in `north-star.md` ("Write-side quality") and summarized in
+  `design-rules.md`.
+- **Seeding discipline is deliberately unresolved, not migrated and not
+  dropped.** The handoff held that a memory written without a source event is
+  architectural debt. The Phase 1 contract permits exactly that: `save_note`
+  defaults to `source_type='human'` with a null `source_id`, the column is
+  nullable, §8 documents the null-source `next` hint, and tests cover it. That
+  is a pre-existing policy contradiction, not a gap the handoff was filling, so
+  resolving it inside an authority cleanup would smuggle a behavior change into
+  a documentation change. **Runtime behavior is unchanged.** The question is
+  recorded as an open boundary in `design-rules.md`: *does provenance-first
+  require a concrete source event for every durable memory, or are explicitly
+  actor/session-provenanced private notes allowed to have no `source_id`?* It
+  needs a maintainer decision on its own.
+- Everything else the handoff held was already stated by the spec, the
+  boundary, `north-star.md`, `CONTEXT.md`, or
+  `deferred-knowledge-and-dispatcher-notes.md`, or was framing that decided
+  nothing current: the five use cases, the target-architecture list, the v1
+  slice summary, the write-time adoption order, the tiering/demotion position
+  (superseded by the north star's deferral), the Pi harness directive, and the
+  build sequencing. Git history is the archive; nothing is frozen in the tree.
+- Unlike `conversation-capture-phase2-spec.md`, no decision required this
+  document to remain on `main`, so the freeze-in-place treatment does not apply
+  (the boundary: "Marking a document frozen is not a decision to keep it").
+
 ## 2026-08-20 — Capture is evidence; Moraine owns it (#203, #205)
 
 - A conversation is **evidence**, not governed knowledge. Two datastores are

@@ -12,7 +12,8 @@ Authority order (same as `AGENTS.md`):
 1. `docs/evidence-and-knowledge-boundary.md` ("the boundary") — binding for
    the evidence / knowledge / governance ownership split
 2. `docs/memory-server-phase1-spec.md` ("the Phase 1 spec", cited by §) —
-   binding for Phase 1 contracts and every area the boundary does not amend
+   binding for Phase 1 contracts and every area whose ownership the boundary
+   does not decide
 3. `docs/agent-memory-handoff-v4.md` ("the handoff") — intent and
    architecture where the applicable spec is silent
 4. `docs/decisions.md` (dated entries) and `docs/adr/` — decisions that refine

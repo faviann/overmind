@@ -16,10 +16,9 @@ identity, never trusted from tool arguments. Path-style names give hierarchy
 (`homelab`, `repo/<owner>/<name>`) without schema support.
 
 **Moraine** — the external system intended to own durable capture and storage
-of external agent conversation evidence; adoption is tracked by #206 and nothing
-is deployed yet. It sits outside Overmind's server and database boundary:
-Overmind does not own that evidence going forward, and never treats Moraine as
-one of its own datastores. What the split decides lives in
+of external agent conversation evidence. It sits outside Overmind's server and
+database boundary: Overmind does not own that evidence going forward, and never
+treats Moraine as one of its own datastores. What the split decides lives in
 [`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md).
 Observations of its schema and behavior are recorded in
 [`docs/research/moraine-trace-event-model.md`](docs/research/moraine-trace-event-model.md).

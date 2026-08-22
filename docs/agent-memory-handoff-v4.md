@@ -1,6 +1,6 @@
 # Agent Handoff: Memory/Control Substrate Project (v4)
  
-> **v4 changes:** integrated the salvage review of the retired predecessor docs (`memory-substrate-research.md`, `overmind-future-plan.md`, `memory-ledger-principles.md`, `harness-seam.md` — all now deleted; anything pertinent lives here or in `deferred-knowledge-and-dispatcher-notes.md`). New in v4: the **projection principle**, the **review event convention**, the **memory placement discipline**, **edit-then-approve** in the operator lifecycle, redact-vs-reject split on the never-store gate, seeding discipline, and small schema additions (metadata, content_hash, three new types). Companion docs: `memory-server-phase1-spec.md` v1.1 (**wins over this document on build details**), `ansible-integration-checklist.md`, and `deferred-knowledge-and-dispatcher-notes.md` (Phase 3+ material and explicitly rejected ideas).
+> **v4 changes:** integrated the salvage review of the retired predecessor docs (`memory-substrate-research.md`, `overmind-future-plan.md`, `memory-ledger-principles.md`, `harness-seam.md` — all now deleted; anything pertinent lives here or in `deferred-knowledge-and-dispatcher-notes.md`). New in v4: the **projection principle**, the **review event convention**, the **memory placement discipline**, **edit-then-approve** in the operator lifecycle, redact-vs-reject split on the never-store gate, seeding discipline, and small schema additions (metadata, content_hash, three new types). Companion docs: `memory-server-phase1-spec.md` v1.1 (**wins over this document on build details**) and `deferred-knowledge-and-dispatcher-notes.md` (Phase 3+ material and explicitly rejected ideas).
 >
 > **v3 changes (retained):** committed stack (.NET + PostgreSQL on existing LXC), private/shared write-policy split, harness directive (Pi), build sequencing, workstream coordination.
  
@@ -165,7 +165,7 @@ Everything else — consolidation workers, confidence, graph lanes, wiki patch f
 ### Build sequencing
  
 1. **Memory server** — own repo, .NET, the Phase 1 spec. It is its own **zeroth consumer**: build decisions are logged into namespace `memory-system` from session one (the recursive self-improvement loop is seeded, not built).
-2. **Homelab/ansible project as first consumer** — integration only, zero new product (`ansible-integration-checklist.md`). Dogfood 2–3 weeks; the checklist's watch-list *is* the Phase 3 requirements document.
+2. **Homelab/ansible project as first consumer** — integration only, zero new product. Dogfood 2–3 weeks; the integration watch-list *is* the Phase 3 requirements document.
 3. **Personal assistant** — own repo, second consumer. Its long-horizon needs justify the first consolidation work. First worker overall: the **nightly reconciliation job** (diff sources + day's traces → proposals, cheap model, never direct writes).
 4. **Dispatcher/orchestrator last** — meaningless until there are ≥2 consumers to route between. Design corpus for it: `deferred-knowledge-and-dispatcher-notes.md`.
 ## Things another agent should not misunderstand

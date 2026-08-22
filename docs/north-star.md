@@ -4,9 +4,9 @@
 > `memory-server-phase1-spec.md` stays binding on build details,
 > `agent-memory-handoff-v4.md` on intent and architecture. Provenance:
 > wayfinder ticket [#13](https://github.com/faviann/overmind/issues/13),
-> grounded in [`north-star-distillation.md`](north-star-distillation.md)
-> (17 claims from the article corpus), settled in a grilling session with
-> faviann on 2026-07-09.
+> grounded in the article-corpus distillation from wayfinder ticket
+> [#12](https://github.com/faviann/overmind/issues/12), settled in a grilling
+> session with faviann on 2026-07-09.
 
 ## Identity
 

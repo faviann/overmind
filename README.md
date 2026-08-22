@@ -51,7 +51,6 @@ trusted local agents, and includes the `memctl` operator CLI.
 | [`docs/memory-server-phase1-spec.md`](docs/memory-server-phase1-spec.md) | **Binding** build spec, schema, tool contracts, Do-Not-Build list |
 | [`docs/agent-memory-handoff-v4.md`](docs/agent-memory-handoff-v4.md) | Intent and architecture where the spec is silent |
 | [`CONTEXT.md`](CONTEXT.md) | Domain vocabulary |
-| [`docs/articles/`](docs/articles/) | The article series on agentic memory the design draws from |
 
 ## Watch the authorized issue queue while AFK
 

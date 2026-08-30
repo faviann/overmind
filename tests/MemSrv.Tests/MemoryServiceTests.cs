@@ -2,6 +2,7 @@ using Dapper;
 using MemSrv.Core;
 using Npgsql;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
@@ -926,6 +927,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         env["MEMSRV_CONNECTION_STRING"] = RuntimeConnection;
         env["MEMSRV_AGENT_ID"] = "agent-a";
         env["MEMSRV_NAMESPACE"] = "memory-system";
+        env["DOTNET_ROOT"] = CurrentDotnetRoot();
         if (sessionId is not null)
         {
             env["MEMSRV_SESSION_ID"] = sessionId;
@@ -946,6 +948,24 @@ public sealed class MemoryServiceTests : IAsyncLifetime
             ShutdownTimeout = TimeSpan.FromSeconds(1),
             StandardErrorLines = line => _serverErrorLines.Add(line)
         }));
+    }
+
+    private static string CurrentDotnetRoot()
+    {
+        var runtimeDirectory = new DirectoryInfo(RuntimeEnvironment.GetRuntimeDirectory());
+        DirectoryInfo? sharedDirectory = runtimeDirectory.Parent?.Parent;
+        DirectoryInfo? dotnetRoot = sharedDirectory?.Parent;
+        string hostName = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+        if (sharedDirectory?.Name != "shared"
+            || dotnetRoot is null
+            || !File.Exists(Path.Combine(dotnetRoot.FullName, hostName))
+            || !Directory.Exists(Path.Combine(dotnetRoot.FullName, "host", "fxr")))
+        {
+            throw new InvalidOperationException(
+                $"Runtime directory '{runtimeDirectory.FullName}' does not identify a valid .NET root.");
+        }
+
+        return dotnetRoot.FullName;
     }
 
     private async Task<JsonElement> CallToolAsync(McpClient client, string toolName, Dictionary<string, object?> arguments)

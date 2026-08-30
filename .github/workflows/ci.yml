@@ -41,11 +41,6 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-      - name: Install pinned Codex hook test dependency
-        run: npm install --global --ignore-scripts @openai/codex@0.147.0
       - name: Verify external preflight failures and provision role
         run: |
           expect_preflight_failure() {
@@ -97,11 +92,6 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-      - name: Install pinned Codex hook test dependency
-        run: npm install --global --ignore-scripts @openai/codex@0.147.0
       - name: Run canonical suite with default Compose provisioning
         run: make test
 
@@ -114,24 +104,9 @@ jobs:
       - name: Verify reference Compose lifecycle
         run: make smoke-compose IMAGE=ghcr.io/faviann/overmind:compose-ci
 
-  capture-packaging:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Build server and Codex capture candidates
-        run: |
-          docker build -t ghcr.io/faviann/overmind:capture-ci .
-          docker build -f Dockerfile.capture-runtime \
-            --build-arg VERSION=capture-ci \
-            -t ghcr.io/faviann/overmind-codex-capture:capture-ci .
-      - name: Verify scanner-first packaging and restart convergence
-        run: make smoke-capture-runtime \
-          IMAGE=ghcr.io/faviann/overmind:capture-ci \
-          CAPTURE_IMAGE=ghcr.io/faviann/overmind-codex-capture:capture-ci
-
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, test-compose, reference-compose, capture-packaging]
+    needs: [test, test-compose, reference-compose]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -148,31 +123,18 @@ jobs:
           IMAGE=ghcr.io/${{ github.repository }}
           VERSION=${GITHUB_REF_NAME#v}
           docker build -t "$IMAGE:$VERSION" .
-          docker build -f Dockerfile.capture-runtime \
-            --build-arg VERSION="$VERSION" \
-            -t "$IMAGE-codex-capture:$VERSION" .
       - name: Verify release candidate image
         run: |
           IMAGE=ghcr.io/${{ github.repository }}
           VERSION=${GITHUB_REF_NAME#v}
           tools/smoke-release-image.sh "$IMAGE:$VERSION"
-          tools/smoke-capture-runtime.sh \
-            "$IMAGE:$VERSION" "$IMAGE-codex-capture:$VERSION"
       - name: Push immutable release tag
         run: |
           IMAGE=ghcr.io/${{ github.repository }}
           VERSION=${GITHUB_REF_NAME#v}
           docker push "$IMAGE:$VERSION"
-          docker push "$IMAGE-codex-capture:$VERSION"
       - name: Verify published release image
         run: |
           IMAGE=ghcr.io/${{ github.repository }}
           VERSION=${GITHUB_REF_NAME#v}
           tools/smoke-release-image.sh --pull "$IMAGE:$VERSION"
-          docker pull "$IMAGE-codex-capture:$VERSION"
-          SERVER_DIGEST=$(docker image inspect --format '{{index .RepoDigests 0}}' \
-            "$IMAGE:$VERSION")
-          CAPTURE_DIGEST=$(docker image inspect --format '{{index .RepoDigests 0}}' \
-            "$IMAGE-codex-capture:$VERSION")
-          test -n "$SERVER_DIGEST" -a -n "$CAPTURE_DIGEST"
-          tools/smoke-capture-runtime.sh "$SERVER_DIGEST" "$CAPTURE_DIGEST"

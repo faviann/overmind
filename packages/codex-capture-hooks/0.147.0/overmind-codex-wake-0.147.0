@@ -1,7 +1,0 @@
-#!/bin/sh
-# Codex closes hook stdin after writing its JSON input. Discard it: hook facts
-# are never capture input and must not cross the loopback boundary.
-cat >/dev/null 2>&1 || :
-curl --disable --silent --noproxy '*' --output /dev/null --max-time 0.25 --request POST \
-  http://127.0.0.1:43191/wake </dev/null >/dev/null 2>&1 || :
-exit 0

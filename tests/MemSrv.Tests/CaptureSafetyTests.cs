@@ -1,11 +1,9 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Net.Sockets;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using CaptureAdapters;
 using Dapper;
 using MemSrv.Core;
 using MemSrv.Server;
@@ -17,10 +15,10 @@ using Npgsql;
 namespace MemSrv.Tests;
 
 // The deterministic safety boundary, asserted through the public seams only:
-// the capture HTTP route, `memctl capture enroll` / `memctl capture receipt`,
-// and the disabled Codex tracer. Direct database access here is the sanctioned
-// never-store persistence-absence check from docs/testing.md, plus the narrow
-// capture-ledger checkpoint mechanical check.
+// the capture HTTP route and `memctl capture enroll` / `memctl capture receipt`.
+// Direct database access here is the sanctioned never-store persistence-absence
+// check from docs/testing.md, plus the narrow capture-ledger checkpoint
+// mechanical check.
 //
 // Every credential in this file is synthetic.
 [Collection("database")]
@@ -106,44 +104,6 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 await app.StopAsync();
             }
 
-            // 3. The disabled tracer refuses to run at all.
-            var tracer = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
-                new Dictionary<string, string>
-                {
-                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
-                    ["OVERMIND_CAPTURE_URL"] = _baseUrl,
-                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] =
-                        Path.Combine(_root, "fixtures/transcripts"),
-                    ["MEMSRV_NEVER_STORE_PATH"] = rulesPath
-                });
-            Assert.False(tracer.Succeeded);
-            Assert.Empty(tracer.Stdout);
-            Assert.DoesNotContain(expectedReason, tracer.Stderr, StringComparison.OrdinalIgnoreCase);
-            JsonElement configurationDiagnostic = JsonDocument.Parse(tracer.Stderr.Split(
-                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
-            Assert.Equal(
-                "capture_runtime_configuration_invalid",
-                configurationDiagnostic.GetProperty("event").GetString());
-            Assert.Equal(
-                "safety_policy_unavailable",
-                configurationDiagnostic.GetProperty("reason").GetString());
-            JsonElement tracerOutcome = StructuredTracerOutcome(tracer.Stderr);
-            Assert.Equal("blocked", tracerOutcome.GetProperty("captureHealth").GetString());
-            Assert.Equal("complete", tracerOutcome.GetProperty("captureFidelity").GetString());
-            JsonElement tracerCounter = Assert.Single(
-                tracerOutcome.GetProperty("counters").EnumerateArray());
-            Assert.Equal("codex", tracerCounter.GetProperty("harness").GetString());
-            Assert.Equal(
-                CaptureOutcomeAggregation.SafetyFailureClass,
-                tracerCounter.GetProperty("class").GetString());
-            Assert.Equal(
-                CaptureOutcomeReason.ScannerPolicyUnavailable,
-                tracerCounter.GetProperty("reason").GetString());
-            Assert.Equal(
-                CaptureSizeBand.Unknown,
-                tracerCounter.GetProperty("sizeBand").GetString());
-            Assert.Equal(1, tracerCounter.GetProperty("count").GetInt64());
         }
         finally
         {
@@ -1190,168 +1150,6 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     }
 
     [Fact]
-    public async Task DisabledRuntimeScansBeforeItEmitsAndKeepsItsDiagnosticsClean()
-    {
-        string captureKey = CaptureCredential();
-        await EnrollAsync($"codex-runtime-{Guid.NewGuid():N}", captureKey);
-        string fixturePath = CreateScheduledTranscriptPath("codex-runtime-safety");
-        string fixture = (await File.ReadAllTextAsync(
-                Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl")))
-            .Replace("call_fixture_1", $"call_{Guid.NewGuid():N}", StringComparison.Ordinal)
-            .Replace(
-                "Show the working directory.",
-                $"Rotate {SeededFakeSecret} then show the working directory.",
-                StringComparison.Ordinal);
-        await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
-        string stateDirectory = fixturePath + ".overmind-state";
-
-        try
-        {
-            var tracer = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
-                new Dictionary<string, string>
-                {
-                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
-                    ["OVERMIND_CAPTURE_URL"] = _baseUrl,
-                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
-                    ["OVERMIND_CAPTURE_STATE_DIR"] = stateDirectory
-                });
-            Assert.True(tracer.Succeeded);
-
-            // The runtime crossed the gate before the observation left the
-            // process. Verify the server's independent persisted scan through
-            // the public operator receipt seam; tracer stdout stays empty.
-            Assert.DoesNotContain(SeededFakeSecret, tracer.Stdout, StringComparison.Ordinal);
-            Assert.Empty(tracer.Stdout);
-            CaptureRuntimeStreamState stream = Assert.Single(
-                (await new FileCaptureRuntimeState(stateDirectory).ReadAsync()).Streams);
-            string replay = await RunMemCtlAsync(
-                "capture", "replay", stream.CanonicalSourceStreamUuid!.Value.ToString());
-            Assert.Contains("[REDACTED:aws-access-key-id]", replay, StringComparison.Ordinal);
-            JsonElement[] scans = JsonDocument.Parse(replay).RootElement
-                .GetProperty("events").EnumerateArray()
-                .Select(item => item.GetProperty("envelope")
-                    .GetProperty("observation").GetProperty("scan"))
-                .Where(scan => scan.GetProperty("status").GetString() == "redacted")
-                .ToArray();
-            JsonElement scan = Assert.Single(scans);
-            Assert.Equal("redacted", scan.GetProperty("status").GetString());
-            Assert.Contains(
-                "aws-access-key-id",
-                scan.GetProperty("ruleIds").EnumerateArray().Select(item => item.GetString()));
-            Assert.True(scan.GetProperty("redactionCount").GetInt32() > 0);
-
-            // Runtime diagnostics stay on stderr and carry no candidate value,
-            // no captured content, no credential, and no import request.
-            Assert.DoesNotContain(SeededFakeSecret, tracer.Stderr, StringComparison.Ordinal);
-            Assert.DoesNotContain(captureKey, tracer.Stderr, StringComparison.Ordinal);
-            Assert.DoesNotContain("working directory", tracer.Stderr, StringComparison.Ordinal);
-            Assert.DoesNotContain("sourcePayload", tracer.Stderr, StringComparison.Ordinal);
-
-            var shown = await RunMemCtlForResultAsync(
-                null, "capture", "replay",
-                stream.CanonicalSourceStreamUuid.Value.ToString());
-            Assert.Equal(0, shown.ExitCode);
-            Assert.DoesNotContain(SeededFakeSecret, shown.Stdout, StringComparison.Ordinal);
-            Assert.DoesNotContain(SeededFakeSecret, shown.Stderr, StringComparison.Ordinal);
-        }
-        finally
-        {
-            DeleteScheduledTranscript(fixturePath);
-        }
-    }
-
-    [Fact]
-    public async Task DisabledRuntimeRefusesToSendWhenItsOwnScanFailsClosed()
-    {
-        string captureKey = CaptureCredential();
-        string fixturePath = CreateScheduledTranscriptPath("codex-failclosed");
-        // Past the 10,000-match budget: the runtime's own scan fails closed
-        // before anything is transmitted.
-        string flood = string.Join(
-            ' ', Enumerable.Range(0, 10_001).Select(index => $"AKIA{index:D16}"));
-        string fixture = (await File.ReadAllTextAsync(
-                Path.Combine(_root, "fixtures/transcripts/codex-synthetic.jsonl")))
-            .Replace("call_fixture_1", $"call_{Guid.NewGuid():N}", StringComparison.Ordinal)
-            .Replace("Show the working directory.", flood, StringComparison.Ordinal);
-        await File.WriteAllTextAsync(fixturePath, fixture, new UTF8Encoding(false));
-
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int requestCount = 0;
-        using var probeCancellation = new CancellationTokenSource();
-        Task responder = Task.Run(async () =>
-        {
-            try
-            {
-                while (true)
-                {
-                    using var incoming =
-                        await listener.AcceptTcpClientAsync(probeCancellation.Token);
-                    Interlocked.Increment(ref requestCount);
-                    await incoming.GetStream().WriteAsync(
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"u8
-                            .ToArray(),
-                        probeCancellation.Token);
-                }
-            }
-            catch (OperationCanceledException) when (probeCancellation.IsCancellationRequested)
-            {
-                // The runtime exited without contacting the probe.
-            }
-        });
-        var probeEndpoint = new Uri(
-            $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}");
-
-        try
-        {
-            var tracer = await TestProcessRunner.RunSingleStreamCaptureAttemptAsync(
-                new Dictionary<string, string>
-                {
-                    ["OVERMIND_CODEX_CAPTURE_ENABLE"] = "synthetic-non-production",
-                    ["OVERMIND_CAPTURE_URL"] = probeEndpoint.ToString(),
-                    ["OVERMIND_CAPTURE_CREDENTIAL"] = captureKey,
-                    ["OVERMIND_CODEX_TRANSCRIPT_ROOT"] = Path.GetDirectoryName(fixturePath)!,
-                    ["OVERMIND_CAPTURE_STATE_DIR"] = fixturePath + ".overmind-state"
-                });
-
-            Assert.False(tracer.Succeeded);
-            // Nothing was emitted: the independent HTTP probe saw no request.
-            Assert.Empty(tracer.Stdout);
-            Assert.Equal(0, Volatile.Read(ref requestCount));
-            JsonElement diagnostic = JsonDocument.Parse(tracer.Stderr.Split(
-                Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)[0]).RootElement;
-            Assert.Equal("capture_cycle_failed", diagnostic.GetProperty("event").GetString());
-            Assert.Equal("safety_scan_failed", diagnostic.GetProperty("reason").GetString());
-            JsonElement outcome = StructuredTracerOutcome(tracer.Stderr);
-            Assert.Equal("blocked", outcome.GetProperty("captureHealth").GetString());
-            JsonElement counter = Assert.Single(
-                outcome.GetProperty("counters").EnumerateArray());
-            Assert.Equal(
-                CaptureOutcomeReason.ScanBudgetExhausted,
-                counter.GetProperty("reason").GetString());
-            Assert.Equal(
-                CaptureSizeBand.UpTo1MiB,
-                counter.GetProperty("sizeBand").GetString());
-            Assert.Equal(1, counter.GetProperty("count").GetInt64());
-            // AC10 still holds on the refusal path.
-            Assert.DoesNotContain("AKIA0000", tracer.Stderr, StringComparison.Ordinal);
-            Assert.DoesNotContain(captureKey, tracer.Stderr, StringComparison.Ordinal);
-            Assert.DoesNotContain("sourcePayload", tracer.Stderr, StringComparison.Ordinal);
-        }
-        finally
-        {
-            await probeCancellation.CancelAsync();
-            listener.Stop();
-            await responder;
-            DeleteScheduledTranscript(fixturePath);
-        }
-    }
-
-    // AC2 asks for an end-to-end HTTP redaction proof per rule family. The
-    // provider_token and structured_field families are proven by the receipt
-    // and absence tests above; these cover the rest.
-    [Fact]
     public async Task EveryRemainingRuleFamilyIsRedactedThroughTheHttpSeam()
     {
         const string fakePem =
@@ -1466,24 +1264,6 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
     private static string CaptureCredential() => $"mcap_{Guid.NewGuid():N}";
     private static string UniqueSession() => $"safety-session-{Guid.NewGuid():N}";
-
-    private static string CreateScheduledTranscriptPath(string prefix)
-    {
-        string transcriptRoot = Path.Combine(
-            Path.GetTempPath(), $"{prefix}-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(transcriptRoot);
-        return Path.Combine(transcriptRoot, "rollout.jsonl");
-    }
-
-    private static void DeleteScheduledTranscript(string fixturePath)
-    {
-        string transcriptRoot = Path.GetDirectoryName(fixturePath)!;
-        if (Directory.Exists(transcriptRoot))
-        {
-            Directory.Delete(transcriptRoot, recursive: true);
-        }
-    }
-
     private HttpClient CaptureClient(string key) => Client(_baseUrl, key);
 
     private static HttpClient Client(string baseUrl, string key)
@@ -1516,19 +1296,6 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             File.Delete(path);
         }
     }
-
-    private static JsonElement StructuredTracerOutcome(string stderr)
-    {
-        string line = Assert.Single(
-            stderr.Split(
-                Environment.NewLine,
-                StringSplitOptions.RemoveEmptyEntries),
-            value => value.StartsWith(
-                "{\"contractVersion\":",
-                StringComparison.Ordinal));
-        return JsonDocument.Parse(line).RootElement.Clone();
-    }
-
     private static object Observation(
         string sourceSessionId, long position, string nativeId, string message) =>
         ObservationWithPayload(sourceSessionId, position, nativeId, new { text = message });

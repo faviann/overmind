@@ -6,11 +6,10 @@ HTTP transport has landed, so the service runtime shape (port, health, bind
 address, key file) is defined below rather than deferred.
 
 The capture material in this document — capture schema verification, the
-capture-console OIDC variables, the `/capture/console`, pairing, and observation
-endpoints, and the per-user Codex catch-up runtime — describes capture code
-and deployment surface that already ship. It stays accurate because that code is
-still deployed, and it is frozen: it authorizes no new capture work. Current
-authority for capture is
+capture-console OIDC variables, and the `/capture/console`, pairing, and
+observation endpoints — describes the transitional server-side capture
+interface that still ships. The workstation producer has been removed. This
+document authorizes no new capture work. Current authority for capture is
 [evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
 
 ## Image — FINAL
@@ -188,7 +187,7 @@ Optional:
 | `MEMSRV_HTTP_URL` | Kestrel bind address; defaults to `http://0.0.0.0:8080`. |
 | `MEMSRV_AGENT_ID`, `MEMSRV_NAMESPACE`, `MEMSRV_SESSION_ID` | stdio-mode identity/session (defaults are sensible for a single-agent local setup). Ignored in HTTP mode, where identity comes from the bearer key and the session is transport-derived. |
 | `MEMSRV_ALLOWED_NAMESPACES` | Comma-separated stdio-mode namespace allowlist. Unset confines the process to its default `MEMSRV_NAMESPACE`. Ignored in HTTP mode. |
-| `MEMSRV_NEVER_STORE_PATH` | General Phase 1 write-safety rule file. Defaults to `config/never_store.yaml`, which ships in the image. A missing, empty, or invalid rule file makes the policy unusable and fails every governed Overmind write closed. The legacy capture effects remain: enrollment and ingestion refuse, and the tracer exits non-zero. |
+| `MEMSRV_NEVER_STORE_PATH` | General Phase 1 write-safety rule file. Defaults to `config/never_store.yaml`, which ships in the image. A missing, empty, or invalid rule file makes the policy unusable and fails every governed Overmind write closed. The transitional server capture effects remain: enrollment and ingestion refuse. |
 | `MEMSRV_NEVER_STORE_LITERALS_PATH` | **Operator-owned** general Phase 1 write-safety file of exact credential values the installation already knows, one per line, mounted read-only. Unset, absent, or empty is valid and is not a fail-closed condition; an invalid file makes the policy unusable and fails every governed Overmind write closed. Never commit this file; the tracked rule file must never contain a real credential. |
 
 No other application configuration is required; `config/never_store.yaml` ships in the
@@ -269,35 +268,6 @@ modes run from the same image.
 - **Day-1 agent URL:** `http://overmind.faviann.vms:8080/mcp` — DNS name, plain
   HTTP on the LAN. The backend remains plain HTTP; external Traefik/TLS must
   supply the documented forwarded scheme and OIDC callback configuration.
-
-## Per-user Codex catch-up runtime
-
-`Dockerfile.capture-runtime` builds the separately versioned
-`ghcr.io/faviann/overmind-codex-capture:<version>` artifact. It contains only
-the Codex scanner adapter and talks to the server through the capture HTTP API;
-it has no database connection or server role. `compose.capture.yaml` is the
-reference Linux-first installation beside local Codex. Its container root is
-read-only; the current `~/.codex/sessions` tree, the
-`~/.codex/archived_sessions` retry-locator tree, and repository mounts are
-read-only; durable state is
-the only writable volume. The scanner is the container's only process and
-retains ordinary isolated bridge networking. Compose enables its fixed-function
-bridge wake adapter with a fixed command-line runtime mode and publishes only
-host `127.0.0.1:43191` to container port `43191`. The adapter accepts only the
-bridge-host gateway and relays bounded requests to the same process's
-loopback-bound listener, so LAN clients and container peers cannot invoke it.
-The runtime has no general command surface, Docker socket,
-privileged mode, or self-update behavior. Archived files are selected only for an existing
-non-empty durable queue, never as historical import. See
-`docs/codex-capture-runtime.md` for enrollment and
-the machine-owned/server-owned configuration boundary.
-
-With no pre-provisioned `OVERMIND_CAPTURE_CREDENTIAL`, the runtime makes only
-outbound HTTP(S) pairing creation/poll requests followed by its normal capture
-observation writes. Its writable state volume persists a private installation
-identity and the one-time-delivered private capture credential. Supplying the
-optional existing environment credential remains compatible and bypasses
-pairing; the shipped Compose and example environment do not require it.
 
 ## Release verification
 

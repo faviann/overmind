@@ -1,4 +1,4 @@
-# Memory Server — Phase 1 Build Spec (v1.8)
+# Memory Server — Phase 1 Build Spec (v1.9)
 
 This is a build spec for a Claude Code session. It is deliberately narrow. The **Do Not Build** section is as binding as the requirements. The goal is a working v0 spine in 1–2 sessions that the homelab project can consume immediately.
 
@@ -33,6 +33,12 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > and numeric scan budgets no longer depend on capture outcomes or fidelity.
 > The legacy 128 MiB whole-observation policy remains capture-only in
 > `CaptureFidelityPolicy` and `capture-safety-budgets.md` while that code ships.
+
+> **v1.9 changelog (2026-08-30 — workstation capture producer retired, issue #222):**
+> The workstation-side capture producer, adapters, scheduling/runtime state,
+> wake hooks, fixtures, packaging, and operational instructions are removed.
+> The transitional server-side capture HTTP, credential, console, operator,
+> ingestion, ledger, schema, and migration surfaces remain for later removal.
 
 Where this spec is silent and `evidence-and-knowledge-boundary.md` does not decide ownership, nothing else decides for it — do not infer authority from an older or informational document. Raise the gap with the operator only when it is a **material policy or architecture decision**: one that changes a contract, an invariant, or a binding scope. Ordinary implementation choices this spec deliberately leaves open stay with the implementer.
 
@@ -345,10 +351,11 @@ applicable binding spec explicitly amends one. The capture-runtime,
 harness-hook, and OIDC capture-console authorization that
 `conversation-capture-phase2-spec.md` once granted is **superseded and no
 longer in force** (2026-08-20 course-correction, #203/#205 — see
-`evidence-and-knowledge-boundary.md`). The code it produced still exists and is
-frozen; the list below applies unamended to new work. The italic scope notes on
-the datastore entry below and on the §13 scale-out seam clarify what those
-entries already govern; they amend nothing.
+`evidence-and-knowledge-boundary.md`). The workstation-side producer code it
+produced has been removed; the transitional server-side capture interface still
+exists and remains frozen. The list below applies unamended to new work. The
+italic scope notes on the datastore entry below and on the §13 scale-out seam
+clarify what those entries already govern; they amend nothing.
 
 - ❌ Embeddings, pgvector, or any embedding model integration (the `jobs` table and lane registry are the future seams; that's all)
 - ❌ Graph storage or graph lanes

@@ -43,8 +43,7 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
         _keysPath = Path.Combine(Path.GetTempPath(), $"memsrv-keys-{Guid.NewGuid():N}.yaml");
         await File.WriteAllTextAsync(_keysPath, KeyFileYaml());
 
-        _app = HttpServerHost.Build(
-            RuntimeOptions(), AgentKeyStore.Load(_keysPath), RuntimeTimeProvider());
+        _app = HttpServerHost.Build(RuntimeOptions(), AgentKeyStore.Load(_keysPath));
         _app.Urls.Add("http://127.0.0.1:0");
         await _app.StartAsync();
         _baseUrl = _app.Services.GetRequiredService<IServer>()
@@ -65,15 +64,11 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     {
         ConnectionString = RuntimeConnection,
         NeverStorePath = Path.Combine(_root, "config/never_store.yaml"),
-        CaptureConsoleOidc = ConsoleOidcOptions(),
     };
 
-    protected virtual CaptureConsoleOidcOptions ConsoleOidcOptions() => new();
-    protected virtual TimeProvider RuntimeTimeProvider() => TimeProvider.System;
-
     // The same generalized Phase 1 gate the server builds. Authorized direct
-    // module checks and temporary in-process capture callers use the same paths
-    // as the host, so neither can silently diverge from server write safety.
+    // module checks use the same paths as the host, so they cannot silently
+    // diverge from server write safety.
     protected WriteSafetyGate SafetyGate()
     {
         var options = RuntimeOptions();

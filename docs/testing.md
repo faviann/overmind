@@ -1,9 +1,9 @@
 # Testing conventions (load before writing or changing tests)
 
-Capture coverage in this document applies only to the transitional server-side
-capture interface and its ledger. The workstation producer, adapters, runtime
-state, hooks, fixtures, and packaged apphost have been removed. These rules
-authorize no new capture work. Current authority for capture is
+Capture coverage in this document applies only to the inaccessible legacy
+ledger/core and schema residue. All packaged capture interfaces and the
+workstation producer have been removed. These rules authorize no new capture
+work. Current authority for capture is
 [evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
 
 ## What a good test is here
@@ -73,8 +73,11 @@ and trace writes at the public HTTP MCP seam.
 
 The legacy 128 MiB whole-observation rule is not a write-safety budget.
 `CaptureFidelityPolicy` and `CaptureIngestion` remain authorized seams for that
-capture-only mechanism, and its real-number coverage stays isolated in
-`CaptureObservationSizeTests` while the server-side capture interface ships.
+inaccessible capture-only mechanism, and its real-number coverage stays
+isolated in `CaptureObservationSizeTests`. `CaptureSafetyTests` and
+`CaptureLedgerCoreTests` may exercise the same inaccessible module seam plus
+the already-authorized narrow ledger mechanics; they never use a packaged
+capture route or operator command.
 
 Namespace isolation and private-memory invisibility are binding acceptance
 behaviors, but their seam is keyed MCP agents. Verify them through public

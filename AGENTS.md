@@ -8,8 +8,7 @@ provenance, shared memories follow proposal→approval, and retrieval is two-ste
 
 1. `docs/evidence-and-knowledge-boundary.md` — binding for the evidence /
    knowledge / governance ownership split, for the Phase 1 invariants it
-   preserves, and for the transitional legacy-capture credential and identity
-   separation it keeps in force (2026-08-20 course-correction)
+   preserves (2026-08-20 course-correction)
 2. `docs/memory-server-phase1-spec.md` — binding for Phase 1 contracts and
    every area whose ownership the boundary does not decide
 3. `docs/decisions.md` (dated entries) and `docs/adr/` — decisions that refine
@@ -53,12 +52,9 @@ merely because they were implemented.
   `reference/csharp-sdk/`. Trust that evidence over memory. Remote transport
   uses Streamable HTTP, never legacy SSE.
 - Tests or refactors → `docs/testing.md`
-- New conversation-capture or evidence-storage work →
-  `docs/evidence-and-knowledge-boundary.md`. It decides who owns what; read it
-  before proposing any capture change.
-- Maintaining the transitional server-side capture interface →
-  `docs/evidence-and-knowledge-boundary.md`, `docs/deployment-contract.md`, and
-  `docs/testing.md`. No workstation-side capture producer ships in this repo.
+- Conversation evidence or the inaccessible legacy capture residue →
+  `docs/evidence-and-knowledge-boundary.md`. It decides who owns what; no
+  capture product or workstation-side producer ships in this repo.
 - Never-store rules, write-scan budgets, failure codes, or redaction markers →
   `docs/write-safety.md`
 - Legacy capture observation-size/fidelity policy →

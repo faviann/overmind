@@ -1,3 +1,5 @@
+using MemSrv.Core;
+
 namespace MemSrv.Tests;
 
 // The bearer-key file is a credential source. A malformed entry must fail the
@@ -14,45 +16,6 @@ namespace MemSrv.Tests;
 // races concurrent launches from the collection classes on obj/ state.
 public sealed class ServerStartupTests
 {
-    [Theory]
-    [InlineData("https://authentik.test/application/o/capture-console/", "",
-        "must provide authority, client id, and client secret together")]
-    [InlineData("http://authentik.test/application/o/capture-console/", "capture-console-test",
-        "authority must be an absolute HTTPS URI")]
-    public async Task HttpServerFailsClosedOnIncompleteOrInvalidOidcConfigurationWithoutDisclosingSecret(
-        string authority, string clientId, string expectedReason)
-    {
-        string keysPath = Path.Combine(Path.GetTempPath(), $"oidc-keys-{Guid.NewGuid():N}.yaml");
-        const string secret = "secret-that-must-not-appear";
-        await File.WriteAllTextAsync(keysPath,
-            "keys:\n  - key: agent-key-1234567890\n    agent_id: agent-a\n    default_namespace: memory-system\n    allowed_namespaces: [memory-system]\n");
-        try
-        {
-            var (exitCode, stdout, stderr) = await TestProcessRunner.RunServerToExitAsync(
-                new Dictionary<string, string>
-                {
-                    ["MEMSRV_TRANSPORT"] = "http",
-                    ["MEMSRV_HTTP_URL"] = "http://127.0.0.1:0",
-                    ["MEMSRV_AGENT_KEYS_PATH"] = keysPath,
-                    ["MEMSRV_CONNECTION_STRING"] = "Host=127.0.0.1;Port=1;Database=unused;Username=none;Password=none",
-                    ["MEMSRV_CAPTURE_CONSOLE_OIDC_AUTHORITY"] = authority,
-                    ["MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID"] = clientId,
-                    ["MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET"] = secret,
-                },
-                TimeSpan.FromSeconds(30),
-                "MemSrv.Server with incomplete or invalid OIDC configuration (expected fail-closed exit)");
-
-            Assert.NotEqual(0, exitCode);
-            Assert.Contains(expectedReason, stderr);
-            Assert.DoesNotContain(secret, stderr);
-            Assert.Empty(stdout);
-        }
-        finally
-        {
-            File.Delete(keysPath);
-        }
-    }
-
     [Theory]
     [InlineData("blank key", "key is blank",
         """
@@ -92,30 +55,6 @@ public sealed class ServerStartupTests
             default_namespace: memory-system
             allowed_namespaces: [homelab]
         """)]
-    [InlineData("capture-form key", "reserved for capture credentials",
-        """
-        keys:
-          - key: mcap_0123456789abcdef0123456789abcdef
-            agent_id: agent-a
-            default_namespace: memory-system
-            allowed_namespaces: [memory-system]
-        """)]
-    [InlineData("short capture-prefixed key", "reserved for capture credentials",
-        """
-        keys:
-          - key: mcap_short
-            agent_id: agent-a
-            default_namespace: memory-system
-            allowed_namespaces: [memory-system]
-        """)]
-    [InlineData("malformed capture-prefixed key", "reserved for capture credentials",
-        """
-        keys:
-          - key: mcap_invalid!
-            agent_id: agent-a
-            default_namespace: memory-system
-            allowed_namespaces: [memory-system]
-        """)]
     public async Task HttpServerFailsClosedOnMalformedKeyFile(string _, string expectedReason, string yaml)
     {
         var keysPath = Path.Combine(Path.GetTempPath(), $"bad-keys-{Guid.NewGuid():N}.yaml");
@@ -132,6 +71,19 @@ public sealed class ServerStartupTests
         {
             File.Delete(keysPath);
         }
+    }
+
+    [Fact]
+    public void AgentKeyStoreTreatsRetiredCapturePrefixAsOrdinaryKeyMaterial()
+    {
+        const string key = "mcap_0123456789abcdef0123456789abcdef";
+        var store = new AgentKeyStore(
+        [
+            new AgentKey(key, "agent-a", "memory-system", ["memory-system"]),
+        ]);
+
+        Assert.True(store.TryResolve(key, out AgentKey resolved));
+        Assert.Equal("agent-a", resolved.AgentId);
     }
 
     private static Task<(int ExitCode, string Stdout, string Stderr)> StartHttpServerAsync(string keysPath) =>

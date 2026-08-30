@@ -103,10 +103,6 @@ public sealed class AgentKeyStore
         {
             return "key is blank";
         }
-        if (CaptureCredential.HasReservedPrefix(key))
-        {
-            return "mcap_ credential format is reserved for capture credentials";
-        }
         if (string.IsNullOrWhiteSpace(agentId))
         {
             return "agent_id is blank";

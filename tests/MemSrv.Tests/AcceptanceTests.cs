@@ -503,19 +503,20 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         var persisted = await connection.ExecuteScalarAsync<bool>(
             """
             SELECT EXISTS (
-              SELECT 1 FROM capture_observations
-                WHERE safe_source_payload::text LIKE @Pattern
-                   OR source::text LIKE @Pattern OR adapter::text LIKE @Pattern
-                   OR locator_native_id LIKE @Pattern
+              SELECT 1 FROM capture_observations AS observation
+                WHERE to_jsonb(observation)::text LIKE @Pattern
               UNION ALL
-              SELECT 1 FROM captured_events WHERE payload::text LIKE @Pattern
+              SELECT 1 FROM captured_events AS event
+                WHERE to_jsonb(event)::text LIKE @Pattern
               UNION ALL
-              SELECT 1 FROM captured_event_relationships
-                WHERE target_native_id LIKE @Pattern OR target_kind LIKE @Pattern
+              SELECT 1 FROM captured_event_relationships AS relationship
+                WHERE to_jsonb(relationship)::text LIKE @Pattern
               UNION ALL
-              SELECT 1 FROM capture_source_streams WHERE source_session_id LIKE @Pattern
+              SELECT 1 FROM capture_source_streams AS stream
+                WHERE to_jsonb(stream)::text LIKE @Pattern
               UNION ALL
-              SELECT 1 FROM capture_source_bindings WHERE stable_name LIKE @Pattern
+              SELECT 1 FROM capture_source_bindings AS binding
+                WHERE to_jsonb(binding)::text LIKE @Pattern
               UNION ALL
               SELECT 1 FROM traces WHERE content::text LIKE @Pattern
               UNION ALL

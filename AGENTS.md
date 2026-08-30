@@ -56,13 +56,9 @@ merely because they were implemented.
 - New conversation-capture or evidence-storage work →
   `docs/evidence-and-knowledge-boundary.md`. It decides who owns what; read it
   before proposing any capture change.
-- Maintaining the capture code that already ships → the frozen capture
-  documents, which stay accurate for that purpose and decide nothing new:
-  `docs/capture-modules.md` (enrollment, ingestion, receipt reads),
-  `docs/capture-adapter-contract.md` (adapters, fixture parsing),
-  `docs/codex-capture-runtime.md` (catch-up runtime),
-  `docs/capture-synthetic-slice.md` (synthetic fixture).
-  The superseded Phase 2 spec is not part of this route.
+- Maintaining the transitional server-side capture interface →
+  `docs/evidence-and-knowledge-boundary.md`, `docs/deployment-contract.md`, and
+  `docs/testing.md`. No workstation-side capture producer ships in this repo.
 - Never-store rules, write-scan budgets, failure codes, or redaction markers →
   `docs/write-safety.md`
 - Legacy capture observation-size/fidelity policy →

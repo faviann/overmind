@@ -9,16 +9,6 @@ Not another chatbot memory feature, and not flat vector RAG: the working
 agent is the extractor, and a human is the quality gate. Nothing enters
 shared memory unreviewed.
 
-The repository also publishes a separate Codex-only catch-up runtime for
-scanner-first capture beside local Codex. See
-[docs/codex-capture-runtime.md](docs/codex-capture-runtime.md). It talks only to
-the central capture API and is not part of the server/database trust boundary.
-It is existing, frozen capture work: Moraine is the intended substrate for
-durable capture of external agent conversation evidence (adoption tracked by
-#206), Overmind does not own that evidence going forward, and no new capture
-work is authorized against this runtime — see
-[docs/evidence-and-knowledge-boundary.md](docs/evidence-and-knowledge-boundary.md).
-
 ## Core commitments
 
 - **Append-only trace ledger** — the raw record of what happened is

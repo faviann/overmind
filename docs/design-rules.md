@@ -25,8 +25,8 @@ Authority order (identical to `AGENTS.md`):
 - **The Phase 1 Do Not Build list remains binding** (Phase 1 spec §11). The
   Phase 2 capture spec's narrow exceptions for a capture runtime, harness
   hooks, and an OIDC-authenticated capture console are superseded and no longer
-  authorize anything new (see the boundary); the code they produced is frozen,
-  not authority.
+  authorize anything new (see the boundary). The workstation-side code has
+  been removed; the transitional server capture interface remains frozen.
 - **Overmind does not own external conversation evidence.** Moraine is the
   intended substrate for durable capture of external agent conversations
   (adoption tracked by #206); Overmind stays authoritative for governed
@@ -165,9 +165,8 @@ Committed — do not re-litigate without the maintainer:
   and compacted views are derived artifacts that point back into it and never
   replace it (spec §4, `trace_snapshots`; `AGENTS.md` always-on invariants).
 - **Harnesses remain thin clients.** Memory logic stays behind the MCP surface.
-  The existing version-pinned, non-blocking capture hooks that wake the local
-  capture runtime are frozen code, not a standing authorization to extend the
-  harness surface (the boundary).
+  No workstation capture hook, adapter, or local runtime ships in this
+  repository (the boundary).
 - **Source-of-truth hierarchy resolves conflicts**: the current authoritative
   source (Git/IaC and equivalents) > approved memory > proposed memory > raw
   trace inference. It decides which record wins and mandates no mechanism;

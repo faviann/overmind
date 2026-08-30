@@ -1,10 +1,9 @@
 # Testing conventions (load before writing or changing tests)
 
-The capture coverage this document requires — capture-ledger mechanical checks,
-the safety-boundary and scheduled-synthetic-capture module seams, and the
-packaged-apphost proof — describes required coverage for capture code that
-already exists and is frozen. Those rules stand for that code and are unchanged;
-they authorize no new capture work. Current authority for capture is
+Capture coverage in this document applies only to the transitional server-side
+capture interface and its ledger. The workstation producer, adapters, runtime
+state, hooks, fixtures, and packaged apphost have been removed. These rules
+authorize no new capture work. Current authority for capture is
 [evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
 
 ## What a good test is here
@@ -75,55 +74,7 @@ and trace writes at the public HTTP MCP seam.
 The legacy 128 MiB whole-observation rule is not a write-safety budget.
 `CaptureFidelityPolicy` and `CaptureIngestion` remain authorized seams for that
 capture-only mechanism, and its real-number coverage stays isolated in
-`CaptureObservationSizeTests` while capture code ships.
-
-### Module-surface tests for scheduled synthetic capture
-
-The disabled synthetic runtime has four deterministic mechanisms whose bounds
-cannot be observed honestly through `memctl`: scheduler delay/jitter and
-non-overlap, named schedule-configuration binding, transcript discovery with
-logical identity and terminal archive evidence, and per-stream filesystem
-isolation with claim-state mechanics. Their documented public module surfaces
-in `docs/capture-modules.md` are legitimate focused test seams, limited to
-those mechanisms.
-
-The transport-omission mechanism is also authorized at the
-`CodexCaptureClaimer` durable-state and `DisabledCaptureRuntime` delivery module
-seams. A test may inject a smaller positive transport bound to make omission
-and mandatory-identity refusal mechanically observable, including refusal of a
-conflicting legacy/current identity before durable claim. `CaptureFidelityPolicy`
-is the authorized mechanism seam for proving that pathological over-limit JSON
-is streaming-counted with bounded additional allocation and elapsed time,
-count/materialize mutation cannot return an over-cap representation, and an
-over-limit native locator fails closed. The runtime state seam proves such a
-native record, and a Codex `native_id` record requiring valid binary omission,
-claims nothing and persists no raw content. `CaptureIngestion` is
-the corresponding seam for proving content compaction, the fixed 128 MiB clamp,
-and keyed-signature streaming before append.
-The content-free outcome projection is authorized at
-`CaptureOutcomeAggregation`, `CaptureImportReceipt`, and
-`ICaptureRuntimeState`: tests assert its closed harness/reason/size-band shape,
-independent health and fidelity states, and absence of exact sizes and record
-identity. Packaged HTTP and `memctl capture receipt` remain the proof that the
-same projection crosses API and operator seams.
-The production deadline is deliberately not caller-injectable. Bounded tests
-exercise elapsed time under that fixed deadline; a mechanical test may supply a
-controlled `TimeProvider` to the production absolute-deadline structure to prove
-that phases share one clock, without adding a test-only fidelity path.
-The injected value
-can only tighten the fixed 1,000,000-byte production bound; a larger request
-must never loosen it. The same positive-only rule applies to injected content
-bounds against the fixed 128 MiB production ceiling. These focused tests do not
-replace packaged-apphost proof:
-the real tracer must retain an observation whose adapted request is exactly
-1,000,000 UTF-8 bytes whole and convert the next byte to the versioned omission
-through the real HTTP API and operator read.
-
-This is not a general license to test capture behavior through modules.
-Startup/resume, delivery retry and timeout convergence, append/archive
-transitions, and canonical results must retain packaged-apphost coverage
-through the real HTTP API and `memctl` operator reads. Direct database checks
-remain limited to the mechanical categories above.
+`CaptureObservationSizeTests` while the server-side capture interface ships.
 
 Namespace isolation and private-memory invisibility are binding acceptance
 behaviors, but their seam is keyed MCP agents. Verify them through public

@@ -5829,7 +5829,7 @@ public sealed class CaptureTests : HttpSeamTestBase
                     fixturePath,
                     CodexTranscriptDiscovery.Enumerate(fixturePath).Single().SourceStream,
                     state,
-                    new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
+                    new WriteSafetyGate(Path.Combine(_root, "config/never_store.yaml")));
             Assert.Equal([0L, 1L, 2L], claims.Select(item => item.SourcePosition));
             CaptureRuntimeQueueItem first = claims[0];
             await state.RecordServerReceiptAsync(
@@ -6036,7 +6036,7 @@ public sealed class CaptureTests : HttpSeamTestBase
         var options = RuntimeOptions();
         await new CaptureRoutePolicyStore(
                 options.ConnectionString,
-                new NeverStoreGate(
+                new WriteSafetyGate(
                     options.NeverStorePath, options.NeverStoreLiteralsPath))
             .ReplaceAsync(
                 binding,

@@ -148,7 +148,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
         var service = Service();
         var context = new MemoryContext("agent-a", "memory-system", "session-never-store");
 
-        var ex = await Assert.ThrowsAsync<NeverStoreException>(() =>
+        var ex = await Assert.ThrowsAsync<WriteSafetyRejectedException>(() =>
             service.ProposeMemoryAsync(
                 context,
                 "memory-system",
@@ -915,7 +915,7 @@ public sealed class MemoryServiceTests : IAsyncLifetime
     }
 
     private MemoryService Service() =>
-        new(RuntimeConnection, new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
+        new(RuntimeConnection, new WriteSafetyGate(Path.Combine(_root, "config/never_store.yaml")));
 
     // sessionId null starts the server without MEMSRV_SESSION_ID, exercising
     // the generated per-process-start session id.

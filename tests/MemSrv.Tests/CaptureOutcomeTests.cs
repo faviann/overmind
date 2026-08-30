@@ -73,13 +73,13 @@ public sealed class CaptureOutcomeTests
     [Fact]
     public void SafetyOutcomeClassificationDoesNotDependOnHumanWording()
     {
-        var failure = new SafetyScanException(
+        var failure = new WriteSafetyScanException(
             CaptureOutcomeReason.MatcherTimeout,
             "wording with no classification keywords");
 
         Assert.Equal(
             CaptureOutcomeReason.MatcherTimeout,
-            failure.OutcomeReason);
+            failure.FailureCode);
         Assert.Contains("wording with no classification keywords", failure.Message);
     }
 
@@ -90,9 +90,9 @@ public sealed class CaptureOutcomeTests
     [InlineData(CaptureOutcomeReason.ScannerInternalFailure)]
     public void SafetyScanExceptionAcceptsEveryClosedMachineReason(string reason)
     {
-        var failure = new SafetyScanException(reason, "safe prose");
+        var failure = new WriteSafetyScanException(reason, "safe prose");
 
-        Assert.Equal(reason, failure.OutcomeReason);
+        Assert.Equal(reason, failure.FailureCode);
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public sealed class CaptureOutcomeTests
         const string contentLike = "secret-content-machine-reason";
 
         ArgumentException failure = Assert.Throws<ArgumentException>(
-            () => new SafetyScanException(contentLike, "safe prose"));
+            () => new WriteSafetyScanException(contentLike, "safe prose"));
 
         Assert.DoesNotContain(contentLike, failure.Message, StringComparison.Ordinal);
     }

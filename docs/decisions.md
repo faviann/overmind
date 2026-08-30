@@ -1,5 +1,24 @@
 # Decisions
 
+## 2026-08-30 — Phase 1 write safety is independent of capture (#221)
+
+- The retained never-store boundary is general Overmind write safety, governed
+  by `docs/write-safety.md` and implemented by `WriteSafetyGate`,
+  `WriteSafetyBudgets`, `SecretRuleSet`, and `SecretScanner`.
+- Memory writes still reject and trace writes still redact before persistence.
+  Rule validation, deterministic matching/decoding, markers, deadlines, and
+  numeric scanner defaults retain their behavior.
+- General write-safety failures expose only closed failure codes and safe
+  wording. Temporary capture callers map those codes into capture health and
+  fidelity projections outside the retained boundary.
+- The 128 MiB whole-observation ceiling is not a Phase 1 scan budget. It remains
+  capture-only under `CaptureFidelityPolicy`, with its frozen maintenance
+  contract in `docs/capture-safety-budgets.md`.
+- This atomically supersedes the 2026-08-20 decision's narrow statement that
+  `capture-safety-budgets.md` remained binding for every write. The binding
+  general contract is now `write-safety.md`; the older document retains only
+  capture observation/fidelity authority while that code ships.
+
 ## 2026-08-22 — The project handoff leaves the authority chain
 
 - `docs/agent-memory-handoff-v4.md` is **deleted**, and the authority chain

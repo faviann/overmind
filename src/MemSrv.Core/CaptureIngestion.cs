@@ -18,7 +18,10 @@ public sealed class CaptureConflictException(string reason, string message) : Ex
 /// The caller supplies an already-resolved <see cref="CaptureBindingContext"/>;
 /// this module never sees a raw credential.
 /// </summary>
-public sealed class CaptureIngestion(string connectionString, NeverStoreGate neverStore)
+public sealed class CaptureIngestion(
+    string connectionString,
+    WriteSafetyGate writeSafety,
+    long maxContentBytes = CaptureFidelityPolicy.ProductionContentBytes)
 {
     public async Task<CaptureImportReceipt> ImportAsync(
         CaptureBindingContext binding,
@@ -29,17 +32,12 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         {
             return await ImportCoreAsync(binding, command, cancellationToken);
         }
-        catch (SafetyConfigurationException failure)
+        catch (Exception failure) when (failure is
+            WriteSafetyConfigurationException or WriteSafetyScanException)
         {
-            failure.ReportCaptureOutcome(
+            CaptureOutcomeAggregation.AttachWriteSafetyOutcome(
                 command.Source.Harness,
-                SourceByteCountOrUnknown(command));
-            throw;
-        }
-        catch (SafetyScanException failure)
-        {
-            failure.ReportCaptureOutcome(
-                command.Source.Harness,
+                failure,
                 SourceByteCountOrUnknown(command));
             throw;
         }
@@ -50,19 +48,18 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         CaptureObservationCommand command,
         CancellationToken cancellationToken)
     {
-        CaptureLedger.RequireSafetyConfigured(neverStore);
+        CaptureLedger.RequireSafetyConfigured(writeSafety);
         ValidateMandatory(binding, command);
         CaptureObservationCommand originalCommand = command;
         BinaryFidelitySelection<CaptureObservationCommand> binaryFidelity =
             CaptureFidelityPolicy.OmitUnsupportedBinaryContent(
                 command,
-                neverStore.Budgets.MaxObservationBytes);
+                maxContentBytes);
         command = binaryFidelity.Observation;
         BoundedCaptureRepresentation<CaptureObservationCommand> bounded =
             CaptureFidelityPolicy.SerializeForContent(
                 command,
-                neverStore.Budgets.MaxObservationBytes);
-        string inputJson = bounded.Serialized;
+                maxContentBytes);
         long originalByteCount = bounded.OriginalByteCount;
         command = bounded.Observation;
         var captureOutcomes = new List<CaptureOutcomeRecord>();
@@ -116,11 +113,9 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
                 signatureCommand.RouteEvidence),
             binding.ContentSignatureKey);
         bool observationWasOmitted = bounded.WasOmitted;
-        // The fidelity policy already proves the chosen serialized
-        // representation fits. The gate independently enforces its configured
-        // observation budget before scanning.
-        neverStore.AssertObservationWithinBudget(inputJson);
-        var scan = new ScanAccumulator(neverStore.RuleSetVersion);
+        // The capture-only fidelity policy proves the chosen serialized
+        // representation fits before the generalized gate scans its leaves.
+        var scan = new ScanAccumulator(writeSafety.RuleSetVersion);
         if (observationWasOmitted)
         {
             scan.Omit(CaptureFidelityPolicy.ContentLimitReason);
@@ -166,7 +161,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             JsonSerializer.Serialize(command.Source, CaptureLedger.JsonOptions), scan);
         string adapter = RedactJson(
             JsonSerializer.Serialize(command.Adapter, CaptureLedger.JsonOptions), scan);
-        var routeEvidenceScan = neverStore.ScanJson(
+        var routeEvidenceScan = writeSafety.ScanJson(
             JsonSerializer.Serialize(command.RouteEvidence, CaptureLedger.JsonOptions));
         scan.Add(routeEvidenceScan);
         string routeEvidence = routeEvidenceScan.Redacted;
@@ -555,7 +550,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         using var hash = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, key);
         using var stream = new HashingSerializationStream(
             hash,
-            SafetyBudgets.Default.MaxScanTime);
+            WriteSafetyBudgets.Default.MaxScanTime);
         JsonSerializer.Serialize(stream, value, CaptureLedger.JsonOptions);
         stream.AssertWithinDeadline();
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
@@ -660,17 +655,17 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     // un-inspectable value fails the whole import closed.
     private void AssertSafe(string value, ScanAccumulator scan)
     {
-        var result = neverStore.Scan(value);
+        var result = writeSafety.Scan(value);
         scan.Add(result);
         if (result.OmissionReasons.Count > 0 || result.RedactionCount > 0)
         {
-            neverStore.AssertAllowed(value);
+            writeSafety.AssertAllowed(value);
         }
     }
 
     private string Redact(string value, ScanAccumulator scan)
     {
-        var result = neverStore.Scan(value);
+        var result = writeSafety.Scan(value);
         scan.Add(result);
         return result.Redacted;
     }
@@ -679,7 +674,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
     // JSON is never regex-rewritten.
     private string RedactJson(string json, ScanAccumulator scan)
     {
-        var result = neverStore.ScanJson(json);
+        var result = writeSafety.ScanJson(json);
         scan.Add(result);
         return result.Redacted;
     }
@@ -746,7 +741,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
         public SortedSet<string> Categories { get; } = new(StringComparer.Ordinal);
         public int RedactionCount { get; private set; }
         public SortedSet<string> Omissions { get; } = new(StringComparer.Ordinal);
-        public List<CaptureScanOmission> OmissionOccurrences { get; } = [];
+        public List<WriteSafetyOmission> OmissionOccurrences { get; } = [];
 
         // Provenance only: rule ids, categories, counts, and omission reasons.
         // Never the matched value, an unsafe excerpt, or a content digest.
@@ -754,7 +749,7 @@ public sealed class CaptureIngestion(string connectionString, NeverStoreGate nev
             ? "omitted"
             : RedactionCount == 0 ? "clean" : "redacted";
 
-        public void Add(NeverStoreScan scan)
+        public void Add(WriteSafetyScan scan)
         {
             RuleIds.UnionWith(scan.RuleIds);
             Categories.UnionWith(scan.Categories);

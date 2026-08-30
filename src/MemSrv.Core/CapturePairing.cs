@@ -32,7 +32,7 @@ public sealed record CapturePairingPoll(string Status, string? Credential);
 /// </summary>
 public sealed class CapturePairing(
     string connectionString,
-    NeverStoreGate neverStore,
+    WriteSafetyGate neverStore,
     TimeProvider? timeProvider = null)
 {
     private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(15);

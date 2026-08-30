@@ -35,7 +35,7 @@ internal sealed record SecretRule(
     /// negative — `sensitive-assignment` is an ordinary free-text
     /// <c>NAME=value</c> regex that merely carries the `structured_field`
     /// category, so a Base64'd credentials file, the exact shape
-    /// docs/capture-safety-budgets.md says the decoder exists for, was stored
+    /// docs/write-safety.md says the decoder exists for, was stored
     /// unredacted unless it also happened to hold a provider-prefixed value.
     /// </summary>
     public bool DecodeEligible => Matcher != SecretMatcherKind.SensitiveField;

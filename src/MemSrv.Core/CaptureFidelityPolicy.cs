@@ -11,6 +11,7 @@ public static class CaptureFidelityPolicy
 {
     public const string CurrentVersion = "capture-fidelity/2026-07-31.11";
     public const int ProductionTransportBytes = 1_000_000;
+    public const long ProductionContentBytes = 128L * 1024 * 1024;
     public const string TransportLimitReason = "observation_exceeds_transport_limit";
     public const string ContentLimitReason = "observation_exceeds_content_limit";
     public const string UnsupportedBinaryReason = "unsupported_binary_content";
@@ -52,8 +53,8 @@ public static class CaptureFidelityPolicy
 
         long effectiveBound = Math.Min(
             maxBytes,
-            SafetyBudgets.Default.MaxObservationBytes);
-        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
+            ProductionContentBytes);
+        var deadline = new GovernedDeadline(WriteSafetyBudgets.Default.MaxScanTime);
         RewrittenJson rewritten = RewriteUnsupportedBinaryContent(
             sourcePayload,
             harness,
@@ -102,7 +103,7 @@ public static class CaptureFidelityPolicy
             ProductionTransportBytes);
         CaptureObservationCommand validated =
             CaptureObservationCommand.FromRequest(observation);
-        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
+        var deadline = new GovernedDeadline(WriteSafetyBudgets.Default.MaxScanTime);
         RewrittenJson rewrittenSource = RewriteUnsupportedBinaryContent(
             observation.SourcePayload,
             observation.Source.Harness,
@@ -196,9 +197,9 @@ public static class CaptureFidelityPolicy
 
         long effectiveBound = Math.Min(
             maxContentBytes,
-            SafetyBudgets.Default.MaxObservationBytes);
+            ProductionContentBytes);
         long remaining = effectiveBound;
-        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
+        var deadline = new GovernedDeadline(WriteSafetyBudgets.Default.MaxScanTime);
         RewrittenJson rewrittenSource = RewriteUnsupportedBinaryContent(
             observation.SourcePayload,
             observation.Source.Harness,
@@ -593,22 +594,22 @@ public static class CaptureFidelityPolicy
 
         long effectiveBound = Math.Min(
             maxContentBytes,
-            SafetyBudgets.Default.MaxObservationBytes);
+            ProductionContentBytes);
         BoundedCaptureRepresentation<CaptureObservationCommand> bounded =
             SerializeWithinLimit(
             observation,
             effectiveBound,
             (command, originalByteCount) =>
                 OmitForContentLimit(command, originalByteCount),
-            _ => new SafetyScanException(
-                CaptureOutcomeReason.ScanBudgetExhausted,
+            _ => new WriteSafetyScanException(
+                WriteSafetyFailureCode.ScanBudgetExhausted,
                 $"the observation budget of {effectiveBound} bytes was exceeded"));
         CaptureObservationRequest snapshot =
             JsonSerializer.Deserialize<CaptureObservationRequest>(
                 bounded.Serialized,
                 CaptureLedger.JsonOptions)
-            ?? throw new SafetyScanException(
-                CaptureOutcomeReason.RequiredInspectionIncomplete,
+            ?? throw new WriteSafetyScanException(
+                WriteSafetyFailureCode.RequiredInspectionIncomplete,
                 "the bounded capture representation could not be reconstructed");
         return bounded with
         {
@@ -708,7 +709,7 @@ public static class CaptureFidelityPolicy
 
     private static long CountSerializedBytes<T>(T observation)
     {
-        var deadline = new GovernedDeadline(SafetyBudgets.Default.MaxScanTime);
+        var deadline = new GovernedDeadline(WriteSafetyBudgets.Default.MaxScanTime);
         return CountSerializedBytes(observation, deadline);
     }
 
@@ -739,8 +740,8 @@ public static class CaptureFidelityPolicy
         long omittedByteCount = CountSerializedBytes(omitted, deadline);
         if (omittedByteCount > effectiveBound)
         {
-            throw new SafetyScanException(
-                CaptureOutcomeReason.RequiredInspectionIncomplete,
+            throw new WriteSafetyScanException(
+                WriteSafetyFailureCode.RequiredInspectionIncomplete,
                 "the required unsupported-binary omission cannot fit within " +
                 $"the observation budget of {effectiveBound} bytes");
         }
@@ -825,8 +826,8 @@ public static class CaptureFidelityPolicy
         }
         catch (CaptureRepresentationLimitException)
         {
-            throw new SafetyScanException(
-                CaptureOutcomeReason.RequiredInspectionIncomplete,
+            throw new WriteSafetyScanException(
+                WriteSafetyFailureCode.RequiredInspectionIncomplete,
                 "the required unsupported-binary omission cannot fit within " +
                 $"the fidelity budget of {effectiveBound} bytes");
         }

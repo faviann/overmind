@@ -854,7 +854,7 @@ public static class CodexCaptureClaimer
         string transcriptPath,
         string sourceStream,
         ICaptureRuntimeState state,
-        NeverStoreGate safetyGate,
+        WriteSafetyGate safetyGate,
         CancellationToken cancellationToken = default,
         bool terminalAtEndOfFile = false,
         string? transcriptIdentity = null,
@@ -908,7 +908,7 @@ public static class CodexCaptureClaimer
             CaptureSourcePositionOutcome.Terminal? terminal;
             BoundedCaptureRepresentation<CaptureObservationRequest> bounded;
             string candidateJson;
-            NeverStoreScan candidateScan;
+            WriteSafetyScan candidateScan;
             try
             {
                 terminal = adapter.Adapt(record)
@@ -922,22 +922,14 @@ public static class CodexCaptureClaimer
                     terminal.Observation,
                     maxTransportBytes);
                 string boundedJson = bounded.Serialized;
-                safetyGate.AssertObservationWithinBudget(boundedJson);
                 candidateScan = safetyGate.ScanJson(boundedJson);
                 candidateJson = candidateScan.Redacted;
             }
-            catch (SafetyConfigurationException failure)
+            catch (Exception failure) when (failure is
+                WriteSafetyConfigurationException or WriteSafetyScanException)
             {
-                failure.ReportCaptureOutcome(
-                    adapter.Harness,
-                    byteRange.Length);
-                throw;
-            }
-            catch (SafetyScanException failure)
-            {
-                failure.ReportCaptureOutcome(
-                    adapter.Harness,
-                    byteRange.Length);
+                CaptureOutcomeAggregation.AttachWriteSafetyOutcome(
+                    adapter.Harness, failure, byteRange.Length);
                 throw;
             }
             long prefixLength = checked(byteRange.Offset + byteRange.Length);

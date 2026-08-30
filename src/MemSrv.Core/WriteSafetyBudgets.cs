@@ -6,15 +6,12 @@ namespace MemSrv.Core;
 /// see the whole bound in one place, and so a test can inject a smaller budget
 /// to exercise a mechanism without paying for the production number.
 /// Published defaults and their measured justification live in
-/// <c>docs/capture-safety-budgets.md</c>.
+/// <c>docs/write-safety.md</c>.
 /// </summary>
-public sealed record SafetyBudgets
+public sealed record WriteSafetyBudgets
 {
     /// <summary>Bump when any default below changes.</summary>
-    public const string CurrentVersion = "capture-safety-budgets/2026-07-26.2";
-
-    /// <summary>Maximum UTF-8 bytes in one source observation.</summary>
-    public required long MaxObservationBytes { get; init; }
+    public const string CurrentVersion = "write-safety-budgets/2026-08-30.1";
 
     /// <summary>Maximum UTF-8 bytes in one decoded structured leaf value.</summary>
     public required long MaxLeafBytes { get; init; }
@@ -36,7 +33,7 @@ public sealed record SafetyBudgets
     /// qualification bound, not a fail-closed budget: a longer run is simply
     /// not decoded, so a secret encoded inside it is NOT detected. That is an
     /// accepted, bounded residual risk whose threat model is accidental
-    /// leakage, not a determined evader. See docs/capture-safety-budgets.md.
+    /// leakage, not a determined evader. See docs/write-safety.md.
     /// </summary>
     public required int MaxDecoderCandidateLength { get; init; }
 
@@ -45,10 +42,9 @@ public sealed record SafetyBudgets
 
     public required string Version { get; init; }
 
-    public static readonly SafetyBudgets Default = new()
+    public static readonly WriteSafetyBudgets Default = new()
     {
         Version = CurrentVersion,
-        MaxObservationBytes = 128L * 1024 * 1024,
         MaxLeafBytes = 64L * 1024 * 1024,
         MaxScanTime = TimeSpan.FromSeconds(30),
         MaxRuleTime = TimeSpan.FromSeconds(5),
@@ -67,57 +63,51 @@ public sealed record SafetyBudgets
 /// <see cref="InvalidOperationException"/> so every existing fail-closed caller
 /// (HTTP 400, memctl exit 1) keeps its behavior while gaining the reason.
 /// </summary>
-public sealed class SafetyConfigurationException(string reason)
-    : InvalidOperationException($"Capture safety rules are not usable: {reason}.")
+public sealed class WriteSafetyConfigurationException(string reason)
+    : InvalidOperationException($"Write-safety rules are not usable: {reason}.")
 {
     public string Reason { get; } = reason;
-    public CaptureOutcomeSummary? Outcome { get; private set; }
+}
 
-    public void ReportCaptureOutcome(string harness, long? inspectedByteCount = null) =>
-        Outcome = CaptureOutcomeAggregation.Summarize(
-        [
-            CaptureOutcomeAggregation.SafetyFailure(
-                harness,
-                CaptureOutcomeReason.ScannerPolicyUnavailable,
-                inspectedByteCount)
-        ]);
+/// <summary>Closed machine-readable reasons for an incomplete safety inspection.</summary>
+public static class WriteSafetyFailureCode
+{
+    public const string MatcherTimeout = "matcher_timeout";
+    public const string RequiredInspectionIncomplete = "required_inspection_incomplete";
+    public const string ScanBudgetExhausted = "scan_budget_exhausted";
+    public const string ScannerInternalFailure = "scanner_internal_failure";
+    public const string ScannerPolicyUnavailable = "scanner_policy_unavailable";
+
+    public static bool IsKnown(string code) =>
+        code is MatcherTimeout
+            or RequiredInspectionIncomplete
+            or ScanBudgetExhausted
+            or ScannerInternalFailure
+            or ScannerPolicyUnavailable;
 }
 
 /// <summary>
 /// A scan could not complete within its bounds, or a required value could not
 /// be inspected completely. Callers must persist nothing and advance nothing.
 /// </summary>
-public class SafetyScanException : InvalidOperationException
+public class WriteSafetyScanException : InvalidOperationException
 {
-    public SafetyScanException(string outcomeReason, string reason)
-        : base($"Capture safety scan failed closed: {reason}.")
+    public WriteSafetyScanException(string failureCode, string reason)
+        : base($"Write-safety scan failed closed: {reason}.")
     {
-        if (outcomeReason is not (
-                CaptureOutcomeReason.MatcherTimeout
-                or CaptureOutcomeReason.ScanBudgetExhausted
-                or CaptureOutcomeReason.RequiredInspectionIncomplete
-                or CaptureOutcomeReason.ScannerInternalFailure))
+        if (!WriteSafetyFailureCode.IsKnown(failureCode)
+            || failureCode == WriteSafetyFailureCode.ScannerPolicyUnavailable)
         {
             throw new ArgumentException(
-                "Capture safety scan outcome reason is not recognized.",
-                nameof(outcomeReason));
+                "Write-safety scan failure code is not recognized.",
+                nameof(failureCode));
         }
-        OutcomeReason = outcomeReason;
+        FailureCode = failureCode;
         Reason = reason;
     }
 
-    public string OutcomeReason { get; }
+    public string FailureCode { get; }
     public string Reason { get; }
-    public CaptureOutcomeSummary? Outcome { get; private set; }
-
-    public void ReportCaptureOutcome(string harness, long? inspectedByteCount = null) =>
-        Outcome = CaptureOutcomeAggregation.Summarize(
-        [
-            CaptureOutcomeAggregation.SafetyFailure(
-                harness,
-                OutcomeReason,
-                inspectedByteCount)
-        ]);
 }
 
 /// <summary>
@@ -125,7 +115,7 @@ public class SafetyScanException : InvalidOperationException
 /// original exception and candidate content deliberately do not cross the
 /// safety boundary.
 /// </summary>
-public sealed class SafetyScannerInternalException()
-    : SafetyScanException(
-        CaptureOutcomeReason.ScannerInternalFailure,
+public sealed class WriteSafetyScannerInternalException()
+    : WriteSafetyScanException(
+        WriteSafetyFailureCode.ScannerInternalFailure,
         "the scanner failed internally");

@@ -1,89 +1,23 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using MemSrv.Core;
 
 namespace MemSrv.Tests;
 
-// The documented content limits, exercised at their real numbers rather than
-// at a convenient stand-in. Both live in one class on purpose: xUnit runs the
-// tests of a class sequentially, so only one multi-hundred-megabyte value is
-// live at a time even though `make test` runs four shards concurrently.
-//
-// The pathological cases whose MECHANISM (not number) is under test — match
-// floods, decoder-candidate floods, malformed encodings, matcher timeouts,
-// decode exhaustion — run against explicitly injected smaller budgets in
-// SafetyGateTests and CaptureSafetyTests, so the suite does not pay for the
-// production number twelve times.
+// Capture alone owns the documented whole-observation fidelity ceiling.
 [Collection("database")]
-public sealed class SafetyBoundaryTests : HttpSeamTestBase
+public sealed class CaptureObservationSizeTests : HttpSeamTestBase
 {
-    private const long LeafLimitBytes = 64L * 1024 * 1024;
     private const long ObservationLimitBytes = 128L * 1024 * 1024;
-    private const string FakeAwsKeyId = "AKIA" + "BOUNDARYFAKE0001";
 
     private readonly string _shippedRules =
         Path.Combine(TestProcessRunner.RepoRoot, "config/never_store.yaml");
 
     [Fact]
-    public void LeafAtTheDocumented64MiBLimitIsScannedToItsFinalByte()
-    {
-        Assert.Equal(LeafLimitBytes, SafetyBudgets.Default.MaxLeafBytes);
-        var gate = new NeverStoreGate(_shippedRules);
-        // ASCII, so one char is one UTF-8 byte: the value is exactly at the
-        // documented limit, and the only credential sits at its very end.
-        string leaf = new string('x', (int)LeafLimitBytes - FakeAwsKeyId.Length - 1)
-            + " " + FakeAwsKeyId;
-        Assert.Equal(LeafLimitBytes, Encoding.UTF8.GetByteCount(leaf));
-
-        var clock = Stopwatch.StartNew();
-        var result = gate.Scan(leaf);
-        clock.Stop();
-
-        Assert.Empty(result.OmissionReasons);
-        Assert.Equal(1, result.RedactionCount);
-        Assert.Equal(["aws-access-key-id"], result.RuleIds);
-        Assert.EndsWith("[REDACTED:aws-access-key-id]", result.Redacted);
-        Assert.True(
-            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
-            $"A leaf at the documented limit took {clock.Elapsed.TotalSeconds:0.0}s, which " +
-            $"exceeds the published {SafetyBudgets.Default.MaxScanTime.TotalSeconds:0}s scan-time budget.");
-        ReleaseLargeValues();
-    }
-
-    [Fact]
-    public void LeafBeyondTheDocumented64MiBLimitIsWhollyOmittedWithSafeSiblingsKept()
-    {
-        var gate = new NeverStoreGate(_shippedRules);
-        string oversized = new string('x', (int)LeafLimitBytes + 1);
-        Assert.Equal(LeafLimitBytes + 1, Encoding.UTF8.GetByteCount(oversized));
-
-        string source = JsonSerializer.Serialize(new
-        {
-            safe = "kept",
-            oversized
-        });
-        var result = gate.ScanJson(source);
-        using JsonDocument document = JsonDocument.Parse(result.Redacted);
-        Assert.Equal("kept", document.RootElement.GetProperty("safe").GetString());
-        Assert.Equal(
-            "[OMITTED:leaf_exceeds_limit]",
-            document.RootElement.GetProperty("oversized").GetString());
-        Assert.Equal(["leaf_exceeds_limit"], result.OmissionReasons);
-        Assert.Equal(
-            LeafLimitBytes + 1,
-            Assert.Single(result.Omissions).OriginalByteCount);
-
-        // A required identity value that large cannot be inspected at all.
-        Assert.Throws<SafetyScanException>(() => gate.AssertAllowed(oversized));
-        ReleaseLargeValues();
-    }
-
-    [Fact]
     public async Task ObservationAtTheDocumented128MiBLimitIsAcceptedAndBeyondItIsWhollyOmitted()
     {
-        Assert.Equal(ObservationLimitBytes, SafetyBudgets.Default.MaxObservationBytes);
-        var gate = new NeverStoreGate(_shippedRules);
+        Assert.Equal(ObservationLimitBytes, CaptureFidelityPolicy.ProductionContentBytes);
+        var gate = new WriteSafetyGate(_shippedRules);
         string credential = $"mcap_{Guid.NewGuid():N}";
         string bindingName = $"content-boundary-{Guid.NewGuid():N}";
         await new CaptureEnrollment(RuntimeConnection, gate).EnrollAsync(
@@ -162,16 +96,10 @@ public sealed class SafetyBoundaryTests : HttpSeamTestBase
             ObservationLimitBytes + 1,
             Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(overLimit, options)));
 
-        var callerLoosenedGate = new NeverStoreGate(
-            _shippedRules,
-            null,
-            SafetyBudgets.Default with
-            {
-                MaxObservationBytes =
-                    SafetyBudgets.Default.MaxObservationBytes + 1
-            });
         CaptureImportReceipt omitted = await new CaptureIngestion(
-            RuntimeConnection, callerLoosenedGate).ImportAsync(binding, overLimit);
+            RuntimeConnection,
+            gate,
+            CaptureFidelityPolicy.ProductionContentBytes + 1).ImportAsync(binding, overLimit);
         Assert.Equal("new", omitted.Status);
         Assert.Equal(
             "observation_exceeds_content_limit",

@@ -60,20 +60,22 @@ assert that mechanism directly:
   routing, receipts, authorization, and retry behavior stay at the HTTP/memctl
   public seams.
 
-### Module-surface tests for the safety boundary
+### Module-surface tests for write safety
 
-The never-store gate's rule-set validation, deterministic overlap resolution,
-bounded decoding, and numeric scan budgets have no MCP tool and no `memctl`
-command, and the capture HTTP route's deliberate 1 MB transport cap sits far
-below every scanner budget except match count. `NeverStoreGate` and
-`CaptureIngestion` are therefore legitimate assertion seams for those
-mechanisms — they are public module surfaces documented in
-`docs/capture-modules.md`, not internals. Keep the end-to-end proof that the
-same gate governs real writes at the HTTP/`memctl`/tracer seams. Exercise the
-real 128 MiB and 64 MiB documented numbers, but inject a smaller
-`SafetyBudgets` where the mechanism rather than the number is under test, and
-keep the large cases in one class so only one is live at a time under the
-concurrent shards.
+The general write-safety gate's rule-set validation, deterministic overlap
+resolution, bounded decoding, and numeric scan budgets have no MCP tool or
+`memctl` command. `WriteSafetyGate` is therefore the authorized public module
+seam for those mechanisms under `docs/write-safety.md`. `WriteSafetyTests` and
+`WriteSafetyBoundaryTests` construct only generalized write-safety inputs and
+results. Inject a smaller `WriteSafetyBudgets` where the mechanism rather than
+the production number is under test; the boundary class alone exercises the
+real 64 MiB leaf value. Keep end-to-end proof that the same gate governs memory
+and trace writes at the public HTTP MCP seam.
+
+The legacy 128 MiB whole-observation rule is not a write-safety budget.
+`CaptureFidelityPolicy` and `CaptureIngestion` remain authorized seams for that
+capture-only mechanism, and its real-number coverage stays isolated in
+`CaptureObservationSizeTests` while capture code ships.
 
 ### Module-surface tests for scheduled synthetic capture
 

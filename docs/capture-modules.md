@@ -26,7 +26,7 @@ Source interpretation before this spine is described by the
 | `CaptureFidelityPolicy` | `OmitUnsupportedBinaryContent(JsonElement + trusted source provenance\|CaptureObservationRequest\|CaptureObservationCommand)` → `BinaryFidelitySelection<T>`; `ContainsUnsupportedBinaryOmission(command)`; `SerializeForTransport(CaptureObservationRequest, maxBytes)` / `SerializeForContent(CaptureObservationCommand, maxBytes)` → `BoundedCaptureRepresentation<T>` | `CodexJsonlAdapter`, `CodexCaptureClaimer`, `DisabledCaptureRuntime`, `CaptureIngestion` |
 | `CaptureOutcomeAggregation` | `FidelityOmission` / `SafetyFailure`; `Summarize` / `FromCanonical` → content-free health, fidelity, and counters | capture runtime state, capture HTTP responses, `memctl capture receipt` |
 | `OperatorCaptureReads` | `ReadCapturedEventEnvelopesAsync(observationUuid)` → `IReadOnlyList<CapturedEventEnvelope>`; `ReplaySourceStreamAsync(sourceStreamUuid)` → `CapturedSourceStreamReplay`; `NavigateCapturedSessionAsync(sourceStreamUuid, allowedNamespaces)` → `CapturedSessionNavigation` | `memctl capture receipt`; `memctl capture replay`; `memctl capture navigate` |
-| `NeverStoreGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `AssertObservationWithinBudget`, `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
+| `WriteSafetyGate` | `Scan`/`Redact`/`AssertAllowed` (free text), `ScanJson`/`RedactJson`/`RedactObject`/`AssertAllowedObject` (structured), `TryReload`, `IsConfigured`/`FailureReason`/`RuleSetVersion`/`Budgets` | `MemoryService`, `CaptureEnrollment`, `CaptureIngestion`, `DisabledCaptureRuntime` |
 | `ICaptureRuntimeState` | `ReadAsync`, `InspectSourceAsync`, `ClaimAsync`, `DeliverAuthorizedAsync`, `RecordServerReceiptAsync` | `CodexCaptureTracer` |
 | `CodexCaptureClaimer` | `ClaimCompletedAsync(adapter, transcriptPath, sourceStream, state, safetyGate)` | `CodexCaptureTracer` |
 | `CodexTranscriptDiscovery` | `EnumerateCurrentSessionsAndResponsibleArchives(sessionsRoot, archiveRoot, responsibleSourceStreamsByTranscriptIdentity)` for production current rollouts plus identity-bound responsibility-filtered archive retries; `Enumerate(configuredLocation)` for the legacy synthetic fixture seam → streams with explicit Codex source identity | `CodexCaptureTracer` |
@@ -144,7 +144,7 @@ the event a redundant projection that cannot expand the admitted opaque bytes.
 Raw JSON fields and nested source objects cannot mint either root context for
 themselves.
 
-**`NeverStoreGate`** — the single governed policy point every write path
+**`WriteSafetyGate`** — the single governed policy point every write path
 crosses, and the only type that knows rules exist. It hides the rule-set schema
 and its load-time validation, compile-once `NonBacktracking` matchers with
 per-rule timeouts, literal prefilters, deterministic overlap resolution, exact
@@ -154,10 +154,10 @@ every numeric scan budget. Callers pass a value and get back a sanitized value
 or a refusal. Construction never throws — a broken rule file must not stop the
 server from starting and rejecting an unknown credential first — so an unusable
 gate is constructible, reports `IsConfigured == false` plus a safe
-`FailureReason`, and throws `SafetyConfigurationException` from every governed
+`FailureReason`, and throws `WriteSafetyConfigurationException` from every governed
 call. Free text and structured documents are separate entry points on purpose:
 serialized JSON is never regex-rewritten. See
-[capture safety budgets](capture-safety-budgets.md).
+[write safety](write-safety.md).
 
 **`CaptureEnrollment`** — fail-closed safety configuration; never-store
 clearance of the stable name, harness, and derived agent id; the `mcap_`
@@ -398,9 +398,9 @@ carries the in-limit original observation or the compact transport omission,
 the server remains the sole author of the canonical `scan_*` columns when
 delivery occurs.
 
-The two sides do different things with the result. The runtime calls exactly two
-gate methods — `AssertObservationWithinBudget` and `ScanJson` — and **refuses on
-operational scan failure**: a budget exhausted while scanning the bounded
+The two sides do different things with the result. The runtime bounds the
+capture representation through `CaptureFidelityPolicy`, then calls `ScanJson`
+and **refuses on operational scan failure**: a budget exhausted while scanning the bounded
 representation, a matcher timeout, an internal scanner error, or an unusable
 rule set throws, so it emits nothing and says why on stderr. The scheduled
 synthetic mode retains responsibility and retries a later cycle. An omission is

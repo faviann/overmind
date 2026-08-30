@@ -63,8 +63,10 @@ merely because they were implemented.
   `docs/codex-capture-runtime.md` (catch-up runtime),
   `docs/capture-synthetic-slice.md` (synthetic fixture).
   The superseded Phase 2 spec is not part of this route.
-- Never-store rules, scan budgets, or redaction markers →
-  `docs/capture-safety-budgets.md` (unchanged by the course-correction)
+- Never-store rules, write-scan budgets, failure codes, or redaction markers →
+  `docs/write-safety.md`
+- Legacy capture observation-size/fidelity policy →
+  `docs/capture-safety-budgets.md` (capture-only and frozen)
 - Schema, retrieval, dependencies, or scope → `docs/design-rules.md`
 - Deployment or deployment configuration → `docs/deployment-contract.md`
 - Domain terminology or domain documentation → `CONTEXT.md` and

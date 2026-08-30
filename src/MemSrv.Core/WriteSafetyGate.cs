@@ -3,52 +3,51 @@ using System.Text.Json;
 
 namespace MemSrv.Core;
 
-public sealed class NeverStoreException(string ruleName) : Exception($"Write rejected by never-store rule '{ruleName}'.")
+public sealed class WriteSafetyRejectedException(string ruleName) : Exception($"Write rejected by never-store rule '{ruleName}'.")
 {
     public string RuleName { get; } = ruleName;
 }
 
 /// <summary>
-/// The single governed policy point every write path crosses: memory writes,
-/// trace writes, capture enrollment, capture ingestion, and the disabled
-/// capture runtime. Callers pass a value and get either a sanitized value or a
-/// refusal; they never see rules, budgets, decoders, or spans.
+/// The single governed policy point every Overmind write path crosses. Callers
+/// pass a value and get either a sanitized value or a refusal; they never see
+/// rules, budgets, decoders, or spans.
 ///
 /// Construction never throws, because a server whose rule file is broken must
 /// still start, still reject an unknown credential first, and still refuse
 /// every write with a reason. A gate whose configuration is missing, empty,
 /// invalid, duplicated, unsupported, or un-loadable reports
 /// <see cref="IsConfigured"/> <c>== false</c> plus a safe
-/// <see cref="FailureReason"/>, and throws <see cref="SafetyConfigurationException"/>
+/// <see cref="FailureReason"/>, and throws <see cref="WriteSafetyConfigurationException"/>
 /// from every scan, assert, and redact call.
 /// </summary>
-public sealed class NeverStoreGate
+public sealed class WriteSafetyGate
 {
     private readonly string _rulesPath;
     private readonly string? _literalsPath;
-    private readonly SafetyBudgets _budgets;
+    private readonly WriteSafetyBudgets _budgets;
     // Atomic reload: a failed reload leaves the previously loaded state in
     // force, and a successful one swaps the whole state in a single reference
     // assignment that a concurrent scan either sees entirely or not at all.
     private volatile State _state;
 
-    public NeverStoreGate(string rulesPath, string? literalsPath = null, SafetyBudgets? budgets = null)
+    public WriteSafetyGate(string rulesPath, string? literalsPath = null, WriteSafetyBudgets? budgets = null)
     {
         _rulesPath = rulesPath;
         _literalsPath = literalsPath;
-        _budgets = budgets ?? SafetyBudgets.Default;
+        _budgets = budgets ?? WriteSafetyBudgets.Default;
         _state = Load(_rulesPath, _literalsPath, _budgets);
     }
 
-    internal NeverStoreGate(
+    internal WriteSafetyGate(
         ISafetyScanner scanner,
-        SafetyBudgets? budgets = null,
+        WriteSafetyBudgets? budgets = null,
         string ruleSetVersion = "injected-scanner")
     {
         ArgumentNullException.ThrowIfNull(scanner);
         _rulesPath = "";
         _literalsPath = null;
-        _budgets = budgets ?? SafetyBudgets.Default;
+        _budgets = budgets ?? WriteSafetyBudgets.Default;
         _state = new State(
             null,
             new FailClosedSafetyScanner(scanner),
@@ -61,7 +60,7 @@ public sealed class NeverStoreGate
     /// <summary>Safe reason the gate is unusable, or null. Never contains a candidate value.</summary>
     public string? FailureReason => _state.FailureReason;
 
-    public SafetyBudgets Budgets => _budgets;
+    public WriteSafetyBudgets Budgets => _budgets;
 
     public string RuleSetVersion => _state.RuleSetVersion;
 
@@ -89,38 +88,21 @@ public sealed class NeverStoreGate
         return true;
     }
 
-    /// <summary>
-    /// The versioned per-observation ceiling. The Kestrel transport cap on
-    /// <c>/capture/v1/observations</c> is deliberately far below this: it is a
-    /// separate DoS guard, not the safety limit.
-    /// </summary>
-    public void AssertObservationWithinBudget(string serializedObservation)
-    {
-        RequireConfigured();
-        long bytes = Encoding.UTF8.GetByteCount(serializedObservation);
-        if (bytes > _budgets.MaxObservationBytes)
-        {
-            throw new SafetyScanException(
-                CaptureOutcomeReason.ScanBudgetExhausted,
-                $"the observation budget of {_budgets.MaxObservationBytes} bytes was exceeded");
-        }
-    }
-
     // --- free text -------------------------------------------------------
 
     /// <summary>Scans one free-text value. Structured field rules do not apply here.</summary>
-    public NeverStoreScan Scan(string text)
+    public WriteSafetyScan Scan(string text)
     {
         var scanner = RequireConfigured();
         var state = new ScanBudgetState(_budgets);
         var outcome = scanner.ScanLeaf(text, null, state);
         return outcome.IsOmitted
-            ? new NeverStoreScan(
+            ? new WriteSafetyScan(
                 SafetyMarkers.Omission(outcome.OmissionReason!),
                 [], [], 0,
-                [new CaptureScanOmission(outcome.OmissionReason!, outcome.OmittedByteCount)],
+                [new WriteSafetyOmission(outcome.OmissionReason!, outcome.OmittedByteCount)],
                 null)
-            : new NeverStoreScan(
+            : new WriteSafetyScan(
                 outcome.Value!,
                 [.. outcome.RuleIds],
                 [.. outcome.Categories],
@@ -132,8 +114,8 @@ public sealed class NeverStoreGate
     public string Redact(string text) => Scan(text).Redacted;
 
     /// <summary>
-    /// Memory-write policy: reject. Throws <see cref="NeverStoreException"/> on
-    /// a match, and <see cref="SafetyScanException"/> when the value could not
+    /// Memory-write policy: reject. Throws <see cref="WriteSafetyRejectedException"/> on
+    /// a match, and <see cref="WriteSafetyScanException"/> when the value could not
     /// be inspected completely — a required value that cannot be scanned is a
     /// fail-closed condition, not an omission.
     /// </summary>
@@ -143,14 +125,14 @@ public sealed class NeverStoreGate
         RequireInspectable(result);
         if (result.RedactionCount > 0)
         {
-            throw new NeverStoreException(RefusalRule(result));
+            throw new WriteSafetyRejectedException(RefusalRule(result));
         }
     }
 
     // Spec §5: "return an error naming the rule". The rule that actually
     // decided the refusal is the highest-priority accepted match, not whichever
     // id happens to sort first.
-    private static string RefusalRule(NeverStoreScan result) =>
+    private static string RefusalRule(WriteSafetyScan result) =>
         result.PrimaryRuleId ?? result.RuleIds[0];
 
     // --- structured ------------------------------------------------------
@@ -159,7 +141,7 @@ public sealed class NeverStoreGate
     /// Scans decoded structured leaf values and rebuilds the document. The
     /// serialized JSON itself is never regex-rewritten.
     /// </summary>
-    public NeverStoreScan ScanJson(string json)
+    public WriteSafetyScan ScanJson(string json)
     {
         var scanner = RequireConfigured();
         var state = new ScanBudgetState(_budgets);
@@ -172,7 +154,7 @@ public sealed class NeverStoreGate
             WriteSanitized(document.RootElement, null, scanner, state, writer, ledger);
         }
 
-        return new NeverStoreScan(
+        return new WriteSafetyScan(
             // GetBuffer, not ToArray: a payload may be large and the copy is
             // pure waste.
             Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length),
@@ -191,16 +173,16 @@ public sealed class NeverStoreGate
         RequireInspectable(result);
         if (result.RedactionCount > 0)
         {
-            throw new NeverStoreException(RefusalRule(result));
+            throw new WriteSafetyRejectedException(RefusalRule(result));
         }
     }
 
-    private static void RequireInspectable(NeverStoreScan result)
+    private static void RequireInspectable(WriteSafetyScan result)
     {
         if (result.OmissionReasons.Count > 0)
         {
-            throw new SafetyScanException(
-                CaptureOutcomeReason.RequiredInspectionIncomplete,
+            throw new WriteSafetyScanException(
+                WriteSafetyFailureCode.RequiredInspectionIncomplete,
                 $"a required value could not be inspected completely ({result.OmissionReasons[0]})");
         }
     }
@@ -219,7 +201,7 @@ public sealed class NeverStoreGate
             && element.ValueKind is JsonValueKind.Object or JsonValueKind.Array
             && scanner.IsSensitiveField(propertyName, state))
         {
-            WriteOmitted(writer, ledger, OmissionReasons.SensitiveFieldSubtree, null);
+            WriteOmitted(writer, ledger, WriteSafetyOmissionReason.SensitiveFieldSubtree, null);
             return;
         }
 
@@ -248,7 +230,7 @@ public sealed class NeverStoreGate
                                 // would write a duplicate key and lose a value on
                                 // re-parse, so the object goes as a whole with a
                                 // stated reason.
-                                WriteOmitted(writer, ledger, OmissionReasons.RedactedNameCollision, null);
+                                WriteOmitted(writer, ledger, WriteSafetyOmissionReason.RedactedNameCollision, null);
                                 return;
                             }
                         }
@@ -301,7 +283,7 @@ public sealed class NeverStoreGate
                     && element.ValueKind is not JsonValueKind.Null
                     && scanner.IsSensitiveField(propertyName, state))
                 {
-                    WriteOmitted(writer, ledger, OmissionReasons.SensitiveFieldScalar, null);
+                    WriteOmitted(writer, ledger, WriteSafetyOmissionReason.SensitiveFieldScalar, null);
                     return;
                 }
                 element.WriteTo(writer);
@@ -346,7 +328,7 @@ public sealed class NeverStoreGate
     {
         public SortedSet<string> RuleIds { get; } = new(StringComparer.Ordinal);
         public SortedSet<string> Categories { get; } = new(StringComparer.Ordinal);
-        public List<CaptureScanOmission> Omissions { get; } = [];
+        public List<WriteSafetyOmission> Omissions { get; } = [];
         public int RedactionCount { get; private set; }
         public PrimaryMatch? Primary { get; private set; }
 
@@ -359,7 +341,7 @@ public sealed class NeverStoreGate
         }
 
         public void Omit(string reason, long? originalByteCount) =>
-            Omissions.Add(new CaptureScanOmission(reason, originalByteCount));
+            Omissions.Add(new WriteSafetyOmission(reason, originalByteCount));
     }
 
     private ISafetyScanner RequireConfigured()
@@ -367,12 +349,12 @@ public sealed class NeverStoreGate
         var state = _state;
         if (state.Scanner is null)
         {
-            throw new SafetyConfigurationException(state.FailureReason ?? "unknown reason");
+            throw new WriteSafetyConfigurationException(state.FailureReason ?? "unknown reason");
         }
         return state.Scanner;
     }
 
-    private static State Load(string rulesPath, string? literalsPath, SafetyBudgets budgets)
+    private static State Load(string rulesPath, string? literalsPath, WriteSafetyBudgets budgets)
     {
         if (SecretRuleSet.TryLoad(
                 rulesPath, literalsPath, budgets.MaxRuleTime, out var ruleSet, out string? reason))
@@ -409,26 +391,26 @@ public sealed class NeverStoreGate
             {
                 return scan();
             }
-            catch (SafetyScanException)
+            catch (WriteSafetyScanException)
             {
                 throw;
             }
             catch (Exception)
             {
-                throw new SafetyScannerInternalException();
+                throw new WriteSafetyScannerInternalException();
             }
         }
     }
 }
 
-public sealed record CaptureScanOmission(string Reason, long? OriginalByteCount);
+public sealed record WriteSafetyOmission(string Reason, long? OriginalByteCount);
 
-public sealed record NeverStoreScan(
+public sealed record WriteSafetyScan(
     string Redacted,
     IReadOnlyList<string> RuleIds,
     IReadOnlyList<string> Categories,
     int RedactionCount,
-    IReadOnlyList<CaptureScanOmission> Omissions,
+    IReadOnlyList<WriteSafetyOmission> Omissions,
     /// <summary>
     /// The rule a refusal names: the highest-priority accepted match, not the
     /// ordinal-first id. Null when nothing matched.

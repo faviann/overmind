@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using System.Text;
 using System.Text.Json;
 
 namespace MemSrv.Tests;
@@ -70,21 +71,23 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     protected virtual CaptureConsoleOidcOptions ConsoleOidcOptions() => new();
     protected virtual TimeProvider RuntimeTimeProvider() => TimeProvider.System;
 
-    // The same governed gate the server builds, for callers that run the
-    // disabled capture runtime in-process: built from the SAME options the
-    // host is built from, so the runtime side cannot silently diverge from the
-    // server side (HttpServerHost passes both paths).
-    protected NeverStoreGate SafetyGate()
+    // The same generalized Phase 1 gate the server builds. Authorized direct
+    // module checks and temporary in-process capture callers use the same paths
+    // as the host, so neither can silently diverge from server write safety.
+    protected WriteSafetyGate SafetyGate()
     {
         var options = RuntimeOptions();
-        return new NeverStoreGate(options.NeverStorePath, options.NeverStoreLiteralsPath);
+        return new WriteSafetyGate(options.NeverStorePath, options.NeverStoreLiteralsPath);
     }
 
     protected async Task<McpClient> ConnectAsync(string bearerKey)
+        => await ConnectAsync(_baseUrl, bearerKey);
+
+    protected static async Task<McpClient> ConnectAsync(string baseUrl, string bearerKey)
     {
         var transport = new HttpClientTransport(new HttpClientTransportOptions
         {
-            Endpoint = new Uri($"{_baseUrl}/mcp"),
+            Endpoint = new Uri($"{baseUrl}/mcp"),
             Name = "MemSrv.Server",
             AdditionalHeaders = new Dictionary<string, string> { ["Authorization"] = $"Bearer {bearerKey}" }
         });
@@ -106,6 +109,47 @@ public abstract class HttpSeamTestBase : IAsyncLifetime
     protected Task<(int ExitCode, string Stdout, string Stderr)> RunMemCtlForResultAsync(
         IReadOnlyDictionary<string, string>? extraEnvironment, params string[] args)
         => TestProcessRunner.RunMemCtlToExitAsync(RuntimeConnection, extraEnvironment, args);
+
+    protected static async Task<string> WaitForListeningUrlAsync(StringBuilder stderr)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (string line in Snapshot(stderr).Split('\n'))
+            {
+                const string marker = "Now listening on: ";
+                int markerIndex = line.IndexOf(marker, StringComparison.Ordinal);
+                if (markerIndex >= 0)
+                {
+                    return line[(markerIndex + marker.Length)..].Trim();
+                }
+            }
+            await Task.Delay(200);
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"Server never reported a listening address. stderr:{Environment.NewLine}{Snapshot(stderr)}");
+    }
+
+    protected static Task PumpAsync(StreamReader reader, StringBuilder sink) => Task.Run(async () =>
+    {
+        string? line;
+        while ((line = await reader.ReadLineAsync()) is not null)
+        {
+            lock (sink)
+            {
+                sink.AppendLine(line);
+            }
+        }
+    });
+
+    protected static string Snapshot(StringBuilder buffer)
+    {
+        lock (buffer)
+        {
+            return buffer.ToString();
+        }
+    }
 
     protected static async Task<JsonElement> CallToolAsync(McpClient client, string toolName, Dictionary<string, object?> arguments)
     {

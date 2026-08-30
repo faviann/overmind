@@ -1,4 +1,5 @@
 using Dapper;
+using MemSrv.Core;
 using Npgsql;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -416,40 +417,82 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         // Synthetic secret matching config/never_store.yaml's aws-access-key-id
         // rule — never a real credential shape beyond the prefix.
         const string fakeSecret = "AKIAFAKEFAKEFAKEFAKE";
-        await using var client = await ConnectAsync(AgentAKey);
-
-        // Memory writes REJECT: both proposal and private note paths.
-        var propose = await client.CallToolAsync("propose_memory", new Dictionary<string, object?>
+        using var server = TestProcessRunner.StartServer(new Dictionary<string, string>
         {
-            ["namespace"] = "memory-system",
-            ["type"] = "fact",
-            ["content"] = $"Synthetic credential {fakeSecret} must not persist",
-            ["source_type"] = "human"
+            ["MEMSRV_TRANSPORT"] = "http",
+            ["MEMSRV_HTTP_URL"] = "http://127.0.0.1:0",
+            ["MEMSRV_AGENT_KEYS_PATH"] = _keysPath,
+            ["MEMSRV_CONNECTION_STRING"] = RuntimeConnection
         });
-        Assert.True(propose.IsError == true, "propose_memory containing a never-store match must be rejected");
+        var serverStdout = new StringBuilder();
+        var serverStderr = new StringBuilder();
+        var outPump = PumpAsync(server.StandardOutput, serverStdout);
+        var errPump = PumpAsync(server.StandardError, serverStderr);
 
-        var note = await client.CallToolAsync("save_note", new Dictionary<string, object?>
+        try
         {
-            ["namespace"] = "memory-system",
-            ["type"] = "note",
-            ["content"] = $"Remember key {fakeSecret} for later"
-        });
-        Assert.True(note.IsError == true, "save_note containing a never-store match must be rejected");
+            string url = await WaitForListeningUrlAsync(serverStderr);
+            await using var client = await ConnectAsync(url, AgentAKey);
 
-        // Trace writes REDACT in place: the event is still recorded.
-        await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+            // Memory writes REJECT: both proposal and private note paths.
+            var propose = await client.CallToolAsync("propose_memory", new Dictionary<string, object?>
+            {
+                ["namespace"] = "memory-system",
+                ["type"] = "fact",
+                ["content"] = $"Synthetic credential {fakeSecret} must not persist",
+                ["source_type"] = "human"
+            });
+            Assert.True(propose.IsError == true, "propose_memory containing a never-store match must be rejected");
+            Assert.DoesNotContain(fakeSecret, JsonSerializer.Serialize(propose), StringComparison.Ordinal);
+
+            var note = await client.CallToolAsync("save_note", new Dictionary<string, object?>
+            {
+                ["namespace"] = "memory-system",
+                ["type"] = "note",
+                ["content"] = $"Remember key {fakeSecret} for later"
+            });
+            Assert.True(note.IsError == true, "save_note containing a never-store match must be rejected");
+            Assert.DoesNotContain(fakeSecret, JsonSerializer.Serialize(note), StringComparison.Ordinal);
+
+            // Trace writes REDACT in place: the event is still recorded.
+            JsonElement logged = await CallToolAsync(client, "log_trace", new Dictionary<string, object?>
+            {
+                ["event_type"] = "tool_result",
+                ["content"] = new { tool = "shell", ok = true, summary = $"found {fakeSecret} in config" }
+            });
+            Assert.DoesNotContain(fakeSecret, logged.GetRawText(), StringComparison.Ordinal);
+
+            // The session replay shows the redacted trace event plus the redacted
+            // notes recording the blocked writes — and the secret nowhere on
+            // either operator diagnostic stream.
+            var trace = await RunMemCtlForResultAsync(null, "trace", client.SessionId!);
+            Assert.Equal(0, trace.ExitCode);
+            Assert.Contains(" tool_result ", trace.Stdout, StringComparison.Ordinal);
+            Assert.Contains("[REDACTED:aws-access-key-id]", trace.Stdout, StringComparison.Ordinal);
+            Assert.Contains(" note ", trace.Stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain(fakeSecret, trace.Stdout, StringComparison.Ordinal);
+            Assert.DoesNotContain(fakeSecret, trace.Stderr, StringComparison.Ordinal);
+            await Task.Delay(TimeSpan.FromMilliseconds(500));
+        }
+        finally
         {
-            ["event_type"] = "tool_result",
-            ["content"] = new { tool = "shell", ok = true, summary = $"found {fakeSecret} in config" }
-        });
+            if (!server.HasExited)
+            {
+                server.Kill(entireProcessTree: true);
+            }
+            await server.WaitForExitAsync();
+            await Task.WhenAll(outPump, errPump);
+        }
 
-        // The session replay shows the redacted trace event plus the redacted
-        // notes recording the blocked writes — and the secret nowhere.
-        var trace = await RunMemCtlAsync("trace", client.SessionId!);
-        Assert.Contains(" tool_result ", trace, StringComparison.Ordinal);
-        Assert.Contains("[REDACTED:aws-access-key-id]", trace, StringComparison.Ordinal);
-        Assert.Contains(" note ", trace, StringComparison.Ordinal);
-        Assert.DoesNotContain(fakeSecret, trace, StringComparison.Ordinal);
+        Assert.Equal("", Snapshot(serverStdout));
+        string serverDiagnostics = Snapshot(serverStderr);
+        Assert.Contains("Now listening", serverDiagnostics, StringComparison.Ordinal);
+        Assert.DoesNotContain(fakeSecret, serverDiagnostics, StringComparison.Ordinal);
+
+        var rejection = Assert.Throws<WriteSafetyRejectedException>(
+            () => SafetyGate().AssertAllowed($"remember {fakeSecret}"));
+        Assert.DoesNotContain(fakeSecret, rejection.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(fakeSecret, rejection.ToString(), StringComparison.Ordinal);
 
         // Sanctioned DB-level absence check (docs/testing.md never-store gate):
         // the rejected writes must not have persisted the secret in any memory
@@ -457,7 +500,13 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         await using var connection = new NpgsqlConnection(AdminConnection);
         await connection.OpenAsync();
         var persisted = await connection.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM memories WHERE content LIKE @Pattern",
+            """
+            SELECT
+                (SELECT COUNT(*) FROM memories WHERE content LIKE @Pattern)
+              + (SELECT COUNT(*) FROM traces WHERE content::text LIKE @Pattern)
+              + (SELECT COUNT(*) FROM capture_observations
+                 WHERE safe_source_payload::text LIKE @Pattern)
+            """,
             new { Pattern = $"%{fakeSecret}%" });
         Assert.Equal(0, persisted);
     }

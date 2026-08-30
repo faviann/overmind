@@ -188,12 +188,14 @@ Optional:
 | `MEMSRV_HTTP_URL` | Kestrel bind address; defaults to `http://0.0.0.0:8080`. |
 | `MEMSRV_AGENT_ID`, `MEMSRV_NAMESPACE`, `MEMSRV_SESSION_ID` | stdio-mode identity/session (defaults are sensible for a single-agent local setup). Ignored in HTTP mode, where identity comes from the bearer key and the session is transport-derived. |
 | `MEMSRV_ALLOWED_NAMESPACES` | Comma-separated stdio-mode namespace allowlist. Unset confines the process to its default `MEMSRV_NAMESPACE`. Ignored in HTTP mode. |
-| `MEMSRV_NEVER_STORE_PATH` | Never-store rule file. Defaults to `config/never_store.yaml`, which ships in the image. A missing, empty, or invalid file makes capture unhealthy: enrollment and ingestion refuse, and the tracer exits non-zero. |
-| `MEMSRV_NEVER_STORE_LITERALS_PATH` | **Operator-owned** file of exact credential values the installation already knows, one per line, mounted read-only. Unset or absent is valid and is not a fail-closed condition. Never commit this file; the tracked rule file must never contain a real credential. |
+| `MEMSRV_NEVER_STORE_PATH` | General Phase 1 write-safety rule file. Defaults to `config/never_store.yaml`, which ships in the image. A missing, empty, or invalid rule file makes the policy unusable and fails every governed Overmind write closed. The legacy capture effects remain: enrollment and ingestion refuse, and the tracer exits non-zero. |
+| `MEMSRV_NEVER_STORE_LITERALS_PATH` | **Operator-owned** general Phase 1 write-safety file of exact credential values the installation already knows, one per line, mounted read-only. Unset, absent, or empty is valid and is not a fail-closed condition; an invalid file makes the policy unusable and fails every governed Overmind write closed. Never commit this file; the tracked rule file must never contain a real credential. |
 
 No other application configuration is required; `config/never_store.yaml` ships in the
 image. The numeric scan budgets are versioned runtime constants, not
-configuration — see [capture safety budgets](capture-safety-budgets.md).
+configuration — see [write safety](write-safety.md). The separate legacy
+128 MiB capture observation-size and fidelity ceiling remains governed by
+[capture safety budgets](capture-safety-budgets.md).
 
 ## Postgres — FINAL
 

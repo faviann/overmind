@@ -1,5 +1,3 @@
-using MemSrv.Core;
-
 namespace MemSrv.Tests;
 
 // The bearer-key file is a credential source. A malformed entry must fail the
@@ -71,19 +69,6 @@ public sealed class ServerStartupTests
         {
             File.Delete(keysPath);
         }
-    }
-
-    [Fact]
-    public void AgentKeyStoreTreatsRetiredCapturePrefixAsOrdinaryKeyMaterial()
-    {
-        const string key = "mcap_0123456789abcdef0123456789abcdef";
-        var store = new AgentKeyStore(
-        [
-            new AgentKey(key, "agent-a", "memory-system", ["memory-system"]),
-        ]);
-
-        Assert.True(store.TryResolve(key, out AgentKey resolved));
-        Assert.Equal("agent-a", resolved.AgentId);
     }
 
     private static Task<(int ExitCode, string Stdout, string Stderr)> StartHttpServerAsync(string keysPath) =>

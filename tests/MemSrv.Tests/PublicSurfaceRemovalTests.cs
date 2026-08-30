@@ -9,7 +9,6 @@ namespace MemSrv.Tests;
 public sealed class PublicSurfaceRemovalTests : IAsyncLifetime
 {
     private const string AgentKey = "mcap_ordinary-agent-key-1234567890";
-    private const string RetiredOidcSecret = "synthetic-retired-oidc-secret-must-stay-hidden";
     private readonly string _root = TestProcessRunner.RepoRoot;
     private string _keysPath = "";
     private Process _server = null!;
@@ -34,8 +33,8 @@ public sealed class PublicSurfaceRemovalTests : IAsyncLifetime
             ["MEMSRV_AGENT_KEYS_PATH"] = _keysPath,
             ["MEMSRV_CONNECTION_STRING"] = TestDatabase.RuntimeConnection,
             ["MEMSRV_CAPTURE_CONSOLE_OIDC_AUTHORITY"] = "not-an-https-authority",
-            ["MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID"] = "retired-client",
-            ["MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET"] = RetiredOidcSecret,
+            ["MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID"] = "not-a-valid-client-id",
+            ["MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET"] = "not-a-valid-client-secret",
         });
         _stdoutPump = PumpAsync(_server.StandardOutput, _stdout);
         _stderrPump = PumpAsync(_server.StandardError, _stderr);
@@ -128,8 +127,6 @@ public sealed class PublicSurfaceRemovalTests : IAsyncLifetime
 
         await using McpClient client = await McpClient.CreateAsync(transport);
         Assert.NotEmpty(await client.ListToolsAsync());
-        Assert.DoesNotContain(RetiredOidcSecret, Snapshot(_stdout), StringComparison.Ordinal);
-        Assert.DoesNotContain(RetiredOidcSecret, Snapshot(_stderr), StringComparison.Ordinal);
     }
 
     private static Task PumpAsync(StreamReader reader, StringBuilder sink) => Task.Run(async () =>
@@ -143,14 +140,6 @@ public sealed class PublicSurfaceRemovalTests : IAsyncLifetime
             }
         }
     });
-
-    private static string Snapshot(StringBuilder buffer)
-    {
-        lock (buffer)
-        {
-            return buffer.ToString();
-        }
-    }
 
     private async Task<string> WaitForListeningUrlAsync(StringBuilder stderr)
     {

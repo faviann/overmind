@@ -31,6 +31,7 @@ public static class HttpServerHost
             new WriteSafetyGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
         builder.Services.AddSingleton(provider =>
             new MemoryService(options.ConnectionString, provider.GetRequiredService<WriteSafetyGate>()));
+        builder.Services.AddHttpContextAccessor();
         builder.Services.AddSingleton<MemoryContextResolver>();
         // Per MCP session: identity from the bearer key, session id from transport.
         builder.Services.AddScoped(provider =>

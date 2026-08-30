@@ -495,20 +495,35 @@ public sealed class AcceptanceTests : HttpSeamTestBase
         Assert.DoesNotContain(fakeSecret, rejection.ToString(), StringComparison.Ordinal);
 
         // Sanctioned DB-level absence check (docs/testing.md never-store gate):
-        // the rejected writes must not have persisted the secret in any memory
-        // row.
+        // the governed writes must not have persisted the secret in any
+        // canonical or still-present capture-ledger field that can retain
+        // source content or identity.
         await using var connection = new NpgsqlConnection(AdminConnection);
         await connection.OpenAsync();
-        var persisted = await connection.ExecuteScalarAsync<long>(
+        var persisted = await connection.ExecuteScalarAsync<bool>(
             """
-            SELECT
-                (SELECT COUNT(*) FROM memories WHERE content LIKE @Pattern)
-              + (SELECT COUNT(*) FROM traces WHERE content::text LIKE @Pattern)
-              + (SELECT COUNT(*) FROM capture_observations
-                 WHERE safe_source_payload::text LIKE @Pattern)
+            SELECT EXISTS (
+              SELECT 1 FROM capture_observations
+                WHERE safe_source_payload::text LIKE @Pattern
+                   OR source::text LIKE @Pattern OR adapter::text LIKE @Pattern
+                   OR locator_native_id LIKE @Pattern
+              UNION ALL
+              SELECT 1 FROM captured_events WHERE payload::text LIKE @Pattern
+              UNION ALL
+              SELECT 1 FROM captured_event_relationships
+                WHERE target_native_id LIKE @Pattern OR target_kind LIKE @Pattern
+              UNION ALL
+              SELECT 1 FROM capture_source_streams WHERE source_session_id LIKE @Pattern
+              UNION ALL
+              SELECT 1 FROM capture_source_bindings WHERE stable_name LIKE @Pattern
+              UNION ALL
+              SELECT 1 FROM traces WHERE content::text LIKE @Pattern
+              UNION ALL
+              SELECT 1 FROM memories WHERE content LIKE @Pattern
+            )
             """,
             new { Pattern = $"%{fakeSecret}%" });
-        Assert.Equal(0, persisted);
+        Assert.False(persisted);
     }
 
     // Sanctioned direct-DB test: content_hash validity is a database-level

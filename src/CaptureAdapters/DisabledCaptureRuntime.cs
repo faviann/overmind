@@ -38,7 +38,7 @@ public static class DisabledCaptureRuntime
         IReadOnlyList<CaptureRuntimeQueueItem> queue,
         Uri captureEndpoint,
         string credential,
-        NeverStoreGate safetyGate,
+        WriteSafetyGate safetyGate,
         Func<string, CaptureRuntimeQueueItem, CancellationToken, Task> persistReceiptAsync,
         CancellationToken cancellationToken = default,
         bool terminalAtEndOfFile = false,
@@ -120,21 +120,13 @@ public static class DisabledCaptureRuntime
                         terminal.Observation,
                         maxTransportBytes);
                 observationJson = bounded.Serialized;
-                safetyGate.AssertObservationWithinBudget(observationJson);
                 candidateJson = safetyGate.ScanJson(observationJson).Redacted;
             }
-            catch (SafetyConfigurationException failure)
+            catch (Exception failure) when (failure is
+                WriteSafetyConfigurationException or WriteSafetyScanException)
             {
-                failure.ReportCaptureOutcome(
-                    adapter.Harness,
-                    evidence.ByteLength);
-                throw;
-            }
-            catch (SafetyScanException failure)
-            {
-                failure.ReportCaptureOutcome(
-                    adapter.Harness,
-                    evidence.ByteLength);
+                CaptureOutcomeAggregation.AttachWriteSafetyOutcome(
+                    adapter.Harness, failure, evidence.ByteLength);
                 throw;
             }
             if (!string.Equals(

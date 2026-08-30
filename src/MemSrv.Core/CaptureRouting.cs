@@ -11,7 +11,7 @@ namespace MemSrv.Core;
 /// </summary>
 public sealed class CaptureRoutePolicyStore(
     string connectionString,
-    NeverStoreGate neverStore)
+    WriteSafetyGate neverStore)
 {
     public async Task<Guid> ReplaceAsync(
         string stableName,

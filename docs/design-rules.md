@@ -152,7 +152,8 @@ Committed — do not re-litigate without the maintainer:
   logging, namespace isolation, and the write policy (spec §1–2).
 - **Approve / edit-then-approve / reject / retire are `memctl`-only operator
   actions**, deliberately not agent-facing tools (spec §5, §8–9).
-- **Governance lives in code, not prompts.** The never-store gate runs on
+- **Governance lives in code, not prompts.** The general write-safety gate in
+  [`write-safety.md`](write-safety.md) runs on
   every write path: **reject** for memory writes, **redact in place** for
   trace writes — dropping the event would trade a secrets risk for an audit
   hole (spec §5).
@@ -194,6 +195,8 @@ Committed — do not re-litigate without the maintainer:
 
 ## Not owned here
 
+- Write-safety rules, markers, failure codes, and scan budgets →
+  `docs/write-safety.md`
 - Testing conventions → `docs/testing.md`
 - Deployment and runtime contract → `docs/deployment-contract.md`
 - Domain vocabulary → `CONTEXT.md` and `docs/agents/domain.md`

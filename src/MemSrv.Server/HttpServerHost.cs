@@ -24,11 +24,9 @@ namespace MemSrv.Server;
 public static class HttpServerHost
 {
     // A denial-of-service guard for the disabled tracer route, deliberately
-    // three orders of magnitude below the versioned 128 MiB scanner
-    // observation budget: an unauthenticated client must not be able to make
-    // the server allocate a scanner-sized buffer. See
-    // docs/capture-safety-budgets.md, "Why the transport cap is below the
-    // scanner limit".
+    // below the legacy capture-only 128 MiB observation content/fidelity
+    // ceiling, so the HTTP route does not allocate an observation-sized
+    // buffer. See docs/capture-safety-budgets.md.
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
@@ -49,16 +47,16 @@ public static class HttpServerHost
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(keyStore);
         builder.Services.AddSingleton(timeProvider ?? TimeProvider.System);
-        builder.Services.AddSingleton(_ => new NeverStoreGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
+        builder.Services.AddSingleton(_ => new WriteSafetyGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
         builder.Services.AddSingleton(provider =>
-            new MemoryService(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
+            new MemoryService(options.ConnectionString, provider.GetRequiredService<WriteSafetyGate>()));
         builder.Services.AddSingleton(_ => new CaptureAuthority(options.ConnectionString));
         builder.Services.AddSingleton(provider => new CapturePairing(
             options.ConnectionString,
-            provider.GetRequiredService<NeverStoreGate>(),
+            provider.GetRequiredService<WriteSafetyGate>(),
             provider.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton(provider =>
-            new CaptureIngestion(options.ConnectionString, provider.GetRequiredService<NeverStoreGate>()));
+            new CaptureIngestion(options.ConnectionString, provider.GetRequiredService<WriteSafetyGate>()));
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddAntiforgery(antiforgery =>
@@ -176,8 +174,8 @@ public static class HttpServerHost
                 return Results.Created($"/capture/v1/pairing-requests/{created.RequestId}", created);
             }
             catch (Exception ex) when (ex is ArgumentException
-                or InvalidOperationException or SafetyConfigurationException
-                or SafetyScanException)
+                or InvalidOperationException or WriteSafetyConfigurationException
+                or WriteSafetyScanException)
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
@@ -300,8 +298,8 @@ public static class HttpServerHost
                     return Results.Conflict(new { error = "This Codex installation is already paired." });
                 }
                 catch (Exception ex) when (ex is ArgumentException
-                    or InvalidOperationException or SafetyConfigurationException
-                    or SafetyScanException)
+                    or InvalidOperationException or WriteSafetyConfigurationException
+                    or WriteSafetyScanException)
                 {
                     return Results.BadRequest(new { error = ex.Message });
                 }
@@ -338,8 +336,8 @@ public static class HttpServerHost
                     return Results.Conflict(new { error = "This Codex installation is already paired." });
                 }
                 catch (Exception ex) when (ex is ArgumentException
-                    or InvalidOperationException or SafetyConfigurationException
-                    or SafetyScanException)
+                    or InvalidOperationException or WriteSafetyConfigurationException
+                    or WriteSafetyScanException)
                 {
                     return Results.BadRequest(new { error = ex.Message });
                 }
@@ -380,6 +378,7 @@ public static class HttpServerHost
                 return Results.Unauthorized();
             }
 
+            string captureHarness = "other";
             try
             {
                 byte[]? body = await ReadCaptureBodyAsync(
@@ -397,6 +396,7 @@ public static class HttpServerHost
                 // Locator variants are validated here, at the wire seam; past
                 // this point only the closed internal representation exists.
                 var command = CaptureObservationCommand.FromRequest(request);
+                captureHarness = command.Source.Harness;
                 var receipt = await ingestion.ImportAsync(binding, command, http.RequestAborted);
                 return Results.Ok(receipt);
             }
@@ -412,13 +412,21 @@ public static class HttpServerHost
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
-            catch (SafetyConfigurationException ex)
+            catch (WriteSafetyConfigurationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message, outcome = ex.Outcome });
+                return Results.BadRequest(new
+                {
+                    error = ex.Message,
+                    outcome = CaptureOutcomeAggregation.FromWriteSafetyFailure(captureHarness, ex)
+                });
             }
-            catch (SafetyScanException ex)
+            catch (WriteSafetyScanException ex)
             {
-                return Results.BadRequest(new { error = ex.Message, outcome = ex.Outcome });
+                return Results.BadRequest(new
+                {
+                    error = ex.Message,
+                    outcome = CaptureOutcomeAggregation.FromWriteSafetyFailure(captureHarness, ex)
+                });
             }
             catch (InvalidOperationException ex)
             {

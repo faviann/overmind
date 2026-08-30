@@ -8,7 +8,7 @@ namespace MemSrv.Core;
 /// nothing about ingestion or canonical reads: enrolling is complete when a
 /// binding uuid comes back.
 /// </summary>
-public sealed class CaptureEnrollment(string connectionString, NeverStoreGate neverStore)
+public sealed class CaptureEnrollment(string connectionString, WriteSafetyGate neverStore)
 {
     public async Task<Guid> EnrollAsync(
         string stableName,

@@ -140,7 +140,7 @@ public sealed class CaptureRuntimeStateTests
 
         try
         {
-            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var gate = new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml"));
             var adapter = new CodexJsonlAdapter();
             var firstState = new FileCaptureRuntimeState(stateDirectory);
 
@@ -710,7 +710,7 @@ public sealed class CaptureRuntimeStateTests
                 transcript,
                 "codex-runtime-state-test",
                 state,
-                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")));
+                new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")));
 
             var claim = Assert.Single(claims);
             Assert.Equal(0, claim.SourcePosition);
@@ -800,7 +800,7 @@ public sealed class CaptureRuntimeStateTests
                 transcript,
                 "codex-runtime-transport-omission",
                 state,
-                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                 maxTransportBytes: 1_024);
 
             var claim = Assert.Single(claims);
@@ -863,7 +863,7 @@ public sealed class CaptureRuntimeStateTests
         try
         {
             var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
-            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var gate = new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml"));
             var adapter = new CodexJsonlAdapter();
 
             IReadOnlyList<CaptureRuntimeQueueItem> first =
@@ -1015,7 +1015,7 @@ public sealed class CaptureRuntimeStateTests
                     transcript,
                     "binary-overflow-runtime",
                     state,
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                     terminalAtEndOfFile: true));
 
             Assert.True(
@@ -1152,7 +1152,7 @@ public sealed class CaptureRuntimeStateTests
                         transcript,
                         "native-overlimit-runtime",
                         state,
-                        new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                        new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                         maxTransportBytes: 1_024));
 
             Assert.Contains("native_id", failure.Message, StringComparison.Ordinal);
@@ -1217,7 +1217,7 @@ public sealed class CaptureRuntimeStateTests
                     transcript,
                     "fixed-cap-stream",
                     state,
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                     maxTransportBytes: CaptureFidelityPolicy.ProductionTransportBytes * 2));
 
             Assert.True(
@@ -1270,7 +1270,7 @@ public sealed class CaptureRuntimeStateTests
                         transcript,
                         "mandatory-field-stream",
                         state,
-                        new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                        new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                         maxTransportBytes: 512));
 
             Assert.Contains("cannot fit", failure.Message, StringComparison.Ordinal);
@@ -1315,7 +1315,7 @@ public sealed class CaptureRuntimeStateTests
                         transcript,
                         "transport-identity",
                         state,
-                        new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                        new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                         maxTransportBytes: 512));
 
             Assert.Contains(
@@ -1359,9 +1359,9 @@ public sealed class CaptureRuntimeStateTests
             $"Streaming count allocated {allocated:N0} bytes; the bounded " +
             "counting path should not materialize the 16 MiB original JSON.");
         Assert.True(
-            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            clock.Elapsed < WriteSafetyBudgets.Default.MaxScanTime,
             $"Streaming count took {clock.Elapsed}; the published deadline is " +
-            $"{SafetyBudgets.Default.MaxScanTime}.");
+            $"{WriteSafetyBudgets.Default.MaxScanTime}.");
     }
 
     [Fact]
@@ -1411,9 +1411,9 @@ public sealed class CaptureRuntimeStateTests
             allocated < 4L * 1024 * 1024,
             $"Bounded binary rewriting allocated {allocated:N0} bytes.");
         Assert.True(
-            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            clock.Elapsed < WriteSafetyBudgets.Default.MaxScanTime,
             $"Binary rewriting took {clock.Elapsed}; the published deadline is " +
-            $"{SafetyBudgets.Default.MaxScanTime}.");
+            $"{WriteSafetyBudgets.Default.MaxScanTime}.");
         JsonElement block = selected.Observation.GetProperty("payload")
             .GetProperty("content")[0];
         Assert.False(block.TryGetProperty("byte_payload", out _));
@@ -1490,9 +1490,9 @@ public sealed class CaptureRuntimeStateTests
         rewritePass.WriteByte(2);
         time.Advance(TimeSpan.FromSeconds(11));
 
-        SafetyScanException failure = Assert.Throws<SafetyScanException>(
+        WriteSafetyScanException failure = Assert.Throws<WriteSafetyScanException>(
             deadline.AssertWithinDeadline);
-        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.FailureCode);
         Assert.Contains("30-second deadline", failure.Message, StringComparison.Ordinal);
     }
 
@@ -1719,7 +1719,7 @@ public sealed class CaptureRuntimeStateTests
                     transcript,
                     "invalid-bound-stream",
                     state,
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                     maxTransportBytes: transportBound));
             Assert.Empty((await state.ReadAsync()).Streams);
         }
@@ -1755,7 +1755,7 @@ public sealed class CaptureRuntimeStateTests
                     transcript,
                     "metadata-heavy-stream",
                     state,
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                     transcriptIdentity: transcriptIdentity,
                     maxTransportBytes: transportBound);
 
@@ -1807,7 +1807,7 @@ public sealed class CaptureRuntimeStateTests
                 claims,
                 new Uri($"http://127.0.0.1:{port}"),
                 $"mcap_{Guid.NewGuid():N}",
-                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                 (_, _, _) => Task.CompletedTask,
                 transcriptIdentity: transcriptIdentity,
                 maxTransportBytes: transportBound);
@@ -1826,7 +1826,7 @@ public sealed class CaptureRuntimeStateTests
             }
             Assert.Equal(
                 claim.RedactedSafeCandidate,
-                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"))
+                new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml"))
                     .ScanJson(request).Redacted);
         }
         finally
@@ -1878,7 +1878,7 @@ public sealed class CaptureRuntimeStateTests
                     transcript,
                     "stream",
                     replacingState,
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")));
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")));
 
             CaptureRuntimeQueueItem claim = Assert.Single(claims);
             Assert.Contains(originalMarker, claim.RedactedSafeCandidate);
@@ -1930,7 +1930,7 @@ public sealed class CaptureRuntimeStateTests
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var delayed = new ClaimDelayingRuntimeState(
                 inner, firstClaimEntered, releaseFirstClaim);
-            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var gate = new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml"));
 
             Task<IReadOnlyList<CaptureRuntimeQueueItem>> first =
                 CodexCaptureClaimer.ClaimCompletedAsync(
@@ -1989,7 +1989,7 @@ public sealed class CaptureRuntimeStateTests
         try
         {
             var inner = new FileCaptureRuntimeState(stateDirectory);
-            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var gate = new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml"));
             Assert.Single(await CodexCaptureClaimer.ClaimCompletedAsync(
                 new CodexJsonlAdapter(),
                 transcript,
@@ -2069,7 +2069,7 @@ public sealed class CaptureRuntimeStateTests
         try
         {
             var inner = new FileCaptureRuntimeState(stateDirectory);
-            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var gate = new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml"));
             Assert.Single(await CodexCaptureClaimer.ClaimCompletedAsync(
                 new CodexJsonlAdapter(),
                 transcript,
@@ -2732,7 +2732,7 @@ public sealed class CaptureRuntimeStateTests
                 transcript,
                 "stream",
                 fileState,
-                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")));
+                new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")));
             CaptureRuntimeQueueItem staleQueued = Assert.Single(
                 (await fileState.ReadAsync()).Streams,
                 stream => stream.SourceStream == "stream").Queue[0];
@@ -2747,7 +2747,7 @@ public sealed class CaptureRuntimeStateTests
                 transcript,
                 "stream",
                 observingState,
-                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                 callerCancellation.Token);
 
             CaptureStreamStoppedException stopped =
@@ -2796,7 +2796,7 @@ public sealed class CaptureRuntimeStateTests
         try
         {
             var state = new FileCaptureRuntimeState(stateDirectory);
-            var gate = new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"));
+            var gate = new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml"));
             await CodexCaptureClaimer.ClaimCompletedAsync(
                 new CodexJsonlAdapter(),
                 transcript,
@@ -2853,7 +2853,7 @@ public sealed class CaptureRuntimeStateTests
                 transcript,
                 "stream",
                 state,
-                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")));
+                new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")));
             CaptureRuntimeSnapshot beforeCancellation = await state.ReadAsync();
             using var cancellation = new CancellationTokenSource();
             cancellation.Cancel();
@@ -2864,7 +2864,7 @@ public sealed class CaptureRuntimeStateTests
                     transcript,
                     "stream",
                     state,
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                     cancellation.Token));
 
             Assert.Equal(
@@ -3083,7 +3083,7 @@ public sealed class CaptureRuntimeStateTests
                 transcript,
                 "incomplete-stream",
                 state,
-                new NeverStoreGate(Path.Combine(root, "config/never_store.yaml"))));
+                new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml"))));
             Assert.Empty((await state.ReadAsync()).Streams);
         }
         finally
@@ -3108,11 +3108,11 @@ public sealed class CaptureRuntimeStateTests
         try
         {
             var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
-            var missingGate = new NeverStoreGate(
+            var missingGate = new WriteSafetyGate(
                 Path.Combine(directory, "missing-never-store.yaml"));
 
-            SafetyConfigurationException failure =
-                await Assert.ThrowsAsync<SafetyConfigurationException>(
+            WriteSafetyConfigurationException failure =
+                await Assert.ThrowsAsync<WriteSafetyConfigurationException>(
                     () => CodexCaptureClaimer.ClaimCompletedAsync(
                         new CodexJsonlAdapter(),
                         transcript,
@@ -3120,11 +3120,11 @@ public sealed class CaptureRuntimeStateTests
                         state,
                         missingGate));
 
-            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
-            Assert.Equal("complete", failure.Outcome?.CaptureFidelity);
+            Assert.Equal("blocked", CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)?.CaptureHealth);
+            Assert.Equal("complete", CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)?.CaptureFidelity);
             Assert.Equal(
                 CaptureOutcomeReason.ScannerPolicyUnavailable,
-                Assert.Single(failure.Outcome!.Counters).Reason);
+                Assert.Single(CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)!.Counters).Reason);
             Assert.Empty((await state.ReadAsync()).Streams);
         }
         finally
@@ -3150,20 +3150,20 @@ public sealed class CaptureRuntimeStateTests
         {
             var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
 
-            SafetyScannerInternalException failure =
-                await Assert.ThrowsAsync<SafetyScannerInternalException>(
+            WriteSafetyScannerInternalException failure =
+                await Assert.ThrowsAsync<WriteSafetyScannerInternalException>(
                     () => CodexCaptureClaimer.ClaimCompletedAsync(
                         new CodexJsonlAdapter(),
                         transcript,
                         "scanner-internal-stream",
                         state,
-                        new NeverStoreGate(new ThrowingSafetyScanner())));
+                        new WriteSafetyGate(new ThrowingSafetyScanner())));
 
-            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
-            Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
+            Assert.Equal("blocked", CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.FailureCode);
             Assert.Equal(
                 CaptureOutcomeReason.ScannerInternalFailure,
-                Assert.Single(failure.Outcome!.Counters).Reason);
+                Assert.Single(CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)!.Counters).Reason);
             Assert.Empty((await state.ReadAsync()).Streams);
         }
         finally
@@ -3189,19 +3189,19 @@ public sealed class CaptureRuntimeStateTests
         {
             var state = new FileCaptureRuntimeState(Path.Combine(directory, "state"));
 
-            SafetyScanException failure = await Assert.ThrowsAsync<SafetyScanException>(
+            WriteSafetyScanException failure = await Assert.ThrowsAsync<WriteSafetyScanException>(
                 () => CodexCaptureClaimer.ClaimCompletedAsync(
                     new AdapterFidelityFailureAdapter(),
                     transcript,
                     "adapter-fidelity-stream",
                     state,
-                    new NeverStoreGate(Path.Combine(
+                    new WriteSafetyGate(Path.Combine(
                         TestProcessRunner.RepoRoot,
                         "config/never_store.yaml"))));
 
-            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
-            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
-            CaptureOutcomeCounter counter = Assert.Single(failure.Outcome!.Counters);
+            Assert.Equal("blocked", CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.FailureCode);
+            CaptureOutcomeCounter counter = Assert.Single(CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)!.Counters);
             Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, counter.Reason);
             Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
             Assert.Empty((await state.ReadAsync()).Streams);
@@ -3231,14 +3231,14 @@ public sealed class CaptureRuntimeStateTests
                     fixture,
                     sourceStream,
                     state,
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                     terminalAtEndOfFile: true);
             Assert.NotEmpty(claims);
             CaptureRuntimeStreamState beforeDelivery =
                 Assert.Single((await state.ReadAsync()).Streams);
             bool persistedReceipt = false;
 
-            SafetyScanException failure = await Assert.ThrowsAsync<SafetyScanException>(
+            WriteSafetyScanException failure = await Assert.ThrowsAsync<WriteSafetyScanException>(
                 () => DisabledCaptureRuntime.RunClaimedFixtureAsync(
                     new TransportSerializationFailureAdapter(),
                     fixture,
@@ -3246,7 +3246,7 @@ public sealed class CaptureRuntimeStateTests
                     claims,
                     new Uri("http://127.0.0.1:1"),
                     "unused",
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                     (_, _, _) =>
                     {
                         persistedReceipt = true;
@@ -3255,9 +3255,9 @@ public sealed class CaptureRuntimeStateTests
                     terminalAtEndOfFile: true));
 
             Assert.False(persistedReceipt);
-            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
-            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
-            CaptureOutcomeCounter counter = Assert.Single(failure.Outcome!.Counters);
+            Assert.Equal("blocked", CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.FailureCode);
+            CaptureOutcomeCounter counter = Assert.Single(CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)!.Counters);
             Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, counter.Reason);
             Assert.Equal(CaptureSizeBand.UpTo1MiB, counter.SizeBand);
             CaptureRuntimeStreamState afterDelivery =
@@ -3297,13 +3297,13 @@ public sealed class CaptureRuntimeStateTests
                     fixture,
                     sourceStream,
                     state,
-                    new NeverStoreGate(Path.Combine(root, "config/never_store.yaml")),
+                    new WriteSafetyGate(Path.Combine(root, "config/never_store.yaml")),
                     terminalAtEndOfFile: true);
             Assert.NotEmpty(claims);
             bool persistedReceipt = false;
 
-            SafetyScannerInternalException failure =
-                await Assert.ThrowsAsync<SafetyScannerInternalException>(
+            WriteSafetyScannerInternalException failure =
+                await Assert.ThrowsAsync<WriteSafetyScannerInternalException>(
                     () => DisabledCaptureRuntime.RunClaimedFixtureAsync(
                         new CodexJsonlAdapter(),
                         fixture,
@@ -3311,7 +3311,7 @@ public sealed class CaptureRuntimeStateTests
                         claims,
                         new Uri("http://127.0.0.1:1"),
                         "unused",
-                        new NeverStoreGate(new ThrowingSafetyScanner()),
+                        new WriteSafetyGate(new ThrowingSafetyScanner()),
                         (_, _, _) =>
                         {
                             persistedReceipt = true;
@@ -3320,11 +3320,11 @@ public sealed class CaptureRuntimeStateTests
                         terminalAtEndOfFile: true));
 
             Assert.False(persistedReceipt);
-            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
-            Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
+            Assert.Equal("blocked", CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)?.CaptureHealth);
+            Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.FailureCode);
             Assert.Equal(
                 CaptureOutcomeReason.ScannerInternalFailure,
-                Assert.Single(failure.Outcome!.Counters).Reason);
+                Assert.Single(CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure)!.Counters).Reason);
             Assert.NotEmpty(Assert.Single((await state.ReadAsync()).Streams).Queue);
         }
         finally
@@ -4080,7 +4080,7 @@ public sealed class CaptureRuntimeStateTests
                     transcript,
                     "scanner-omission-stream",
                     state,
-                    new NeverStoreGate(new SelectiveOmissionScanner())));
+                    new WriteSafetyGate(new SelectiveOmissionScanner())));
 
             CaptureOutcomeCounter counter = Assert.Single(claim.Outcome.Counters);
             Assert.Equal(CaptureOutcomeReason.LeafExceedsLimit, counter.Reason);

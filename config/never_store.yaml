@@ -15,7 +15,7 @@
 # allows. Prefer a short covering stem ("key") over one literal per spelling
 # ("api_key,apikey,api-key"): each prefilter costs a full case-insensitive
 # scan of the leaf, so fewer, broader stems are both safer and cheaper.
-# SafetyGateTests.EveryPatternAlternativeIsReachableThroughItsPrefilter sweeps
+# WriteSafetyTests.EveryPatternAlternativeIsReachableThroughItsPrefilter sweeps
 # every alternation path in this file and fails if one is unreachable.
 #
 # Overlap resolution: overlapping matches merge into one union span; the span
@@ -29,7 +29,7 @@
 # credential.
 #
 # Numeric scan budgets are versioned runtime constants, not configuration; see
-# docs/capture-safety-budgets.md.
+# docs/write-safety.md.
 version: "never-store/2026-07-26.2"
 
 rules:

@@ -8,14 +8,12 @@ namespace MemSrv.Tests;
 // tests call it directly. That is the highest seam at which rule-set
 // validation, deterministic overlap resolution, bounded decoding, and the
 // numeric scan budgets are observable at all: none of them has an MCP tool or
-// a memctl command, and the HTTP capture route is capped at 1 MB by transport
-// long before a scanner budget is reachable. End-to-end proof that the same
-// gate governs real writes lives in CaptureTests, AcceptanceTests,
-// MemoryServiceTests, and WorkstreamToolsTests.
+// a memctl command. End-to-end proof that the same gate governs real writes
+// lives in AcceptanceTests, MemoryServiceTests, and WorkstreamToolsTests.
 //
 // Every credential in this file is synthetic. Nothing here is, or resembles,
 // a live credential beyond a provider prefix.
-public sealed class SafetyGateTests : IDisposable
+public sealed class WriteSafetyTests : IDisposable
 {
     private const string FakeAwsKeyId = "AKIA" + "FAKEFAKEFAKEFAKE";
     private readonly string _directory = Path.Combine(
@@ -23,7 +21,7 @@ public sealed class SafetyGateTests : IDisposable
     private readonly string _shippedRules =
         Path.Combine(TestProcessRunner.RepoRoot, "config/never_store.yaml");
 
-    public SafetyGateTests() => Directory.CreateDirectory(_directory);
+    public WriteSafetyTests() => Directory.CreateDirectory(_directory);
 
     public void Dispose()
     {
@@ -84,6 +82,12 @@ public sealed class SafetyGateTests : IDisposable
             "no prefilter"
         },
         {
+            "empty pattern",
+            "version: \"v1\"\nrules:\n  - id: a\n    category: provider_token\n" +
+            "    priority: 1\n    prefilter: AKIA\n    matcher: regex\n    pattern: \"\"\n",
+            "empty pattern"
+        },
+        {
             "unsupported matcher",
             "version: \"v1\"\nrules:\n  - id: a\n    category: provider_token\n" +
             "    priority: 1\n    prefilter: AKIA\n    matcher: entropy\n    pattern: AKIA\n",
@@ -109,31 +113,39 @@ public sealed class SafetyGateTests : IDisposable
             File.WriteAllText(path, contents);
         }
 
-        var gate = new NeverStoreGate(path);
+        var gate = new WriteSafetyGate(path);
 
         Assert.False(gate.IsConfigured, scenario);
         Assert.Contains(expectedReason, gate.FailureReason!, StringComparison.OrdinalIgnoreCase);
         // Constructible, but every governed call refuses.
-        Assert.Throws<SafetyConfigurationException>(() => gate.Scan("anything"));
-        Assert.Throws<SafetyConfigurationException>(() => gate.Redact("anything"));
-        Assert.Throws<SafetyConfigurationException>(() => gate.AssertAllowed("anything"));
-        Assert.Throws<SafetyConfigurationException>(() => gate.ScanJson("{}"));
-        Assert.Throws<SafetyConfigurationException>(() => gate.AssertAllowedObject(new { a = 1 }));
-        Assert.Throws<SafetyConfigurationException>(
-            () => gate.AssertObservationWithinBudget("{}"));
+        Assert.Throws<WriteSafetyConfigurationException>(() => gate.Scan("anything"));
+        Assert.Throws<WriteSafetyConfigurationException>(() => gate.Redact("anything"));
+        Assert.Throws<WriteSafetyConfigurationException>(() => gate.AssertAllowed("anything"));
+        Assert.Throws<WriteSafetyConfigurationException>(() => gate.ScanJson("{}"));
+        Assert.Throws<WriteSafetyConfigurationException>(() => gate.AssertAllowedObject(new { a = 1 }));
         Assert.Contains(gate.FailureReason!,
-            Assert.Throws<SafetyConfigurationException>(() => gate.Scan("x")).Message);
+            Assert.Throws<WriteSafetyConfigurationException>(() => gate.Scan("x")).Message);
     }
 
     [Fact]
     public void ShippedRuleSetLoadsAndCarriesAStableVersion()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         Assert.True(gate.IsConfigured, gate.FailureReason);
         Assert.Null(gate.FailureReason);
         Assert.StartsWith("never-store/", gate.RuleSetVersion);
-        Assert.Equal(gate.RuleSetVersion, new NeverStoreGate(_shippedRules).RuleSetVersion);
-        Assert.Equal(SafetyBudgets.CurrentVersion, gate.Budgets.Version);
+        Assert.Equal(gate.RuleSetVersion, new WriteSafetyGate(_shippedRules).RuleSetVersion);
+        Assert.Equal(WriteSafetyBudgets.CurrentVersion, gate.Budgets.Version);
+    }
+
+    [Fact]
+    public void UnreadableRuleConfigurationFailsClosedWithASafeReason()
+    {
+        var gate = new WriteSafetyGate("/proc/1/mem");
+
+        Assert.False(gate.IsConfigured);
+        Assert.Contains("could not be read", gate.FailureReason);
+        Assert.Throws<WriteSafetyConfigurationException>(() => gate.Scan("safe candidate"));
     }
 
     [Fact]
@@ -141,7 +153,7 @@ public sealed class SafetyGateTests : IDisposable
     {
         string path = Path.Combine(_directory, "reloadable.yaml");
         File.WriteAllText(path, SingleRule("first-rule", "AKIA", @"\bAKIA[0-9A-Z]{16}\b"));
-        var gate = new NeverStoreGate(path);
+        var gate = new WriteSafetyGate(path);
         string firstVersion = gate.RuleSetVersion;
         Assert.Equal($"[REDACTED:first-rule]", gate.Redact(FakeAwsKeyId));
 
@@ -163,7 +175,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void OverlappingMatchesResolveByPriorityThenLengthDeterministically()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
 
         // "Authorization: Bearer <token>" matches authorization-header
         // (priority 96) and bearer-token (priority 90) on overlapping spans.
@@ -184,6 +196,67 @@ public sealed class SafetyGateTests : IDisposable
         Assert.Equal(
             "[REDACTED:bearer-token]",
             gate.Redact("bearer abcdefghijklmnopqrstuvwxyz012345"));
+    }
+
+    [Fact]
+    public void OverlapAttributionUsesTransitivePriorityLengthAndOrdinalRules()
+    {
+        string path = Path.Combine(_directory, "overlap-ranking.yaml");
+        File.WriteAllText(path, """
+            version: "overlap-ranking/v1"
+            rules:
+              - id: left
+                category: provider_token
+                priority: 10
+                prefilter: abc
+                matcher: regex
+                pattern: abcde
+              - id: middle
+                category: auth_header
+                priority: 20
+                prefilter: def
+                matcher: regex
+                pattern: defgh
+              - id: right
+                category: credential_url
+                priority: 15
+                prefilter: ghi
+                matcher: regex
+                pattern: ghijk
+              - id: z-short
+                category: provider_token
+                priority: 30
+                prefilter: cde
+                matcher: regex
+                pattern: cde
+              - id: b-long
+                category: auth_header
+                priority: 30
+                prefilter: abc
+                matcher: regex
+                pattern: abcdef
+              - id: zeta
+                category: provider_token
+                priority: 40
+                prefilter: mnop
+                matcher: regex
+                pattern: mnop
+              - id: alpha
+                category: auth_header
+                priority: 40
+                prefilter: mnop
+                matcher: regex
+                pattern: mnop
+            """);
+        var gate = new WriteSafetyGate(path);
+
+        WriteSafetyScan transitive = gate.Scan("abcdefghijk");
+        Assert.Equal("[REDACTED:b-long]", transitive.Redacted);
+        Assert.Equal("b-long", transitive.PrimaryRuleId);
+
+        WriteSafetyScan ordinalTie = gate.Scan("mnop");
+        Assert.Equal("[REDACTED:alpha]", ordinalTie.Redacted);
+        Assert.Equal("alpha", ordinalTie.PrimaryRuleId);
     }
 
     // --- AC2: rule families over a synthetic positive corpus ---------------
@@ -272,7 +345,7 @@ public sealed class SafetyGateTests : IDisposable
     public void SyntheticCredentialCorpusIsRedactedByItsRule(
         string scenario, string value, string expectedRuleId)
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         var result = gate.Scan(value);
 
         Assert.Contains(expectedRuleId, result.RuleIds);
@@ -293,7 +366,7 @@ public sealed class SafetyGateTests : IDisposable
     {
         Assert.True(
             SecretRuleSet.TryLoad(
-                _shippedRules, null, SafetyBudgets.Default.MaxRuleTime,
+                _shippedRules, null, WriteSafetyBudgets.Default.MaxRuleTime,
                 out var ruleSet, out string? reason),
             reason);
 
@@ -363,7 +436,7 @@ public sealed class SafetyGateTests : IDisposable
             """);
         Assert.True(
             SecretRuleSet.TryLoad(
-                path, null, SafetyBudgets.Default.MaxRuleTime, out var ruleSet, out string? reason),
+                path, null, WriteSafetyBudgets.Default.MaxRuleTime, out var ruleSet, out string? reason),
             reason);
 
         var unreachable = UnreachableAlternatives(ruleSet!.Rules);
@@ -406,7 +479,7 @@ public sealed class SafetyGateTests : IDisposable
     [InlineData("privatekey=synthetic-fake-value-0108")]
     public void SeparatorVariantsOfAGovernedNameAreRedactedInFreeText(string assignment)
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
 
         var result = gate.Scan(assignment);
 
@@ -422,7 +495,7 @@ public sealed class SafetyGateTests : IDisposable
     [InlineData("private-key")]
     public void SeparatorVariantsOfAGovernedPropertyNameRedactTheWholeLeaf(string name)
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
 
         var result = gate.ScanJson($$"""{"{{name}}":"synthetic-fake-value-0109"}""");
 
@@ -441,7 +514,7 @@ public sealed class SafetyGateTests : IDisposable
     [InlineData("Proxy-Authorization: synthetic.fake.opaque.value")]
     public void ASchemeLessAuthenticationHeaderIsRedacted(string header)
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
 
         var result = gate.Scan(header);
 
@@ -459,7 +532,7 @@ public sealed class SafetyGateTests : IDisposable
     [InlineData("""log line: 'client_secret' = 'synthetic-fake-value-0303'""")]
     public void SerializedJsonAppearingAsFreeTextIsStillRedacted(string line)
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
 
         var result = gate.Scan(line);
 
@@ -491,7 +564,7 @@ public sealed class SafetyGateTests : IDisposable
     [MemberData(nameof(NegativeCorpus))]
     public void OrdinaryTranscriptShapesAreNotRedacted(string scenario, string value)
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         var result = gate.Scan(value);
 
         Assert.Equal(value, result.Redacted);
@@ -510,7 +583,7 @@ public sealed class SafetyGateTests : IDisposable
     [InlineData("nosecret - reviewed and approved by the transcript author")]
     public void TranscriptControlledAllowlistMarkersHaveNoEffect(string marker)
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
 
         Assert.Contains(
             "[REDACTED:aws-access-key-id]", gate.Redact($"{FakeAwsKeyId} {marker}"));
@@ -526,7 +599,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void StructuredScanRedactsLeafSpansAndNeverRewritesSerializedJson()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         string json = $$"""
             {"outer":{"note":"key {{FakeAwsKeyId}} was rotated","count":3,
              "list":["safe","also {{FakeAwsKeyId}}"]},"safe":"untouched"}
@@ -551,7 +624,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void SensitiveFieldWithoutAnExactSpanOmitsThatLeafAndKeepsSafeSiblings()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         string json = """
             {"keep":"visible","password":8675309,"credentials":{"user":"u","pass":"p"},
              "token":["synthetic-fake-one","synthetic-fake-two"],"absent":null}
@@ -577,7 +650,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void SecretsInPropertyNamesCrossTheSameRulesAsValues()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         // An env dump keyed by its value, a credential used as a map key: the
         // secret is the NAME, and nothing scans the value side.
         string json = $$"""
@@ -599,7 +672,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void SiblingPropertyNamesThatCollapseToTheSameTextOmitTheWholeObject()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         // Two distinct secrets, one redacted name: emitting both would write a
         // duplicate key and silently lose a value on re-parse.
         string json = $$"""
@@ -620,10 +693,10 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void LiterallyDuplicateSourceKeysWithNoSecretsPassThroughWithoutOmission()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         // Duplicate keys are legal JSON that JsonDocument preserves. Nothing was
         // redacted here, so the collision was in the SOURCE, not caused by the
-        // gate: dropping the object would be a fidelity loss unrelated to secrets.
+        // gate: dropping the object would lose safe source structure.
         const string json = """
             {"env":{"a":1,"a":2},"safe":"untouched"}
             """;
@@ -644,7 +717,7 @@ public sealed class SafetyGateTests : IDisposable
         const string configuredValue = "synthetic-operator-literal-0004";
         string literals = Path.Combine(_directory, "overlap-literals.txt");
         File.WriteAllText(literals, configuredValue + "\n");
-        var gate = new NeverStoreGate(_shippedRules, literals);
+        var gate = new WriteSafetyGate(_shippedRules, literals);
 
         // The literal (priority int.MaxValue) sits strictly INSIDE the
         // private-key block (priority 100). Discarding the key-block match
@@ -665,8 +738,8 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void OversizedLeafIsWhollyOmittedWhileSafeSiblingsRemain()
     {
-        var gate = new NeverStoreGate(
-            _shippedRules, null, SafetyBudgets.Default with { MaxLeafBytes = 32 });
+        var gate = new WriteSafetyGate(
+            _shippedRules, null, WriteSafetyBudgets.Default with { MaxLeafBytes = 32 });
         string json = JsonSerializer.Serialize(new
         {
             small = "kept",
@@ -680,19 +753,19 @@ public sealed class SafetyGateTests : IDisposable
         Assert.Equal(
             "[OMITTED:leaf_exceeds_limit]", document.RootElement.GetProperty("big").GetString());
         Assert.Equal(["leaf_exceeds_limit"], result.OmissionReasons);
-        CaptureScanOmission omission = Assert.Single(result.Omissions);
+        WriteSafetyOmission omission = Assert.Single(result.Omissions);
         Assert.Equal(64, omission.OriginalByteCount);
     }
 
     [Fact]
     public void ARequiredValueThatCannotBeInspectedCompletelyFailsClosed()
     {
-        var gate = new NeverStoreGate(
-            _shippedRules, null, SafetyBudgets.Default with { MaxLeafBytes = 8 });
+        var gate = new WriteSafetyGate(
+            _shippedRules, null, WriteSafetyBudgets.Default with { MaxLeafBytes = 8 });
 
-        var failure = Assert.Throws<SafetyScanException>(
+        var failure = Assert.Throws<WriteSafetyScanException>(
             () => gate.AssertAllowed(new string('y', 64)));
-        Assert.Equal(CaptureOutcomeReason.RequiredInspectionIncomplete, failure.OutcomeReason);
+        Assert.Equal(WriteSafetyFailureCode.RequiredInspectionIncomplete, failure.FailureCode);
         Assert.Contains("could not be inspected completely", failure.Message);
         Assert.Contains("leaf_exceeds_limit", failure.Message);
     }
@@ -702,7 +775,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void OneLevelPercentHexAndBase64EncodingsAreDecodedAndTheEncodedSpanRedacted()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         string percent = string.Concat(FakeAwsKeyId.Select(c => $"%{(int)c:X2}"));
         string hex = Convert.ToHexString(Encoding.UTF8.GetBytes(FakeAwsKeyId)).ToLowerInvariant();
         string base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(FakeAwsKeyId));
@@ -719,7 +792,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void Base64UrlEncodedCredentialsAreDecodedToo()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         // Chosen so the base64url form genuinely differs from the standard
         // form: the '_' falls where no standard-alphabet run of the encoding
         // decodes back to the credential.
@@ -738,7 +811,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void AnEncodedCredentialsFileLongerThanTheOldCapIsStillDecoded()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         // A base64'd credentials file: well past the previous 4,096-character
         // qualification cap, well inside the published 65,536 one.
         string credentialsFile =
@@ -746,7 +819,7 @@ public sealed class SafetyGateTests : IDisposable
                 $"# synthetic credentials file line {index:0000} of padding text\n"))
             + $"aws_access_key_id = {FakeAwsKeyId}\n";
         string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentialsFile));
-        Assert.InRange(encoded.Length, 4_097, SafetyBudgets.Default.MaxDecoderCandidateLength);
+        Assert.InRange(encoded.Length, 4_097, WriteSafetyBudgets.Default.MaxDecoderCandidateLength);
 
         var result = gate.Scan($"blob {encoded} end");
 
@@ -762,7 +835,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void AnEncodedAssignmentInsideABlobIsDecodedAndRedacted()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         string encoded = Convert.ToBase64String(
             Encoding.UTF8.GetBytes("password=synthetic-fake-pw-0201"));
 
@@ -779,7 +852,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void ADecodedCandidateWithBinaryFramingIsStillScannedRunByRun()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         string encoded = "AAAA" + Convert.ToBase64String(Encoding.UTF8.GetBytes(FakeAwsKeyId));
 
         var result = gate.Scan($"blob {encoded} end");
@@ -794,7 +867,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void AnOddLengthHexRunIsTriedOnBothAlignments()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         // A stray leading nibble: only the alignment that drops the FIRST
         // character decodes back to the credential.
         string hex = "f"
@@ -810,14 +883,14 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void AnEncodedRunBeyondTheCandidateLengthCapIsSkippedNotFailedClosed()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         // The accepted residual risk, stated as a test so it cannot drift into
         // an unnoticed fail-open OR an unnoticed availability loss: a run this
         // long is not decoded, and the scan still succeeds.
         string oversized = Convert.ToBase64String(
             Encoding.UTF8.GetBytes(
                 new string('p', 60_000) + $" aws_access_key_id = {FakeAwsKeyId}"));
-        Assert.True(oversized.Length > SafetyBudgets.Default.MaxDecoderCandidateLength);
+        Assert.True(oversized.Length > WriteSafetyBudgets.Default.MaxDecoderCandidateLength);
 
         var result = gate.Scan(oversized);
 
@@ -829,17 +902,17 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void DecoderCandidateExtractionCarriesTheSameMatcherTimeout()
     {
-        var gate = new NeverStoreGate(
+        var gate = new WriteSafetyGate(
             _shippedRules,
             null,
-            SafetyBudgets.Default with { MaxRuleTime = TimeSpan.FromTicks(1) });
+            WriteSafetyBudgets.Default with { MaxRuleTime = TimeSpan.FromTicks(1) });
         // No rule prefilter hits this value, so the only matcher that runs is
         // decoder candidate extraction. Without a timeout it would run to
         // completion; with one it must fail the scan closed.
         string pathological = string.Concat(Enumerable.Repeat("0123456789abcdef", 200_000));
 
-        var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(pathological));
-        Assert.Equal(CaptureOutcomeReason.MatcherTimeout, failure.OutcomeReason);
+        var failure = Assert.Throws<WriteSafetyScanException>(() => gate.Scan(pathological));
+        Assert.Equal(WriteSafetyFailureCode.MatcherTimeout, failure.FailureCode);
         Assert.Contains("decoder candidate scan", failure.Message);
         Assert.Contains("matcher timeout", failure.Message);
     }
@@ -847,7 +920,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void DecodingIsExactlyOneLevelDeep()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         string once = Convert.ToBase64String(Encoding.UTF8.GetBytes(FakeAwsKeyId));
         string twice = Convert.ToBase64String(Encoding.UTF8.GetBytes(once));
 
@@ -860,7 +933,7 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void MalformedAndNonTextEncodingsAreIgnoredRatherThanGuessedAt()
     {
-        var gate = new NeverStoreGate(_shippedRules);
+        var gate = new WriteSafetyGate(_shippedRules);
         // Truncated base64, odd-length hex, and a decoded binary blob.
         string binary = Convert.ToBase64String([.. Enumerable.Range(0, 48).Select(i => (byte)i)]);
         foreach (string value in new[]
@@ -881,81 +954,82 @@ public sealed class SafetyGateTests : IDisposable
     [Fact]
     public void MatchCountBudgetExhaustionFailsClosed()
     {
-        var gate = new NeverStoreGate(
-            _shippedRules, null, SafetyBudgets.Default with { MaxMatches = 2 });
+        var gate = new WriteSafetyGate(
+            _shippedRules, null, WriteSafetyBudgets.Default with { MaxMatches = 2 });
 
         Assert.Equal(2, gate.Scan($"{FakeAwsKeyId} {FakeAwsKeyId}").RedactionCount);
-        var failure = Assert.Throws<SafetyScanException>(
+        var failure = Assert.Throws<WriteSafetyScanException>(
             () => gate.Scan($"{FakeAwsKeyId} {FakeAwsKeyId} {FakeAwsKeyId}"));
-        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+        Assert.Equal(WriteSafetyFailureCode.ScanBudgetExhausted, failure.FailureCode);
         Assert.Contains("match-count budget of 2", failure.Message);
     }
 
     [Fact]
     public void DecoderCandidateBudgetExhaustionFailsClosed()
     {
-        var gate = new NeverStoreGate(
-            _shippedRules, null, SafetyBudgets.Default with { MaxDecoderCandidates = 2 });
+        var gate = new WriteSafetyGate(
+            _shippedRules, null, WriteSafetyBudgets.Default with { MaxDecoderCandidates = 2 });
         string flood = string.Join(' ', Enumerable.Range(0, 64)
             .Select(index => Convert.ToBase64String(
                 Encoding.UTF8.GetBytes($"synthetic-candidate-{index:0000}"))));
 
-        var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(flood));
-        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+        var failure = Assert.Throws<WriteSafetyScanException>(() => gate.Scan(flood));
+        Assert.Equal(WriteSafetyFailureCode.ScanBudgetExhausted, failure.FailureCode);
         Assert.Contains("decoder-candidate budget of 2", failure.Message);
     }
 
     [Fact]
     public void TotalDecodedByteBudgetExhaustionFailsClosed()
     {
-        var gate = new NeverStoreGate(
-            _shippedRules, null, SafetyBudgets.Default with { MaxDecodedBytes = 8 });
+        var gate = new WriteSafetyGate(
+            _shippedRules, null, WriteSafetyBudgets.Default with { MaxDecodedBytes = 8 });
         string candidate = Convert.ToBase64String(
             Encoding.UTF8.GetBytes("synthetic-decodable-payload-value"));
 
-        var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(candidate));
-        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+        var failure = Assert.Throws<WriteSafetyScanException>(() => gate.Scan(candidate));
+        Assert.Equal(WriteSafetyFailureCode.ScanBudgetExhausted, failure.FailureCode);
         Assert.Contains("total-decoded-byte budget of 8", failure.Message);
     }
 
     [Fact]
     public void TotalScanTimeBudgetExhaustionFailsClosed()
     {
-        var gate = new NeverStoreGate(
-            _shippedRules, null, SafetyBudgets.Default with { MaxScanTime = TimeSpan.Zero });
+        var gate = new WriteSafetyGate(
+            _shippedRules, null, WriteSafetyBudgets.Default with { MaxScanTime = TimeSpan.Zero });
 
-        var failure = Assert.Throws<SafetyScanException>(() => gate.Scan("anything at all"));
-        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
+        var failure = Assert.Throws<WriteSafetyScanException>(() => gate.Scan("anything at all"));
+        Assert.Equal(WriteSafetyFailureCode.ScanBudgetExhausted, failure.FailureCode);
         Assert.Contains("total scan-time budget", failure.Message);
     }
 
     [Fact]
     public void PerRuleMatcherTimeoutFailsClosed()
     {
-        var gate = new NeverStoreGate(
+        var gate = new WriteSafetyGate(
             _shippedRules,
             null,
-            SafetyBudgets.Default with { MaxRuleTime = TimeSpan.FromTicks(1) });
+            WriteSafetyBudgets.Default with { MaxRuleTime = TimeSpan.FromTicks(1) });
         // Long enough that a linear-time matcher still cannot finish inside
         // one tick; the prefilter deliberately hits so a matcher does run.
         string pathological = string.Concat(Enumerable.Repeat("AKIA", 400_000));
 
-        var failure = Assert.Throws<SafetyScanException>(() => gate.Scan(pathological));
-        Assert.Equal(CaptureOutcomeReason.MatcherTimeout, failure.OutcomeReason);
+        var failure = Assert.Throws<WriteSafetyScanException>(() => gate.Scan(pathological));
+        Assert.Equal(WriteSafetyFailureCode.MatcherTimeout, failure.FailureCode);
         Assert.Contains("matcher timeout", failure.Message);
     }
 
     [Fact]
-    public void ObservationBudgetIsTheVersionedCeilingNotTheTransportCap()
+    public void UnexpectedScannerFailureClosesWithoutExposingCandidateContent()
     {
-        var gate = new NeverStoreGate(
-            _shippedRules, null, SafetyBudgets.Default with { MaxObservationBytes = 16 });
+        const string candidate = "candidate-content-must-not-cross-boundary";
+        var gate = new WriteSafetyGate(new ThrowingWriteSafetyScanner());
 
-        gate.AssertObservationWithinBudget(new string('a', 16));
-        var failure = Assert.Throws<SafetyScanException>(
-            () => gate.AssertObservationWithinBudget(new string('a', 17)));
-        Assert.Equal(CaptureOutcomeReason.ScanBudgetExhausted, failure.OutcomeReason);
-        Assert.Contains("observation budget of 16 bytes", failure.Message);
+        WriteSafetyScannerInternalException failure =
+            Assert.Throws<WriteSafetyScannerInternalException>(() => gate.Scan(candidate));
+
+        Assert.Equal(WriteSafetyFailureCode.ScannerInternalFailure, failure.FailureCode);
+        Assert.DoesNotContain(candidate, failure.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("implementation detail", failure.ToString(), StringComparison.Ordinal);
     }
 
     // --- operator-provisioned exact credentials ----------------------------
@@ -970,7 +1044,7 @@ public sealed class SafetyGateTests : IDisposable
         File.WriteAllText(
             literals, $"# operator-owned\n\n{configuredValue}\nsynthetic-second-0002\n");
 
-        var gate = new NeverStoreGate(_shippedRules, literals);
+        var gate = new WriteSafetyGate(_shippedRules, literals);
         Assert.True(gate.IsConfigured, gate.FailureReason);
         Assert.Contains("literals:2", gate.RuleSetVersion);
         Assert.DoesNotContain(configuredValue, gate.RuleSetVersion);
@@ -979,7 +1053,7 @@ public sealed class SafetyGateTests : IDisposable
         Assert.Equal("the deploy used [REDACTED:operator-literal] last night", result.Redacted);
         Assert.Equal(["configured_credential"], result.Categories);
 
-        var rejection = Assert.Throws<NeverStoreException>(
+        var rejection = Assert.Throws<WriteSafetyRejectedException>(
             () => gate.AssertAllowed($"remember {configuredValue}"));
         Assert.Equal("operator-literal", rejection.RuleName);
         Assert.DoesNotContain(configuredValue, rejection.Message);
@@ -991,7 +1065,7 @@ public sealed class SafetyGateTests : IDisposable
         const string configuredValue = "synthetic-operator-literal-0005";
         string literals = Path.Combine(_directory, "priority-literals.txt");
         File.WriteAllText(literals, configuredValue + "\n");
-        var gate = new NeverStoreGate(_shippedRules, literals);
+        var gate = new WriteSafetyGate(_shippedRules, literals);
 
         // Two disjoint matches. "aws-access-key-id" sorts first ordinally, but
         // the operator literal is the highest-priority rule and is the one that
@@ -1003,10 +1077,10 @@ public sealed class SafetyGateTests : IDisposable
 
         Assert.Equal(
             "operator-literal",
-            Assert.Throws<NeverStoreException>(() => gate.AssertAllowed(value)).RuleName);
+            Assert.Throws<WriteSafetyRejectedException>(() => gate.AssertAllowed(value)).RuleName);
         Assert.Equal(
             "operator-literal",
-            Assert.Throws<NeverStoreException>(
+            Assert.Throws<WriteSafetyRejectedException>(
                 () => gate.AssertAllowedObject(new { note = value })).RuleName);
     }
 
@@ -1016,7 +1090,7 @@ public sealed class SafetyGateTests : IDisposable
         const string configuredValue = "synthetic-operator-literal-0007";
         string literals = Path.Combine(_directory, "encoded-literals.txt");
         File.WriteAllText(literals, configuredValue + "\n");
-        var gate = new NeverStoreGate(_shippedRules, literals);
+        var gate = new WriteSafetyGate(_shippedRules, literals);
 
         // An exact operator-known value is the highest-confidence rule there
         // is; a base64 copy of it must not be the one shape that survives.
@@ -1040,13 +1114,13 @@ public sealed class SafetyGateTests : IDisposable
     public void AbsentOrEmptyOperatorLiteralFileIsValidAndNotAFailClosedCondition()
     {
         string absent = Path.Combine(_directory, "no-such-literals.txt");
-        var absentGate = new NeverStoreGate(_shippedRules, absent);
+        var absentGate = new WriteSafetyGate(_shippedRules, absent);
         Assert.True(absentGate.IsConfigured, absentGate.FailureReason);
         Assert.DoesNotContain("literals:", absentGate.RuleSetVersion);
 
         string empty = Path.Combine(_directory, "empty-literals.txt");
         File.WriteAllText(empty, "\n# only a comment\n\n");
-        var emptyGate = new NeverStoreGate(_shippedRules, empty);
+        var emptyGate = new WriteSafetyGate(_shippedRules, empty);
         Assert.True(emptyGate.IsConfigured, emptyGate.FailureReason);
     }
 
@@ -1057,7 +1131,7 @@ public sealed class SafetyGateTests : IDisposable
         string literals = Path.Combine(_directory, "short-literals.txt");
         File.WriteAllText(literals, $"synthetic-operator-literal-0003\n{tooShort}\n");
 
-        var gate = new NeverStoreGate(_shippedRules, literals);
+        var gate = new WriteSafetyGate(_shippedRules, literals);
 
         Assert.False(gate.IsConfigured);
         Assert.Contains("line 2", gate.FailureReason!);
@@ -1264,6 +1338,17 @@ public sealed class SafetyGateTests : IDisposable
             }
             return false;
         }
+    }
+
+    private sealed class ThrowingWriteSafetyScanner : ISafetyScanner
+    {
+        public LeafOutcome ScanLeaf(
+            string value,
+            string? propertyName,
+            ScanBudgetState state) =>
+            throw new InvalidOperationException("scanner implementation detail");
+
+        public bool IsSensitiveField(string propertyName, ScanBudgetState state) => false;
     }
 
     // The distinctive middle of a synthetic credential, used to prove the

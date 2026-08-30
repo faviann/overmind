@@ -61,11 +61,11 @@ catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
 // Fail closed before any source material is read: a tracer whose rule set is
 // missing, empty, invalid, duplicated, unsupported, or un-loadable refuses to
 // run and says why on stderr. Diagnostics never reach stdout.
-NeverStoreGate safetyGate;
+WriteSafetyGate safetyGate;
 try
 {
     var captureOptions = Configuration.Load(Directory.GetCurrentDirectory());
-    safetyGate = new NeverStoreGate(
+    safetyGate = new WriteSafetyGate(
         captureOptions.NeverStorePath, captureOptions.NeverStoreLiteralsPath);
 }
 catch (Exception ex) when (IsExpectedRuntimeFailure(ex))
@@ -401,8 +401,8 @@ static void WriteFailure(Exception failure)
     WriteDiagnostic("capture_cycle_failed", FailureCode(failure));
     CaptureOutcomeSummary? outcome = failure switch
     {
-        SafetyConfigurationException configuration => configuration.Outcome,
-        SafetyScanException scan => scan.Outcome,
+        WriteSafetyConfigurationException or WriteSafetyScanException =>
+            CaptureOutcomeAggregation.FromWriteSafetyFailure("codex", failure),
         _ => null
     };
     if (outcome is not null)
@@ -424,8 +424,8 @@ static string FailureCode(Exception failure) => failure switch
     CaptureRuntimeConcurrencyException => "state_concurrency",
     InvalidDataException => "invalid_source_or_receipt",
     JsonException => "invalid_json",
-    SafetyScanException => "safety_scan_failed",
-    SafetyConfigurationException => "safety_configuration_failed",
+    WriteSafetyScanException => "safety_scan_failed",
+    WriteSafetyConfigurationException => "safety_configuration_failed",
     InvalidOperationException => "invalid_configuration_or_state",
     ArgumentException => "invalid_configuration_or_state",
     NotSupportedException => "unsupported_configuration_or_state",
@@ -445,8 +445,8 @@ static bool IsExpectedRuntimeFailure(Exception failure) =>
         or CaptureRuntimeConcurrencyException
         or InvalidDataException
         or JsonException
-        or SafetyScanException
-        or SafetyConfigurationException
+        or WriteSafetyScanException
+        or WriteSafetyConfigurationException
         or InvalidOperationException
         or ArgumentException
         or NotSupportedException

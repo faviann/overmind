@@ -9,7 +9,7 @@ namespace MemSrv.Core;
 /// The whole marker vocabulary the sanitizer can write, in one home. Two
 /// deliberately distinct forms so a reader can tell a surgical span redaction
 /// from a dropped value, and so no caller has to reconstruct either shape by
-/// hand. Documented in docs/capture-safety-budgets.md; the redaction form is
+/// hand. Documented in docs/write-safety.md; the redaction form is
 /// fixed by memory-server-phase1-spec §5.
 /// </summary>
 internal static class SafetyMarkers
@@ -31,26 +31,26 @@ internal static class SafetyMarkers
 
 /// <summary>
 /// Why an entire value was dropped instead of span-redacted. This vocabulary is
-/// closed and documented in docs/capture-safety-budgets.md; the marker written
+/// closed and documented in docs/write-safety.md; the marker written
 /// into the sanitized value is <see cref="SafetyMarkers.Omission"/>.
 /// </summary>
-internal static class OmissionReasons
+public static class WriteSafetyOmissionReason
 {
     /// <summary>The leaf is larger than the versioned per-leaf byte budget.</summary>
-    public const string LeafExceedsLimit = CaptureOutcomeReason.LeafExceedsLimit;
+    public const string LeafExceedsLimit = "leaf_exceeds_limit";
 
     /// <summary>A sensitive property name carried a non-string scalar; there is no span to map.</summary>
-    public const string SensitiveFieldScalar = CaptureOutcomeReason.SensitiveFieldScalar;
+    public const string SensitiveFieldScalar = "sensitive_field_scalar";
 
     /// <summary>A sensitive property name carried an object or array; a subtree has no exact span.</summary>
-    public const string SensitiveFieldSubtree = CaptureOutcomeReason.SensitiveFieldSubtree;
+    public const string SensitiveFieldSubtree = "sensitive_field_subtree";
 
     /// <summary>
     /// Two sibling property names became the same text after redaction. Writing
     /// both would emit a duplicate JSON key and silently lose one value on
     /// re-parse, so the whole object is dropped instead.
     /// </summary>
-    public const string RedactedNameCollision = CaptureOutcomeReason.RedactedNameCollision;
+    public const string RedactedNameCollision = "redacted_name_collision";
 }
 
 /// <summary>
@@ -115,7 +115,7 @@ internal sealed class SecretScanner : ISafetyScanner
     private const string LiteralRuleId = "operator-literal";
 
     private readonly SecretRuleSet _ruleSet;
-    private readonly SafetyBudgets _budgets;
+    private readonly WriteSafetyBudgets _budgets;
 
     // One bounded decoding level. Candidate shapes only; the decoded text is
     // never re-scanned for further candidates. These carry the same per-rule
@@ -126,7 +126,7 @@ internal sealed class SecretScanner : ISafetyScanner
     private readonly Regex _hexCandidates;
     private readonly Regex _base64Candidates;
 
-    public SecretScanner(SecretRuleSet ruleSet, SafetyBudgets budgets)
+    public SecretScanner(SecretRuleSet ruleSet, WriteSafetyBudgets budgets)
     {
         _ruleSet = ruleSet;
         _budgets = budgets;
@@ -148,7 +148,7 @@ internal sealed class SecretScanner : ISafetyScanner
         long byteCount = Encoding.UTF8.GetByteCount(value);
         if (byteCount > _budgets.MaxLeafBytes)
         {
-            return LeafOutcome.Omitted(OmissionReasons.LeafExceedsLimit, byteCount);
+            return LeafOutcome.Omitted(WriteSafetyOmissionReason.LeafExceedsLimit, byteCount);
         }
 
         var matches = new List<SpanMatch>();
@@ -210,7 +210,7 @@ internal sealed class SecretScanner : ISafetyScanner
         foreach (string literal in _ruleSet.Literals)
         {
             // The literal sweep is one of the most expensive phases over a
-            // limit-sized leaf (docs/capture-safety-budgets.md), so the scan
+            // limit-sized leaf (docs/write-safety.md), so the scan
             // deadline is checked here too — once per literal, which is the
             // granularity that bounds the phase without distorting it.
             state.CheckDeadline();
@@ -290,7 +290,7 @@ internal sealed class SecretScanner : ISafetyScanner
             if (length > _budgets.MaxDecoderCandidateLength)
             {
                 // Not decoded, and NOT fail-closed: an accepted, bounded
-                // residual risk documented in docs/capture-safety-budgets.md.
+                // residual risk documented in docs/write-safety.md.
                 // The undecoded bytes were still crossed by every rule, but a
                 // secret encoded inside a run this long is not detected.
                 continue;
@@ -439,9 +439,9 @@ internal sealed class SecretScanner : ISafetyScanner
         }
     }
 
-    private static SafetyScanException MatcherTimedOut(string subject) =>
+    private static WriteSafetyScanException MatcherTimedOut(string subject) =>
         new(
-            CaptureOutcomeReason.MatcherTimeout,
+            WriteSafetyFailureCode.MatcherTimeout,
             $"{subject} exceeded its matcher timeout");
 
     /// <summary>
@@ -565,7 +565,7 @@ internal sealed class SecretScanner : ISafetyScanner
 
     /// <summary>
     /// Deterministic overlap resolution, documented once here and in
-    /// docs/capture-safety-budgets.md. Overlapping matches MERGE into one union
+    /// docs/write-safety.md. Overlapping matches MERGE into one union
     /// span attributed to the highest-priority rule among them; ties break by
     /// longest original match, then by rule id ordinal. Merging, not discarding,
     /// is what guarantees no byte covered by ANY match survives unredacted: a
@@ -641,7 +641,7 @@ internal sealed record LeafOutcome(
 /// The per-scan budget ledger. Every charge is checked eagerly, so an
 /// exhausted budget throws before any partially-scanned text can be returned.
 /// </summary>
-internal sealed class ScanBudgetState(SafetyBudgets budgets)
+internal sealed class ScanBudgetState(WriteSafetyBudgets budgets)
 {
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private int _matches;
@@ -652,8 +652,8 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
     {
         if (_clock.Elapsed > budgets.MaxScanTime)
         {
-            throw new SafetyScanException(
-                CaptureOutcomeReason.ScanBudgetExhausted,
+            throw new WriteSafetyScanException(
+                WriteSafetyFailureCode.ScanBudgetExhausted,
                 $"the total scan-time budget of {budgets.MaxScanTime.TotalMilliseconds:0}ms was exceeded");
         }
     }
@@ -662,8 +662,8 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
     {
         if (++_matches > budgets.MaxMatches)
         {
-            throw new SafetyScanException(
-                CaptureOutcomeReason.ScanBudgetExhausted,
+            throw new WriteSafetyScanException(
+                WriteSafetyFailureCode.ScanBudgetExhausted,
                 $"the match-count budget of {budgets.MaxMatches} was exceeded");
         }
     }
@@ -672,8 +672,8 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
     {
         if (++_decoderCandidates > budgets.MaxDecoderCandidates)
         {
-            throw new SafetyScanException(
-                CaptureOutcomeReason.ScanBudgetExhausted,
+            throw new WriteSafetyScanException(
+                WriteSafetyFailureCode.ScanBudgetExhausted,
                 $"the decoder-candidate budget of {budgets.MaxDecoderCandidates} was exceeded");
         }
     }
@@ -683,8 +683,8 @@ internal sealed class ScanBudgetState(SafetyBudgets budgets)
         _decodedBytes += bytes;
         if (_decodedBytes > budgets.MaxDecodedBytes)
         {
-            throw new SafetyScanException(
-                CaptureOutcomeReason.ScanBudgetExhausted,
+            throw new WriteSafetyScanException(
+                WriteSafetyFailureCode.ScanBudgetExhausted,
                 $"the total-decoded-byte budget of {budgets.MaxDecodedBytes} was exceeded");
         }
     }

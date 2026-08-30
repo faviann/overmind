@@ -572,7 +572,7 @@ public sealed class CaptureScheduleTests
         var failures = new List<Exception>();
         var state = new FileCaptureRuntimeState(Path.Combine(root, "state"));
         var adapter = new CodexJsonlAdapter();
-        var safetyGate = new NeverStoreGate(Path.Combine(
+        var safetyGate = new WriteSafetyGate(Path.Combine(
             TestProcessRunner.RepoRoot, "config/never_store.yaml"));
 
         try
@@ -654,7 +654,7 @@ public sealed class CaptureScheduleTests
         var failures = new List<Exception>();
         var state = new FileCaptureRuntimeState(Path.Combine(root, "state"));
         var adapter = new CodexJsonlAdapter();
-        var safetyGate = new NeverStoreGate(Path.Combine(
+        var safetyGate = new WriteSafetyGate(Path.Combine(
             TestProcessRunner.RepoRoot, "config/never_store.yaml"));
 
         try

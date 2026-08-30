@@ -29,7 +29,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
     private const string SeededFakeSecret = "AKIA" + "SAFETYSLICEFAKE0";
 
     // Three representative unusable rule sets: absent, present-but-empty, and
-    // present-but-invalid. Full per-case validation lives in SafetyGateTests.
+    // present-but-invalid. Full per-case validation lives in WriteSafetyTests.
     public static TheoryData<string, string?, string> UnusableRuleFiles() => new()
     {
         { "missing", null, "missing" },
@@ -70,7 +70,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 "--agent-id", $"capture:refused-{Guid.NewGuid():N}",
                 "--credential-file", await CredentialFileAsync(CaptureCredential()));
             Assert.NotEqual(0, enrollment.ExitCode);
-            Assert.Contains("Capture safety rules are not usable", enrollment.Stderr);
+            Assert.Contains("Write-safety rules are not usable", enrollment.Stderr);
             Assert.Contains(expectedReason, enrollment.Stderr, StringComparison.OrdinalIgnoreCase);
             Assert.Empty(enrollment.Stdout);
 
@@ -98,7 +98,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                     Observation(UniqueSession(), 0, $"unhealthy-{Guid.NewGuid():N}", "x"));
                 Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
                 string body = await refused.Content.ReadAsStringAsync();
-                Assert.Contains("Capture safety rules are not usable", body);
+                Assert.Contains("Write-safety rules are not usable", body);
                 Assert.Contains(expectedReason, body, StringComparison.OrdinalIgnoreCase);
             }
             finally
@@ -173,10 +173,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 new JsonSerializerOptions(JsonSerializerDefaults.Web))!);
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
-                Path.Combine(_root, "config/never_store.yaml"),
-                null,
-                SafetyBudgets.Default with { MaxObservationBytes = 2_048 }));
+            new WriteSafetyGate(
+                Path.Combine(_root, "config/never_store.yaml")),
+            2_048);
 
         CaptureImportReceipt receipt = await ingestion.ImportAsync(binding!, command);
 
@@ -229,23 +228,25 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 new JsonSerializerOptions(JsonSerializerDefaults.Web))!);
         var failingIngestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(new ThrowingSafetyScanner()));
+            new WriteSafetyGate(new ThrowingSafetyScanner()));
 
-        SafetyScannerInternalException failure =
-            await Assert.ThrowsAsync<SafetyScannerInternalException>(
+        WriteSafetyScannerInternalException failure =
+            await Assert.ThrowsAsync<WriteSafetyScannerInternalException>(
                 () => failingIngestion.ImportAsync(binding, command));
+        CaptureOutcomeSummary outcome = CaptureOutcomeAggregation.FromWriteSafetyFailure(
+            command.Source.Harness, failure);
 
         Assert.DoesNotContain("scanner implementation detail", failure.Message);
-        Assert.Equal(CaptureOutcomeReason.ScannerInternalFailure, failure.OutcomeReason);
-        Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
-        Assert.Equal("complete", failure.Outcome?.CaptureFidelity);
+        Assert.Equal(WriteSafetyFailureCode.ScannerInternalFailure, failure.FailureCode);
+        Assert.Equal("blocked", outcome.CaptureHealth);
+        Assert.Equal("complete", outcome.CaptureFidelity);
         Assert.Equal(
             CaptureOutcomeReason.ScannerInternalFailure,
-            Assert.Single(failure.Outcome!.Counters).Reason);
+            Assert.Single(outcome.Counters).Reason);
 
         CaptureImportReceipt accepted = await new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")))
+            new WriteSafetyGate(Path.Combine(_root, "config/never_store.yaml")))
             .ImportAsync(binding, command);
         Assert.Equal("new", accepted.Status);
         Assert.Equal(0, accepted.SourcePosition);
@@ -270,22 +271,24 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 new JsonSerializerOptions(JsonSerializerDefaults.Web))!);
         var constrained = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
+            new WriteSafetyGate(
                 Path.Combine(_root, "config/never_store.yaml"),
                 null,
-                SafetyBudgets.Default with { MaxLeafBytes = 8 }));
+                WriteSafetyBudgets.Default with { MaxLeafBytes = 8 }));
 
-        SafetyScanException failure = await Assert.ThrowsAsync<SafetyScanException>(
+        WriteSafetyScanException failure = await Assert.ThrowsAsync<WriteSafetyScanException>(
             () => constrained.ImportAsync(binding, command));
+        CaptureOutcomeSummary outcome = CaptureOutcomeAggregation.FromWriteSafetyFailure(
+            command.Source.Harness, failure);
 
-        Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
+        Assert.Equal("blocked", outcome.CaptureHealth);
         Assert.Equal(
             CaptureOutcomeReason.RequiredInspectionIncomplete,
-            Assert.Single(failure.Outcome!.Counters).Reason);
+            Assert.Single(outcome.Counters).Reason);
 
         CaptureImportReceipt accepted = await new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")))
+            new WriteSafetyGate(Path.Combine(_root, "config/never_store.yaml")))
             .ImportAsync(binding, command);
         Assert.Equal("new", accepted.Status);
         Assert.Equal(0, accepted.SourcePosition);
@@ -342,10 +345,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 CaptureLedger.JsonOptions)) < contentBound);
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
-                Path.Combine(_root, "config/never_store.yaml"),
-                null,
-                SafetyBudgets.Default with { MaxObservationBytes = contentBound }));
+            new WriteSafetyGate(
+                Path.Combine(_root, "config/never_store.yaml")),
+            contentBound);
 
         CaptureImportReceipt receipt = await ingestion.ImportAsync(binding, command);
 
@@ -406,10 +408,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 SourceIdentity: new CaptureSourceIdentity(sourceSessionId)));
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
-                Path.Combine(_root, "config/never_store.yaml"),
-                null,
-                SafetyBudgets.Default with { MaxObservationBytes = 2_048 }));
+            new WriteSafetyGate(
+                Path.Combine(_root, "config/never_store.yaml")),
+            2_048);
         JsonElement warmPayload =
             JsonSerializer.SerializeToElement(new { padding = "warm" });
         string warmIdentity = UniqueSession();
@@ -453,9 +454,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             $"Bounded content ingestion allocated {allocated:N0} bytes; it " +
             "should not materialize the roughly 8 MiB original JSON for signing.");
         Assert.True(
-            clock.Elapsed < SafetyBudgets.Default.MaxScanTime,
+            clock.Elapsed < WriteSafetyBudgets.Default.MaxScanTime,
             $"Bounded content ingestion took {clock.Elapsed}; the published deadline is " +
-            $"{SafetyBudgets.Default.MaxScanTime}.");
+            $"{WriteSafetyBudgets.Default.MaxScanTime}.");
     }
 
     [Fact]
@@ -508,10 +509,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 new JsonSerializerOptions(JsonSerializerDefaults.Web))) > contentBound);
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
-                Path.Combine(_root, "config/never_store.yaml"),
-                null,
-                SafetyBudgets.Default with { MaxObservationBytes = contentBound }));
+            new WriteSafetyGate(
+                Path.Combine(_root, "config/never_store.yaml")),
+            contentBound);
 
         CaptureImportReceipt receipt = await ingestion.ImportAsync(binding, command);
 
@@ -567,10 +567,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             null);
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
-                Path.Combine(_root, "config/never_store.yaml"),
-                null,
-                SafetyBudgets.Default with { MaxObservationBytes = 2_048 }));
+            new WriteSafetyGate(
+                Path.Combine(_root, "config/never_store.yaml")),
+            2_048);
 
         CaptureImportReceipt receipt = await ingestion.ImportAsync(binding, oversized);
 
@@ -627,10 +626,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             new JsonSerializerOptions(JsonSerializerDefaults.Web))) > contentBound);
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
-                Path.Combine(_root, "config/never_store.yaml"),
-                null,
-                SafetyBudgets.Default with { MaxObservationBytes = contentBound }));
+            new WriteSafetyGate(
+                Path.Combine(_root, "config/never_store.yaml")),
+            contentBound);
 
         CaptureImportReceipt receipt = await ingestion.ImportAsync(binding, command);
 
@@ -672,10 +670,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             null);
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
-                Path.Combine(_root, "config/never_store.yaml"),
-                null,
-                SafetyBudgets.Default with { MaxObservationBytes = 2_048 }));
+            new WriteSafetyGate(
+                Path.Combine(_root, "config/never_store.yaml")),
+            2_048);
 
         CaptureImportReceipt first = await ingestion.ImportAsync(binding, accepted);
         CaptureImportReceipt retry = await ingestion.ImportAsync(
@@ -746,7 +743,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(Path.Combine(_root, "config/never_store.yaml")));
+            new WriteSafetyGate(Path.Combine(_root, "config/never_store.yaml")));
         CaptureObservationCommand command =
             CaptureObservationCommand.FromRequest(request);
         CaptureImportReceipt first = await ingestion.ImportAsync(binding, command);
@@ -803,13 +800,12 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 SourceIdentity: new CaptureSourceIdentity(sourceSessionId)));
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(
-                Path.Combine(_root, "config/never_store.yaml"),
-                null,
-                SafetyBudgets.Default with { MaxObservationBytes = 1_024 }));
+            new WriteSafetyGate(
+                Path.Combine(_root, "config/never_store.yaml")),
+            1_024);
 
-        SafetyScanException failure =
-            await Assert.ThrowsAsync<SafetyScanException>(
+        WriteSafetyScanException failure =
+            await Assert.ThrowsAsync<WriteSafetyScanException>(
                 () => ingestion.ImportAsync(binding, command));
 
         Assert.Contains("failed closed", failure.Message, StringComparison.Ordinal);
@@ -886,9 +882,9 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
             rejectedLocators.Add(moduleLocator);
             var ingestion = new CaptureIngestion(
                 RuntimeConnection,
-                new NeverStoreGate(
+                new WriteSafetyGate(
                     Path.Combine(_root, "config/never_store.yaml"), null, budgets));
-            var failure = await Assert.ThrowsAsync<SafetyScanException>(
+            var failure = await Assert.ThrowsAsync<WriteSafetyScanException>(
                 () => ingestion.ImportAsync(
                     binding!,
                     CaptureObservationCommand.FromRequest(
@@ -904,9 +900,11 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                 "scan-time" => "total scan-time budget",
                 _ => "matcher timeout"
             }, failure.Message);
-            Assert.Equal("blocked", failure.Outcome?.CaptureHealth);
-            Assert.Equal("complete", failure.Outcome?.CaptureFidelity);
-            CaptureOutcomeCounter counter = Assert.Single(failure.Outcome!.Counters);
+            CaptureOutcomeSummary outcome = CaptureOutcomeAggregation.FromWriteSafetyFailure(
+                "codex", failure);
+            Assert.Equal("blocked", outcome.CaptureHealth);
+            Assert.Equal("complete", outcome.CaptureFidelity);
+            CaptureOutcomeCounter counter = Assert.Single(outcome.Counters);
             Assert.Equal("codex", counter.Harness);
             Assert.Equal(
                 name == "matcher-timeout"
@@ -945,24 +943,20 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
     // Failure modes the 1 MB transport cap puts out of HTTP reach, each with
     // the smallest budget that makes its mechanism observable.
-    private static IEnumerable<(string Name, SafetyBudgets Budgets, string Payload)> FailClosedModes()
+    private static IEnumerable<(string Name, WriteSafetyBudgets Budgets, string Payload)> FailClosedModes()
     {
         yield return (
-            "observation-size",
-            SafetyBudgets.Default with { MaxObservationBytes = 64 },
-            "an ordinary payload");
-        yield return (
             "decoder-candidates",
-            SafetyBudgets.Default with { MaxDecoderCandidates = 2 },
+            WriteSafetyBudgets.Default with { MaxDecoderCandidates = 2 },
             string.Join(' ', Enumerable.Range(0, 32).Select(index => Convert.ToBase64String(
                 Encoding.UTF8.GetBytes($"synthetic-candidate-{index:0000}")))));
         yield return (
             "scan-time",
-            SafetyBudgets.Default with { MaxScanTime = TimeSpan.Zero },
+            WriteSafetyBudgets.Default with { MaxScanTime = TimeSpan.Zero },
             "an ordinary payload");
         yield return (
             "matcher-timeout",
-            SafetyBudgets.Default with { MaxRuleTime = TimeSpan.FromTicks(1) },
+            WriteSafetyBudgets.Default with { MaxRuleTime = TimeSpan.FromTicks(1) },
             string.Concat(Enumerable.Repeat("AKIA", 200_000)));
     }
 
@@ -1161,7 +1155,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
 
         // 4. A thrown exception message.
         var gate = SafetyGate();
-        var rejection = Assert.Throws<NeverStoreException>(
+        var rejection = Assert.Throws<WriteSafetyRejectedException>(
             () => gate.AssertAllowed($"remember {SeededFakeSecret}"));
         Assert.DoesNotContain(SeededFakeSecret, rejection.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(SeededFakeSecret, rejection.ToString(), StringComparison.Ordinal);
@@ -1523,39 +1517,6 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
         }
     }
 
-    private static async Task<string> WaitForListeningUrlAsync(StringBuilder stderr)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        while (DateTime.UtcNow < deadline)
-        {
-            foreach (string line in Snapshot(stderr).Split('\n'))
-            {
-                int index = line.IndexOf("Now listening on: ", StringComparison.Ordinal);
-                if (index >= 0)
-                {
-                    return line[(index + "Now listening on: ".Length)..].Trim();
-                }
-            }
-            await Task.Delay(200);
-        }
-        throw new Xunit.Sdk.XunitException(
-            $"Server never reported a listening address. stderr:{Environment.NewLine}{Snapshot(stderr)}");
-    }
-
-    private static Task PumpAsync(StreamReader reader, StringBuilder sink) => Task.Run(async () =>
-    {
-        string? line;
-        while ((line = await reader.ReadLineAsync()) is not null)
-        {
-            lock (sink) { sink.AppendLine(line); }
-        }
-    });
-
-    private static string Snapshot(StringBuilder buffer)
-    {
-        lock (buffer) { return buffer.ToString(); }
-    }
-
     private static JsonElement StructuredTracerOutcome(string stderr)
     {
         string line = Assert.Single(
@@ -1617,7 +1578,7 @@ public sealed class CaptureSafetyTests : HttpSeamTestBase
                     "event/0", 0, "opaque", "harness", payload, null, [])]));
         var ingestion = new CaptureIngestion(
             RuntimeConnection,
-            new NeverStoreGate(new SelectiveOmissionScanner()));
+            new WriteSafetyGate(new SelectiveOmissionScanner()));
         JsonElement omittedPayload = JsonSerializer.SerializeToElement(
             new { first = "omit-me", second = "omit-me" });
 

@@ -83,10 +83,11 @@ what happened, Overmind owns what was concluded and governed.
   intermediate analyses, and process artifacts earn no place in the active tree
   merely by containing history — Git history, issues, and PRs are the
   preservation layer for those. Marking a document frozen is not a decision to
-  keep it. One exception to the freeze: the capture safety budgets and
-  never-store rule set (`capture-safety-budgets.md`) remain binding, because
-  Phase 1 spec §5 cites them for the never-store gate on every Overmind write
-  path.
+  keep it. General write safety is retained independently under
+  [`write-safety.md`](write-safety.md), because Phase 1 spec §5 requires its
+  never-store boundary on every Overmind memory and trace write. The frozen
+  capture safety document now governs only the legacy observation-size and
+  fidelity mechanics that remain while capture code ships.
 
 ## Out of scope here
 

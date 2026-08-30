@@ -10,15 +10,15 @@ namespace MemSrv.Core;
 public static class CaptureOutcomeReason
 {
     public const string InvalidEncoding = CaptureFidelityPolicy.InvalidUtf8ContentPolicy;
-    public const string MatcherTimeout = "matcher_timeout";
-    public const string RequiredInspectionIncomplete = "required_inspection_incomplete";
-    public const string ScanBudgetExhausted = "scan_budget_exhausted";
-    public const string ScannerInternalFailure = "scanner_internal_failure";
-    public const string ScannerPolicyUnavailable = "scanner_policy_unavailable";
-    public const string LeafExceedsLimit = "leaf_exceeds_limit";
-    public const string SensitiveFieldScalar = "sensitive_field_scalar";
-    public const string SensitiveFieldSubtree = "sensitive_field_subtree";
-    public const string RedactedNameCollision = "redacted_name_collision";
+    public const string MatcherTimeout = WriteSafetyFailureCode.MatcherTimeout;
+    public const string RequiredInspectionIncomplete = WriteSafetyFailureCode.RequiredInspectionIncomplete;
+    public const string ScanBudgetExhausted = WriteSafetyFailureCode.ScanBudgetExhausted;
+    public const string ScannerInternalFailure = WriteSafetyFailureCode.ScannerInternalFailure;
+    public const string ScannerPolicyUnavailable = WriteSafetyFailureCode.ScannerPolicyUnavailable;
+    public const string LeafExceedsLimit = WriteSafetyOmissionReason.LeafExceedsLimit;
+    public const string SensitiveFieldScalar = WriteSafetyOmissionReason.SensitiveFieldScalar;
+    public const string SensitiveFieldSubtree = WriteSafetyOmissionReason.SensitiveFieldSubtree;
+    public const string RedactedNameCollision = WriteSafetyOmissionReason.RedactedNameCollision;
 
     internal static bool IsFidelity(string reason) =>
         reason is CaptureFidelityPolicy.TransportLimitReason
@@ -236,6 +236,7 @@ internal static class CaptureOutcomeContract
 /// </summary>
 public static class CaptureOutcomeAggregation
 {
+    private const string WriteSafetyOutcomeDataKey = "MemSrv.Capture.WriteSafetyOutcome";
     public const string FidelityOmissionClass = "fidelity_omission";
     public const string SafetyFailureClass = "safety_failure";
 
@@ -278,6 +279,41 @@ public static class CaptureOutcomeAggregation
                 ? CaptureSizeBand.Unknown
                 : SizeBand(inspectedByteCount.Value));
     }
+
+    /// <summary>
+    /// Adapts the capture-independent write-safety failure vocabulary into the
+    /// temporary capture health projection. The write-safety boundary itself
+    /// remains unaware of capture outcomes, harnesses, and size bands.
+    /// </summary>
+    public static CaptureOutcomeSummary FromWriteSafetyFailure(
+        string harness,
+        Exception failure,
+        long? inspectedByteCount = null)
+    {
+        if (failure.Data[WriteSafetyOutcomeDataKey] is CaptureOutcomeSummary mapped)
+        {
+            return mapped;
+        }
+        string reason = failure switch
+        {
+            WriteSafetyConfigurationException => CaptureOutcomeReason.ScannerPolicyUnavailable,
+            WriteSafetyScanException scan => scan.FailureCode,
+            _ => throw new ArgumentException(
+                "The exception is not a write-safety failure.", nameof(failure))
+        };
+        return Summarize([SafetyFailure(harness, reason, inspectedByteCount)]);
+    }
+
+    /// <summary>
+    /// Carries capture context with a generalized refusal while preserving the
+    /// original exception type expected by temporary callers.
+    /// </summary>
+    public static void AttachWriteSafetyOutcome(
+        string harness,
+        Exception failure,
+        long? inspectedByteCount = null) =>
+        failure.Data[WriteSafetyOutcomeDataKey] = FromWriteSafetyFailure(
+            harness, failure, inspectedByteCount);
 
     public static CaptureOutcomeSummary Summarize(
         IEnumerable<CaptureOutcomeRecord> outcomes)

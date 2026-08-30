@@ -20,11 +20,11 @@ internal static class CaptureLedger
     /// configuration all arrive here, and all fail closed with the safe reason
     /// the gate reported at load.
     /// </summary>
-    internal static void RequireSafetyConfigured(NeverStoreGate neverStore)
+    internal static void RequireSafetyConfigured(WriteSafetyGate neverStore)
     {
         if (!neverStore.IsConfigured)
         {
-            throw new SafetyConfigurationException(
+            throw new WriteSafetyConfigurationException(
                 neverStore.FailureReason ?? "the rule set could not be loaded");
         }
     }

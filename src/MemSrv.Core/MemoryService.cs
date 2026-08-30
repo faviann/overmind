@@ -6,7 +6,7 @@ using Npgsql;
 
 namespace MemSrv.Core;
 
-public sealed class MemoryService(string connectionString, NeverStoreGate neverStore)
+public sealed class MemoryService(string connectionString, WriteSafetyGate writeSafety)
 {
     private const double RrfK = 60;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
@@ -352,7 +352,7 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
                     VALUES (@Namespace, @Title, 'checked_out', @AgentId, @SessionId)
                     RETURNING {WorkstreamColumns}
                     """,
-                    new { Namespace = @namespace, Title = neverStore.Redact(title!), context.AgentId, context.SessionId },
+                    new { Namespace = @namespace, Title = writeSafety.Redact(title!), context.AgentId, context.SessionId },
                     transaction);
                 created = true;
             }
@@ -419,7 +419,7 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
             WHERE uuid = @Uuid
             RETURNING {WorkstreamColumns}
             """,
-            new { Uuid = uuid, Status = status, Notes = neverStore.Redact(notes), Refs = refs },
+            new { Uuid = uuid, Status = status, Notes = writeSafety.Redact(notes), Refs = refs },
             transaction);
 
         await InsertTraceRawAsync(context.AgentId, row.Namespace, context.SessionId, "workstream_checkin", new
@@ -452,7 +452,7 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         var targetNamespace = ResolveNamespace(context, @namespace);
         // The summary follows the TRACE never-store rule: redact-in-place before
         // insert (row and trace event alike); the handoff itself still succeeds.
-        var redactedSummary = neverStore.Redact(summary);
+        var redactedSummary = writeSafety.Redact(summary);
         var title = HandoffTitle(redactedSummary);
 
         await using var connection = await OpenAsync(cancellationToken);
@@ -660,9 +660,9 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
 
         try
         {
-            neverStore.AssertAllowed(amendedContent);
+            writeSafety.AssertAllowed(amendedContent);
         }
-        catch (NeverStoreException ex)
+        catch (WriteSafetyRejectedException ex)
         {
             await InsertTraceRawAsync(
                 reviewer,
@@ -673,7 +673,7 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
                 {
                     blockedWrite = "approve_amendment",
                     rule = ex.RuleName,
-                    payload = neverStore.RedactObject(new { content = amendedContent })
+                    payload = writeSafety.RedactObject(new { content = amendedContent })
                 },
                 [proposalUuid],
                 cancellationToken,
@@ -982,7 +982,7 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
         NpgsqlConnection? existingConnection = null,
         NpgsqlTransaction? transaction = null)
     {
-        var contentJson = neverStore.RedactJson(JsonSerializer.Serialize(content, _jsonOptions));
+        var contentJson = writeSafety.RedactJson(JsonSerializer.Serialize(content, _jsonOptions));
         if (existingConnection is not null)
         {
             return await existingConnection.QuerySingleAsync<Guid>(
@@ -1029,16 +1029,16 @@ public sealed class MemoryService(string connectionString, NeverStoreGate neverS
     {
         try
         {
-            neverStore.AssertAllowedObject(payload);
+            writeSafety.AssertAllowedObject(payload);
         }
-        catch (NeverStoreException ex)
+        catch (WriteSafetyRejectedException ex)
         {
             await InsertTraceRawAsync(context.AgentId, @namespace, context.SessionId, "note", new
             {
                 blocked = true,
                 rule = ex.RuleName,
                 write_path = writePath,
-                payload = JsonSerializer.Deserialize<JsonElement>(neverStore.RedactObject(payload))
+                payload = JsonSerializer.Deserialize<JsonElement>(writeSafety.RedactObject(payload))
             }, null, cancellationToken);
             throw;
         }

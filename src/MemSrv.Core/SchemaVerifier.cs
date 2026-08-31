@@ -19,14 +19,38 @@ public static class SchemaVerifier
     private static readonly string[] RequiredTables =
     [
         "namespaces", "traces", "trace_snapshots", "memories",
-        "retrieval_config", "workstreams", "jobs",
-        "capture_source_bindings", "capture_source_streams",
-        "capture_route_policies", "capture_observations",
-        "captured_events", "captured_event_relationships",
-        "capture_pairing_requests", "capture_pairing_audit"
+        "retrieval_config", "workstreams", "jobs"
     ];
 
-    private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab", "capture/unscoped"];
+    private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab"];
+
+    private static readonly string[] RequiredMemoryColumns =
+    [
+        "id", "uuid", "namespace", "type", "visibility", "status", "tier",
+        "content", "content_hash", "metadata", "source_type", "source_id",
+        "agent_id", "session_id", "version", "supersedes", "created_at",
+        "approved_by", "approved_at", "retired_at", "search_tsv"
+    ];
+
+    private static readonly (string Name, string Definition)[] RequiredMemoryConstraints =
+    [
+        (
+            "memories_status_check",
+            "CHECK ((status = ANY (ARRAY['proposed'::text, 'approved'::text, 'rejected'::text, 'superseded'::text, 'retired'::text])))"
+        ),
+        (
+            "memories_tier_check",
+            "CHECK ((tier = ANY (ARRAY['hot'::text, 'warm'::text, 'cold'::text])))"
+        ),
+        (
+            "memories_type_check",
+            "CHECK ((type = ANY (ARRAY['decision'::text, 'fact'::text, 'preference'::text, 'task'::text, 'adr'::text, 'runbook'::text, 'note'::text, 'constraint'::text, 'open_question'::text, 'warning'::text])))"
+        ),
+        (
+            "memories_visibility_check",
+            "CHECK ((visibility = ANY (ARRAY['private'::text, 'shared'::text])))"
+        )
+    ];
 
     // Table grants memsrv must hold, mirroring migrations/0001_init.sql. DELETE is
     // never listed here and is asserted absent everywhere by a separate check.
@@ -39,14 +63,6 @@ public static class SchemaVerifier
         ("jobs", ["SELECT", "INSERT", "UPDATE"]),
         ("retrieval_config", ["SELECT", "INSERT", "UPDATE"]),
         ("namespaces", ["SELECT", "INSERT", "UPDATE"]),
-        ("capture_source_bindings", ["SELECT", "INSERT"]),
-        ("capture_source_streams", ["SELECT", "INSERT"]),
-        ("capture_route_policies", ["SELECT", "INSERT"]),
-        ("capture_observations", ["SELECT", "INSERT"]),
-        ("captured_events", ["SELECT", "INSERT"]),
-        ("captured_event_relationships", ["SELECT", "INSERT"]),
-        ("capture_pairing_requests", ["SELECT", "INSERT", "UPDATE"]),
-        ("capture_pairing_audit", ["SELECT", "INSERT"]),
     ];
 
     public static async Task<SchemaVerificationResult> VerifyAsync(string adminConnectionString)
@@ -62,6 +78,7 @@ public static class SchemaVerifier
         await conn.OpenAsync();
 
         var existingTables = await CheckTablesAsync(conn, result);
+        await CheckMemorySchemaAsync(conn, existingTables, result);
         await CheckFunctionAndTriggerAsync(conn, result);
         await CheckBootstrapRowsAsync(conn, existingTables, result);
         await CheckAppendOnlyTriggerAsync(conn, existingTables, result);
@@ -87,6 +104,49 @@ public static class SchemaVerifier
         return present;
     }
 
+    private static async Task CheckMemorySchemaAsync(
+        NpgsqlConnection conn,
+        HashSet<string> existingTables,
+        SchemaVerificationResult result)
+    {
+        if (!existingTables.Contains("memories"))
+        {
+            return;
+        }
+
+        var columns = (await conn.QueryAsync<string>(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'memories'
+            """)).ToHashSet(StringComparer.Ordinal);
+        foreach (var column in RequiredMemoryColumns)
+        {
+            if (!columns.Contains(column))
+            {
+                result.Fail($"Missing required column 'public.memories.{column}'.");
+            }
+        }
+
+        var constraints = (await conn.QueryAsync<(string Name, string Definition)>(
+            """
+            SELECT conname AS Name, pg_get_constraintdef(oid) AS Definition
+            FROM pg_constraint
+            WHERE conrelid = 'public.memories'::regclass AND contype = 'c'
+            """)).ToDictionary(row => row.Name, row => row.Definition, StringComparer.Ordinal);
+        foreach (var (name, definition) in RequiredMemoryConstraints)
+        {
+            if (!constraints.TryGetValue(name, out var actual))
+            {
+                result.Fail($"Missing required constraint 'public.{name}'.");
+            }
+            else if (!string.Equals(actual, definition, StringComparison.Ordinal))
+            {
+                result.Fail($"Constraint 'public.{name}' does not match the retained Phase 1 definition.");
+            }
+        }
+    }
+
     private static async Task CheckFunctionAndTriggerAsync(NpgsqlConnection conn, SchemaVerificationResult result)
     {
         var functionExists = await conn.ExecuteScalarAsync<bool>(
@@ -103,30 +163,6 @@ public static class SchemaVerifier
         if (!triggerExists)
         {
             result.Fail("Missing append-only trigger 'traces_immutable' on 'public.traces'.");
-        }
-
-        foreach (var (table, trigger) in new[]
-        {
-            ("capture_observations", "capture_observations_immutable"),
-            ("capture_route_policies", "capture_route_policies_immutable"),
-            ("captured_events", "captured_events_immutable"),
-            ("captured_event_relationships", "captured_event_relationships_immutable"),
-            ("capture_pairing_audit", "capture_pairing_audit_immutable")
-        })
-        {
-            var exists = await conn.ExecuteScalarAsync<bool>(
-                """
-                SELECT EXISTS (
-                  SELECT 1 FROM pg_trigger t
-                  JOIN pg_class c ON c.oid = t.tgrelid
-                  WHERE c.relname = @table AND t.tgname = @trigger AND NOT t.tgisinternal
-                )
-                """,
-                new { table, trigger });
-            if (!exists)
-            {
-                result.Fail($"Missing append-only trigger '{trigger}' on 'public.{table}'.");
-            }
         }
     }
 
@@ -257,15 +293,8 @@ public static class SchemaVerifier
             }
         }
 
-        await CheckCaptureUpdateGrantsAsync(conn, existingTables, result);
-
         // traces (and its snapshots) are append-only by grant as well as by trigger.
-        foreach (var table in new[]
-        {
-            "traces", "trace_snapshots", "capture_observations",
-            "capture_route_policies", "captured_events", "captured_event_relationships",
-            "capture_pairing_audit"
-        })
+        foreach (var table in new[] { "traces", "trace_snapshots" })
         {
             if (!existingTables.Contains(table))
             {
@@ -305,54 +334,6 @@ public static class SchemaVerifier
         }
     }
 
-    private static async Task CheckCaptureUpdateGrantsAsync(
-        NpgsqlConnection conn,
-        HashSet<string> existingTables,
-        SchemaVerificationResult result)
-    {
-        foreach (var (table, allowedColumns) in new[]
-        {
-            ("capture_source_bindings", Array.Empty<string>()),
-            ("capture_source_streams", new[] { "checkpoint_position", "updated_at" })
-        })
-        {
-            if (!existingTables.Contains(table))
-            {
-                continue;
-            }
-
-            var columns = await conn.QueryAsync<string>(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = @table
-                ORDER BY ordinal_position
-                """,
-                new { table });
-            foreach (var column in columns)
-            {
-                bool granted = await conn.ExecuteScalarAsync<bool>(
-                    "SELECT has_column_privilege(@role, @table, @column, 'UPDATE')",
-                    new
-                    {
-                        role = MemsrvRole,
-                        table = $"public.{table}",
-                        column
-                    });
-                bool expected = allowedColumns.Contains(column, StringComparer.Ordinal);
-                if (expected && !granted)
-                {
-                    result.Fail(
-                        $"Role '{MemsrvRole}' is missing UPDATE on 'public.{table}.{column}'.");
-                }
-                else if (!expected && granted)
-                {
-                    result.Fail(
-                        $"Role '{MemsrvRole}' must not have UPDATE on 'public.{table}.{column}'.");
-                }
-            }
-        }
-    }
 }
 
 public sealed class SchemaVerificationResult

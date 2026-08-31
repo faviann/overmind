@@ -286,6 +286,11 @@ to use `memory_dev` and disposable test databases. An isolated execution
 environment may instead point the complete test lifecycle at an already-running
 PostgreSQL 18 test instance, without Docker access:
 
+Databases created from the removed capture migration history are unsupported.
+Recreate development and test databases from the retained migration set; there
+is no forward drop migration or supported upgrade from a capture-bearing
+database.
+
 ```sh
 MEMSRV_TEST_ADMIN_CONNECTION_STRING='postgres://test_admin:<password>@db:5432/postgres' \
   make test

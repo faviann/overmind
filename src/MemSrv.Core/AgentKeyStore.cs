@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -142,41 +140,4 @@ public sealed class AgentKeyStore
         public string? DefaultNamespace { get; set; }
         public List<string>? AllowedNamespaces { get; set; }
     }
-}
-
-public static class CaptureCredential
-{
-    private const string Prefix = "mcap_";
-    private const int MinimumMaterialLength = 32;
-
-    public static bool HasReservedPrefix(string value) =>
-        value.StartsWith(Prefix, StringComparison.Ordinal);
-
-    public static bool IsCaptureForm(string value)
-    {
-        if (!HasReservedPrefix(value)
-            || value.Length < Prefix.Length + MinimumMaterialLength)
-        {
-            return false;
-        }
-
-        return value.AsSpan(Prefix.Length).IndexOfAnyExcept(
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") < 0;
-    }
-
-    public static void RequireCaptureForm(string value)
-    {
-        if (!IsCaptureForm(value))
-        {
-            throw new ArgumentException(
-                "Capture credential must use mcap_ followed by at least 32 URL-safe random characters.");
-        }
-    }
-
-    /// <summary>
-    /// The stored form of a capture credential: lowercase hex SHA-256. Enrollment
-    /// writes it and authority looks it up, so the raw credential is never stored.
-    /// </summary>
-    public static string Hash(string value) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 }

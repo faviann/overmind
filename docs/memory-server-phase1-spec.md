@@ -1,4 +1,4 @@
-# Memory Server — Phase 1 Build Spec (v1.10)
+# Memory Server — Phase 1 Build Spec (v1.11)
 
 This is a build spec for a Claude Code session. It is deliberately narrow. The **Do Not Build** section is as binding as the requirements. The goal is a working v0 spine in 1–2 sessions that the homelab project can consume immediately.
 
@@ -46,6 +46,15 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > agent-key reservation are removed. The legacy capture ledger/core and its
 > schema and migrations remain only as inaccessible residue for the next
 > contraction; they expose no packaged public or operator capability.
+
+> **v1.11 changelog (2026-08-31 — fresh Phase 1 baseline restored, issue #224):**
+> The inaccessible capture ledger/core, capture-only fidelity and outcome
+> machinery, migrations `0002` through `0010`, schema expectations, and tests
+> are removed. New databases start from retained migration `0001`; databases
+> created from the removed history are unsupported and must be recreated. No
+> capture-bearing upgrade, compatibility, forward drop migration, or legacy-row
+> preservation path exists. Retained Phase 1 behavior and write safety are
+> unchanged.
 
 Where this spec is silent and `evidence-and-knowledge-boundary.md` does not decide ownership, nothing else decides for it — do not infer authority from an older or informational document. Raise the gap with the operator only when it is a **material policy or architecture decision**: one that changes a contract, an invariant, or a binding scope. Ordinary implementation choices this spec deliberately leaves open stay with the implementer.
 
@@ -346,7 +355,7 @@ Ship these as an executable test script against a seeded, disposable local `memo
 
 1. **"Why did you say that?"** Given a session_id, list all `memory_consumed` and `trace_consumed` events and resolve each uuid to its source trace/document. (`memctl consumed` + `memctl why`.)
 2. **"This source changed — what depends on it?"** Given a source_id, list every memory derived from it (index on `source_id`). *(The nightly reconciliation worker that automates this is Phase 3 — the query must work now.)*
-3. **"Adjudicate these two facts."** Given two uuids, show capture timestamps, sources, versions, and supersession chain side by side — including who approved each (from the review events), distinctly from who proposed each.
+3. **"Adjudicate these two facts."** Given two uuids, show creation timestamps, sources, versions, and supersession chain side by side — including who approved each (from the review events), distinctly from who proposed each.
 4. **"Was this hallucinated?"** Given a session_id and a claim, show whether any consumed memory or consumed trace in that session contains it (FTS over the consumed set).
 
 Plus mechanical tests: UPDATE/DELETE on traces fails **both** via trigger and via the `memsrv` role's grants; private memories invisible to other agents; shared writes cannot be born approved; never-store gate **blocks** a seeded fake secret on the memory path and **redacts** it on the trace path (event recorded, secret absent); RRF returns per-lane scores; namespace isolation holds; **(v1.1)** every memory row has a valid `content_hash`; approval without `--by` fails; approval trace event carries `review:<uuid>` session and a reviewer agent_id distinct from the proposer; `--edit` approval preserves original content and marks `amended: true`; **(v1.4)** successful retirement of approved shared and private memories records the normalized actor and reason, is replayable through `memctl trace retirement:<uuid>`, and exposes the status change and trace together; missing `--by`/`--reason`, a missing uuid, an invalid source status, and repeated retirement fail without changing the row or appending a retirement event.
@@ -358,10 +367,8 @@ applicable binding spec explicitly amends one. The capture-runtime,
 harness-hook, and OIDC capture-console authorization that
 `conversation-capture-phase2-spec.md` once granted is **superseded and no
 longer in force** (2026-08-20 course-correction, #203/#205 — see
-`evidence-and-knowledge-boundary.md`). The workstation-side producer code it
-produced has been removed, as has the transitional packaged server-side capture
-interface. Its ledger/core and schema/migrations remain frozen and inaccessible
-pending contraction. The list below applies unamended to new work. The
+`evidence-and-knowledge-boundary.md`). The capture substrate it produced has
+been removed in full. The list below applies unamended to new work. The
 italic scope notes on the datastore entry below and on the §13 scale-out seam
 clarify what those entries already govern; they amend nothing.
 

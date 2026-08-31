@@ -3,11 +3,35 @@ namespace MemSrv.Tests;
 public sealed class RepositoryStructureTests
 {
     [Fact]
-    public void WorkstationCaptureProducerIsAbsentFromRepositoryGraph()
+    public void RetiredCaptureSubstrateIsAbsentFromRepositoryGraph()
     {
         string root = TestProcessRunner.RepoRoot;
         string[] removedPaths =
         [
+            "migrations/0002_capture_slice.sql",
+            "migrations/0003_capture_stream_contract.sql",
+            "migrations/0004_capture_locator_timestamp.sql",
+            "migrations/0005_capture_relationship_stream_scope.sql",
+            "migrations/0006_capture_runtime_update_grants.sql",
+            "migrations/0007_capture_routing_policy.sql",
+            "migrations/0008_capture_source_identity.sql",
+            "migrations/0009_capture_outcome.sql",
+            "migrations/0010_capture_pairing.sql",
+            "src/MemSrv.Core/CaptureAuthority.cs",
+            "src/MemSrv.Core/CaptureEnrollment.cs",
+            "src/MemSrv.Core/CaptureFidelityPolicy.cs",
+            "src/MemSrv.Core/CaptureIngestion.cs",
+            "src/MemSrv.Core/CaptureLedger.cs",
+            "src/MemSrv.Core/CaptureModels.cs",
+            "src/MemSrv.Core/CaptureOutcomes.cs",
+            "src/MemSrv.Core/CapturePairing.cs",
+            "src/MemSrv.Core/CaptureRouting.cs",
+            "src/MemSrv.Core/GovernedSerializationStream.cs",
+            "src/MemSrv.Core/OperatorCaptureReads.cs",
+            "tests/MemSrv.Tests/CaptureLedgerCoreTests.cs",
+            "tests/MemSrv.Tests/CaptureObservationSizeTests.cs",
+            "tests/MemSrv.Tests/CaptureOutcomeTests.cs",
+            "tests/MemSrv.Tests/CaptureSafetyTests.cs",
             "src/CaptureAdapters/AdapterContracts.cs",
             "src/CaptureAdapters/CaptureAdapters.csproj",
             "src/CaptureAdapters/CaptureRescanScheduler.cs",
@@ -62,14 +86,12 @@ public sealed class RepositoryStructureTests
             "docs/codex-capture-runtime.md"
         ];
 
-        Assert.Equal(52, removedPaths.Length);
-
         foreach (string path in removedPaths)
         {
             string absolutePath = Path.Combine(root, path);
             Assert.False(
                 File.Exists(absolutePath) || Directory.Exists(absolutePath),
-                $"Deleted workstation capture producer path still exists: {path}");
+                $"Deleted capture substrate path still exists: {path}");
         }
 
         Assert.DoesNotContain(

@@ -1,11 +1,5 @@
 # Testing conventions (load before writing or changing tests)
 
-Capture coverage in this document applies only to the inaccessible legacy
-ledger/core and schema residue. All packaged capture interfaces and the
-workstation producer have been removed. These rules authorize no new capture
-work. Current authority for capture is
-[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
-
 ## What a good test is here
 - Calls the public surface: an MCP tool (`log_trace`, `save_note`, `search_memory`,
   `get_by_id`, ...) or a `memctl` command. Asserts on the response or on subsequent
@@ -44,18 +38,14 @@ assert that mechanism directly:
   UPDATE/DELETE, expect permission denied)
 - no DELETE granted on any table
 - never-store persistence absence for a seeded synthetic secret (fake
-  `AKIA...` pattern). The absence sweep is not satisfied by the canonical
-  table alone: it also covers the capture ledger tables, `traces`, `memories`,
-  the HTTP response body, `memctl` stdout/stderr, the out-of-process server's
+  `AKIA...` pattern). The absence sweep covers `traces`, `memories`, the HTTP
+  response body, `memctl` stdout/stderr, the out-of-process server's
   stdout/stderr, and thrown exception messages
 - every memory row's `content_hash` is the valid server-computed SHA-256 of its
   content
 - migration-keyed test-template lifecycle: changing the migration fingerprint
   rebuilds the template, and each atomic clone exposes exactly the schema for
   the migration set that requested it
-- capture-ledger transaction atomicity, locator/event-part uniqueness, immutable
-  observation/event/relationship triggers, and the corresponding restricted
-  grants. These are mechanical checks of the narrow disabled capture slice.
 
 ### Module-surface tests for write safety
 
@@ -69,26 +59,14 @@ the production number is under test; the boundary class alone exercises the
 real 64 MiB leaf value. Keep end-to-end proof that the same gate governs memory
 and trace writes at the public HTTP MCP seam.
 
-The legacy 128 MiB whole-observation rule is not a write-safety budget. No
-packaged capture route or operator seam exists. `CaptureFidelityPolicy` and
-`CaptureIngestion` remain authorized module seams for the frozen inaccessible
-capture-only mechanics, and real-number coverage stays isolated in
-`CaptureObservationSizeTests`. `CaptureSafetyTests` and
-`CaptureLedgerCoreTests` may cover only ingestion safety and fidelity,
-transaction atomicity, checkpoint/gap/idempotency/retry behavior, adapter
-convergence, and internal result persistence. `SchemaVerifierTests` may inspect
-and migrate the schema residue mechanically. No test may recreate capture
-routing policy, credential or enrollment behavior as a product contract,
-authorization, console or pairing behavior, public receipt/replay/navigation,
-or operator-command behavior. Existing enrollment or authority calls may only
-arrange an internal core fixture; assertions must remain about the authorized
-frozen mechanics.
-
 Namespace isolation and private-memory invisibility are binding acceptance
 behaviors, but their seam is keyed MCP agents. Verify them through public
 searches and reads, not direct table assertions.
 
 ## Database lifecycle
+- Databases created from the removed capture migration history are unsupported.
+  Recreate disposable development and test databases from the retained migration
+  set; no upgrade, compatibility, or forward drop migration is provided.
 - `make test` supports two provisioning environments. With
   `MEMSRV_TEST_ADMIN_CONNECTION_STRING` unset, `make db-up` provisions the
   existing PostgreSQL 18 service through `compose.dev.yaml`; this remains the
@@ -196,8 +174,9 @@ searches and reads, not direct table assertions.
   template under the cross-process lock.
 - The historical 30-failure profiling run is not a performance baseline for
   completed behavior. The merged #30 direct-apphost lifecycle fix and #33
-  per-suite database/template isolation precede this benchmark; the post-merge
-  baseline is 92 passing, zero failed, zero skipped in three runs.
+  per-suite database/template isolation precede this benchmark. Its 92-test
+  count also predates the removal of capture-only tests in #224 and is not a
+  current discovery-count contract.
 
 ### Issue #29 measurements (2026-07-13, same warm workspace)
 

@@ -5,11 +5,6 @@ stated here is not a contract. Every section is now **FINAL**: the Session 2
 HTTP transport has landed, so the service runtime shape (port, health, bind
 address, key file) is defined below rather than deferred.
 
-Capture schema verification below covers inaccessible legacy residue only.
-No capture endpoint, credential class, operator command, or configuration is
-part of the deployed application. Current authority for that residue is
-[evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
-
 ## Image — FINAL
 
 - `ghcr.io/faviann/overmind:<version>` — immutable tags, published by CI on git
@@ -100,6 +95,10 @@ docker run --rm \
 - Exit `2` — usage error.
 - Journal: DbUp `schemaversions` table in the target database. Production never
   applies migration files via raw `psql`.
+- The packaged migration set starts from the retained Phase 1 baseline.
+  Databases created from the removed capture migration history are unsupported
+  and must be recreated; no upgrade, compatibility, or forward drop migration
+  is provided.
 - **The `memsrv` role must exist before migrations run.** Roles are owned by
   provisioning (the reference Compose bootstrap in reference deployments,
   the development bootstrap locally, and Ansible in the homelab deployment).
@@ -140,14 +139,6 @@ What it asserts:
   migration.
 - Bootstrap rows exist: the `memory-system` and `homelab` namespaces and the
   default (`*`/`*`) retrieval config.
-- The capture slice's binding, append-only route-policy, stream, observation,
-  event, relationship, pairing-request coordination, and pairing-audit tables
-  exist; immutable capture-ledger triggers and restricted grants are present;
-  and `capture/unscoped` exists.
-- `memsrv` has the expected SELECT, INSERT, and UPDATE grants on mutable pairing
-  request state. Pairing audit has the `capture_pairing_audit_immutable`
-  trigger, the expected SELECT and INSERT grants, no UPDATE grant, and no
-  DELETE grant.
 
 Run it against a **disposable** target only — dev/test/CI use a locally
 provisioned database, never the persistent production `memory`.
@@ -211,8 +202,7 @@ modes run from the same image.
   container,
   path via `MEMSRV_AGENT_KEYS_PATH`. Plaintext entries under a top-level `keys:`
   list, each `{key, agent_id, default_namespace, allowed_namespaces[]}`.
-  Rotation is a redeploy; there is no key CRUD in the app. Key material has no
-  reserved capture-only prefix or interpretation.
+  Rotation is a redeploy; there is no key CRUD in the app.
 - **Day-1 agent URL:** `http://overmind.faviann.vms:8080/mcp` — DNS name, plain
   HTTP on the LAN. The backend remains plain HTTP; external Traefik/TLS may
   terminate HTTPS independently.

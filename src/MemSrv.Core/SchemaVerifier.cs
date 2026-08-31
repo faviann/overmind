@@ -24,12 +24,29 @@ public static class SchemaVerifier
 
     private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab"];
 
-    private static readonly string[] RequiredMemoryColumns =
+    private static readonly (string Name, string IsNullable)[] RequiredMemoryColumns =
     [
-        "id", "uuid", "namespace", "type", "visibility", "status", "tier",
-        "content", "content_hash", "metadata", "source_type", "source_id",
-        "agent_id", "session_id", "version", "supersedes", "created_at",
-        "approved_by", "approved_at", "retired_at", "search_tsv"
+        ("id", "NO"),
+        ("uuid", "NO"),
+        ("namespace", "NO"),
+        ("type", "NO"),
+        ("visibility", "NO"),
+        ("status", "NO"),
+        ("tier", "NO"),
+        ("content", "NO"),
+        ("content_hash", "NO"),
+        ("metadata", "NO"),
+        ("source_type", "NO"),
+        ("source_id", "YES"),
+        ("agent_id", "NO"),
+        ("session_id", "YES"),
+        ("version", "NO"),
+        ("supersedes", "YES"),
+        ("created_at", "NO"),
+        ("approved_by", "YES"),
+        ("approved_at", "YES"),
+        ("retired_at", "YES"),
+        ("search_tsv", "YES")
     ];
 
     private static readonly (string Name, string Definition)[] RequiredMemoryConstraints =
@@ -114,17 +131,23 @@ public static class SchemaVerifier
             return;
         }
 
-        var columns = (await conn.QueryAsync<string>(
+        var columns = (await conn.QueryAsync<(string Name, string IsNullable)>(
             """
-            SELECT column_name
+            SELECT column_name AS Name, is_nullable AS IsNullable
             FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = 'memories'
-            """)).ToHashSet(StringComparer.Ordinal);
-        foreach (var column in RequiredMemoryColumns)
+            """)).ToDictionary(row => row.Name, row => row.IsNullable, StringComparer.Ordinal);
+        foreach (var (name, isNullable) in RequiredMemoryColumns)
         {
-            if (!columns.Contains(column))
+            if (!columns.TryGetValue(name, out var actualNullability))
             {
-                result.Fail($"Missing required column 'public.memories.{column}'.");
+                result.Fail($"Missing required column 'public.memories.{name}'.");
+            }
+            else if (!string.Equals(actualNullability, isNullable, StringComparison.Ordinal))
+            {
+                result.Fail(
+                    $"Column 'public.memories.{name}' has nullability '{actualNullability}'; " +
+                    $"expected '{isNullable}'.");
             }
         }
 

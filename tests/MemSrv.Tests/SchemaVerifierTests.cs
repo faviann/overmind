@@ -215,6 +215,25 @@ public sealed class SchemaVerifierTests
         });
     }
 
+    [Theory]
+    [InlineData("source_type")]
+    [InlineData("agent_id")]
+    [InlineData("content_hash")]
+    public async Task MemCtlVerifySchemaFailsWhenRequiredMemoryColumnBecomesNullable(string column)
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, $"ALTER TABLE memories ALTER COLUMN {column} DROP NOT NULL");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains(
+                $"Column 'public.memories.{column}' has nullability 'YES'; expected 'NO'",
+                stderr,
+                StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task MemCtlVerifySchemaFailsWhenMemoryVisibilityConstraintIsMissing()
     {

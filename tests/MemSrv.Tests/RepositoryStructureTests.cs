@@ -86,6 +86,8 @@ public sealed class RepositoryStructureTests
             "docs/codex-capture-runtime.md"
         ];
 
+        Assert.Equal(76, removedPaths.Length);
+
         foreach (string path in removedPaths)
         {
             string absolutePath = Path.Combine(root, path);

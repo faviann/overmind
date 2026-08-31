@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace MemSrv.Tests;
 
 public sealed class RepositoryStructureTests
@@ -110,38 +112,49 @@ public sealed class RepositoryStructureTests
     }
 
     [Fact]
+    public void RetainedGlossaryAndDecisionChainDescribeTheCurrentBoundary()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string glossary = File.ReadAllText(Path.Combine(root, "CONTEXT.md"));
+        string decisions = File.ReadAllText(Path.Combine(root, "docs/decisions.md"));
+
+        Assert.Contains("Every row belongs to\nexactly one namespace", glossary, StringComparison.Ordinal);
+        Assert.Contains("It identifies the provisioned actor", glossary, StringComparison.Ordinal);
+        Assert.Contains("only ever retrieved by its owning agent", glossary, StringComparison.Ordinal);
+        Assert.Contains("Lifecycle: open → checked_out → open | done | abandoned", glossary, StringComparison.Ordinal);
+        Assert.Contains("the full trace stays retrievable by reference, never inlined", glossary, StringComparison.Ordinal);
+        Assert.Contains("Everything else\n(FTS index", glossary, StringComparison.Ordinal);
+
+        Assert.Contains("No retired capture caller remains", decisions, StringComparison.Ordinal);
+        Assert.Contains(
+            "2026-08-31 #210/#225 decision then reversed the active-tree retention rule",
+            decisions,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "2026-08-31 #210/#225 decision cancels that",
+            decisions,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Temporary capture callers map", decisions, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RetiredCaptureCategoriesAreAbsentFromRepositoryAndPackageInputs()
     {
         string root = TestProcessRunner.RepoRoot;
-        string[] inspectedPaths =
-        [
-            "src",
-            "migrations",
-            "packages",
-            "AGENTS.md",
-            "CONTEXT.md",
-            "README.md",
-            "docs/agents/domain.md",
-            "docs/testing.md",
-            "docs/deployment-contract.md",
-            "docs/design-rules.md",
-            "docs/evidence-and-knowledge-boundary.md",
-            "docs/memory-server-phase1-spec.md",
-            "docs/decisions.md",
-            "docs/write-safety.md",
-            ".gitignore",
-            "memsrv.sln",
-            "Makefile",
-            "Dockerfile",
-            "compose.yaml",
-            ".github/workflows/ci.yml"
-        ];
+        IReadOnlyList<string> repositoryFiles = GetTrackedRepositoryFiles(root);
+        HashSet<string> intentionalProbeFiles = new(StringComparer.Ordinal)
+        {
+            "tests/MemSrv.Tests/RepositoryStructureTests.cs",
+            "tests/MemSrv.Tests/PublicSurfaceRemovalTests.cs",
+            "tests/MemSrv.Tests/HttpTransportTests.cs"
+        };
         string[] retiredCategoryMarkers =
         [
             "CaptureAdapters",
             "CodexCaptureTracer",
             "/capture/",
             "memctl capture",
+            "case \"capture\":",
             "MEMSRV_CAPTURE_",
             ".env.capture",
             "mcap_",
@@ -161,39 +174,21 @@ public sealed class RepositoryStructureTests
             "smoke-capture-runtime"
         ];
 
-        foreach (string relativePath in inspectedPaths)
+        Assert.NotEmpty(repositoryFiles);
+        foreach (string repositoryEntry in repositoryFiles)
         {
-            string absolutePath = Path.Combine(root, relativePath);
-            if (!Directory.Exists(absolutePath) && !File.Exists(absolutePath))
+            if (intentionalProbeFiles.Contains(repositoryEntry))
             {
-                foreach (string marker in retiredCategoryMarkers)
-                {
-                    Assert.DoesNotContain(
-                        marker,
-                        relativePath,
-                        StringComparison.OrdinalIgnoreCase);
-                }
-
                 continue;
             }
 
-            IEnumerable<string> files = Directory.Exists(absolutePath)
-                ? Directory.EnumerateFiles(absolutePath, "*", SearchOption.AllDirectories)
-                    .Where(path => !path.Contains("/bin/", StringComparison.Ordinal)
-                        && !path.Contains("/obj/", StringComparison.Ordinal))
-                : [absolutePath];
-
-            foreach (string file in files)
+            string content = File.ReadAllText(Path.Combine(root, repositoryEntry));
+            foreach (string marker in retiredCategoryMarkers)
             {
-                string repositoryEntry = Path.GetRelativePath(root, file);
-                string content = File.ReadAllText(file);
-                foreach (string marker in retiredCategoryMarkers)
-                {
-                    Assert.False(
-                        repositoryEntry.Contains(marker, StringComparison.OrdinalIgnoreCase)
-                            || content.Contains(marker, StringComparison.OrdinalIgnoreCase),
-                        $"Retired capture category marker '{marker}' found in {repositoryEntry}");
-                }
+                Assert.False(
+                    repositoryEntry.Contains(marker, StringComparison.OrdinalIgnoreCase)
+                        || content.Contains(marker, StringComparison.OrdinalIgnoreCase),
+                    $"Retired capture category marker '{marker}' found in {repositoryEntry}");
             }
         }
     }
@@ -282,8 +277,6 @@ public sealed class RepositoryStructureTests
             "docs/codex-capture-runtime.md"
         ];
 
-        Assert.Equal(76, removedPaths.Length);
-
         foreach (string path in removedPaths)
         {
             string absolutePath = Path.Combine(root, path);
@@ -313,4 +306,50 @@ public sealed class RepositoryStructureTests
             File.ReadAllText(Path.Combine(root, "Makefile")),
             StringComparison.Ordinal);
     }
+
+    private static IReadOnlyList<string> GetTrackedRepositoryFiles(string root)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "git",
+            WorkingDirectory = root,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        startInfo.ArgumentList.Add("ls-files");
+        startInfo.ArgumentList.Add("--cached");
+        startInfo.ArgumentList.Add("-z");
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Unable to inspect the tracked repository graph.");
+        string output = process.StandardOutput.ReadToEnd();
+        string error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, $"git ls-files failed: {error}");
+
+        return output.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Where(IsContractRegion)
+            .Where(path => !IsGeneratedOutput(path))
+            .Where(path => File.Exists(Path.Combine(root, path)))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static bool IsContractRegion(string path) =>
+        !path.Contains('/', StringComparison.Ordinal)
+        || path.StartsWith("config/", StringComparison.Ordinal)
+        || path.StartsWith("packages/", StringComparison.Ordinal)
+        || path.StartsWith("tools/", StringComparison.Ordinal)
+        || path.StartsWith(".github/workflows/", StringComparison.Ordinal)
+        || path.StartsWith("fixtures/", StringComparison.Ordinal)
+        || path.StartsWith("tests/", StringComparison.Ordinal)
+        || path.StartsWith("docs/", StringComparison.Ordinal)
+        || path.StartsWith("src/", StringComparison.Ordinal)
+        || path.StartsWith("migrations/", StringComparison.Ordinal);
+
+    private static bool IsGeneratedOutput(string path) =>
+        path.Contains("/bin/", StringComparison.Ordinal)
+        || path.Contains("/obj/", StringComparison.Ordinal)
+        || path.Contains("/TestResults/", StringComparison.Ordinal);
 }

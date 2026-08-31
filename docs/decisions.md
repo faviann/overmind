@@ -22,8 +22,7 @@
   Rule validation, deterministic matching/decoding, markers, deadlines, and
   numeric scanner defaults retain their behavior.
 - General write-safety failures expose only closed failure codes and safe
-  wording. Temporary capture callers map those codes into capture health and
-  fidelity projections outside the retained boundary.
+  wording. No retired capture caller remains.
 - The retired whole-observation ceiling is not a Phase 1 scan budget.
 - This atomically supersedes the 2026-08-20 decision's narrower safety
   authority. The binding general contract is now `write-safety.md`.
@@ -90,27 +89,29 @@
   harnesses emit move to **Moraine** (adoption tracked by #206). Overmind's own
   append-only `traces` ledger is unaffected. Overmind does not own duplicate
   canonical conversation storage for that external evidence.
-- The Phase 2 specification and its subordinate documents are
-  **superseded/frozen**. Per #203's recorded guardrails, the
-  capture code is not deleted before #206 proves the replacement path; its
-  existence alone justifies no new capture work. Retention in the active tree
-  is narrow, not a general provenance allowance: the Phase 2 spec stays because
-  #205 requires that historical specification to remain and be clearly
-  non-binding, and the concrete legacy-operational capture documents stay while
-  the shipped code they describe still exists. Research notes, plans,
-  intermediate analyses, and process artifacts are not entitled to remain on
-  `main` merely for their history — Git history, issues, and PRs preserve those.
+- At this 2026-08-20 revision, the Phase 2 specification and its subordinate
+  documents were **superseded/frozen**. Per #203's recorded guardrails, the
+  capture code was not to be deleted before #206 proved the replacement path;
+  its existence alone justified no new capture work. Retention in the active
+  tree was narrow, not a general provenance allowance: the Phase 2 spec stayed
+  because #205 required that historical specification to remain and be clearly
+  non-binding, and the concrete legacy-operational capture documents stayed
+  while the shipped code they described still existed. Research notes, plans,
+  intermediate analyses, and process artifacts were not entitled to remain on
+  `main` merely for their history — Git history, issues, and PRs preserved them.
   At that revision the capture-only safety document was the one exception to
   the freeze because spec §5 cited it for every Overmind write path. The
-  2026-08-30 decision replaced that authority with general write safety.
+  2026-08-30 decision replaced that authority with general write safety. The
+  2026-08-31 #210/#225 decision then reversed the active-tree retention rule
+  after the replacement path and clean cut completed.
 - Phase 1 memory and governance invariants remain binding; capture-specific
   Phase 2 amendments do not remain binding merely because they were
   implemented. Current authority is
   `docs/evidence-and-knowledge-boundary.md`.
-- Supersedes the #15 conversation-capture track that the 2026-07-10 `log_trace`
-  session-selection entry deferred import-time session preservation to. That
-  requirement itself stands, uncancelled, and needs re-triage to a current
-  tracker.
+- At this 2026-08-20 revision, superseding the #15 conversation-capture track
+  left the import-time session-preservation requirement standing, uncancelled,
+  and needing re-triage. The 2026-08-31 #210/#225 decision cancels that
+  requirement and lifts its v1.0.0 block.
 - Evidence door: reopen if external evidence living outside Overmind proves
   unusable for the governance work that needs it — a governed fact that cannot
   be grounded in its conversation without Overmind storing that conversation,

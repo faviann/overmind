@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace MemSrv.Tests;
 
 public sealed class RepositoryStructureTests
@@ -115,15 +113,49 @@ public sealed class RepositoryStructureTests
     public void RetainedGlossaryAndDecisionChainDescribeTheCurrentBoundary()
     {
         string root = TestProcessRunner.RepoRoot;
-        string glossary = File.ReadAllText(Path.Combine(root, "CONTEXT.md"));
-        string decisions = File.ReadAllText(Path.Combine(root, "docs/decisions.md"));
+        string glossary = NormalizeWhitespace(
+            File.ReadAllText(Path.Combine(root, "CONTEXT.md")));
+        string decisions = NormalizeWhitespace(
+            File.ReadAllText(Path.Combine(root, "docs/decisions.md")));
 
-        Assert.Contains("Every row belongs to\nexactly one namespace", glossary, StringComparison.Ordinal);
-        Assert.Contains("It identifies the provisioned actor", glossary, StringComparison.Ordinal);
-        Assert.Contains("only ever retrieved by its owning agent", glossary, StringComparison.Ordinal);
-        Assert.Contains("Lifecycle: open → checked_out → open | done | abandoned", glossary, StringComparison.Ordinal);
-        Assert.Contains("the full trace stays retrievable by reference, never inlined", glossary, StringComparison.Ordinal);
-        Assert.Contains("Everything else\n(FTS index", glossary, StringComparison.Ordinal);
+        Assert.Contains(
+            "Every memory and trace belongs to exactly one namespace",
+            glossary,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Every row belongs", glossary, StringComparison.Ordinal);
+        Assert.Contains("Server-derived and never self-asserted", glossary, StringComparison.Ordinal);
+        Assert.Contains(
+            "Codex and Claude Code remain distinct provisioned actors even when one person operates both",
+            glossary,
+            StringComparison.Ordinal);
+        Assert.Contains("default namespace and allowed namespaces", glossary, StringComparison.Ordinal);
+        Assert.Contains("Provisioning owns its lifecycle", glossary, StringComparison.Ordinal);
+        Assert.Contains("not the application", glossary, StringComparison.Ordinal);
+        Assert.Contains("explicit namespace still requires authorization", glossary, StringComparison.Ordinal);
+        Assert.Contains("trusted transport or process context", glossary, StringComparison.Ordinal);
+        Assert.Contains("every event in the run shares that session", glossary, StringComparison.Ordinal);
+        Assert.Contains("authorization still applies to every member", glossary, StringComparison.Ordinal);
+        Assert.Contains("review:<proposal_uuid>", glossary, StringComparison.Ordinal);
+        Assert.Contains("human:<name>", glossary, StringComparison.Ordinal);
+        Assert.Contains("reviewer, never the proposing agent", glossary, StringComparison.Ordinal);
+        Assert.Contains("status='proposed'", glossary, StringComparison.Ordinal);
+        Assert.Contains("not yet trusted and hidden by default", glossary, StringComparison.Ordinal);
+        Assert.Contains(
+            "Operator approval or edit-then-approval is the only route to shared knowledge; rejection leaves it rejected",
+            glossary,
+            StringComparison.Ordinal);
+        Assert.Contains("agents cannot approve it", glossary, StringComparison.Ordinal);
+        Assert.Contains("decision provenance remain available for audit", glossary, StringComparison.Ordinal);
+        Assert.Contains("visible only to its owning agent", glossary, StringComparison.Ordinal);
+        Assert.Contains("open → checked_out → open | done | abandoned", glossary, StringComparison.Ordinal);
+        Assert.Contains("exactly one checkout owner", glossary, StringComparison.Ordinal);
+        Assert.Contains("Only its checkout owner may check in", glossary, StringComparison.Ordinal);
+        Assert.Contains("an open check-in is a handoff", glossary, StringComparison.Ordinal);
+        Assert.Contains("full trace remains retrievable by reference and is never inlined", glossary, StringComparison.Ordinal);
+        Assert.Contains(
+            "Everything outside that ledger is a derived, rebuildable projection and never the sole place truth exists",
+            glossary,
+            StringComparison.Ordinal);
 
         Assert.Contains("No retired capture caller remains", decisions, StringComparison.Ordinal);
         Assert.Contains(
@@ -138,16 +170,10 @@ public sealed class RepositoryStructureTests
     }
 
     [Fact]
-    public void RetiredCaptureCategoriesAreAbsentFromRepositoryAndPackageInputs()
+    public async Task RetiredCaptureCategoriesAreAbsentFromRepositoryAndPackageInputs()
     {
         string root = TestProcessRunner.RepoRoot;
-        IReadOnlyList<string> repositoryFiles = GetTrackedRepositoryFiles(root);
-        HashSet<string> intentionalProbeFiles = new(StringComparer.Ordinal)
-        {
-            "tests/MemSrv.Tests/RepositoryStructureTests.cs",
-            "tests/MemSrv.Tests/PublicSurfaceRemovalTests.cs",
-            "tests/MemSrv.Tests/HttpTransportTests.cs"
-        };
+        IReadOnlyList<string> repositoryFiles = await GetTrackedRepositoryFilesAsync(root);
         string[] retiredCategoryMarkers =
         [
             "CaptureAdapters",
@@ -177,17 +203,14 @@ public sealed class RepositoryStructureTests
         Assert.NotEmpty(repositoryFiles);
         foreach (string repositoryEntry in repositoryFiles)
         {
-            if (intentionalProbeFiles.Contains(repositoryEntry))
-            {
-                continue;
-            }
-
             string content = File.ReadAllText(Path.Combine(root, repositoryEntry));
             foreach (string marker in retiredCategoryMarkers)
             {
-                Assert.False(
+                bool containsMarker =
                     repositoryEntry.Contains(marker, StringComparison.OrdinalIgnoreCase)
-                        || content.Contains(marker, StringComparison.OrdinalIgnoreCase),
+                    || content.Contains(marker, StringComparison.OrdinalIgnoreCase);
+                Assert.True(
+                    !containsMarker || IsIntentionalProbe(repositoryEntry, marker),
                     $"Retired capture category marker '{marker}' found in {repositoryEntry}");
             }
         }
@@ -307,49 +330,55 @@ public sealed class RepositoryStructureTests
             StringComparison.Ordinal);
     }
 
-    private static IReadOnlyList<string> GetTrackedRepositoryFiles(string root)
+    private static async Task<IReadOnlyList<string>> GetTrackedRepositoryFilesAsync(string root)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "git",
-            WorkingDirectory = root,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("ls-files");
-        startInfo.ArgumentList.Add("--cached");
-        startInfo.ArgumentList.Add("-z");
+        var result = await TestProcessRunner.RunCommandToExitAsync(
+            "git",
+            ["ls-files", "--cached", "-z"],
+            "",
+            TimeSpan.Zero,
+            new Dictionary<string, string>(),
+            TimeSpan.FromSeconds(30),
+            "tracked repository graph inspection");
+        Assert.True(result.ExitCode == 0, $"git ls-files failed: {result.Stderr}");
 
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("Unable to inspect the tracked repository graph.");
-        string output = process.StandardOutput.ReadToEnd();
-        string error = process.StandardError.ReadToEnd();
-        process.WaitForExit();
-        Assert.True(process.ExitCode == 0, $"git ls-files failed: {error}");
-
-        return output.Split('\0', StringSplitOptions.RemoveEmptyEntries)
-            .Where(IsContractRegion)
+        return result.Stdout.Split('\0', StringSplitOptions.RemoveEmptyEntries)
             .Where(path => !IsGeneratedOutput(path))
             .Where(path => File.Exists(Path.Combine(root, path)))
             .Order(StringComparer.Ordinal)
             .ToArray();
     }
 
-    private static bool IsContractRegion(string path) =>
-        !path.Contains('/', StringComparison.Ordinal)
-        || path.StartsWith("config/", StringComparison.Ordinal)
-        || path.StartsWith("packages/", StringComparison.Ordinal)
-        || path.StartsWith("tools/", StringComparison.Ordinal)
-        || path.StartsWith(".github/workflows/", StringComparison.Ordinal)
-        || path.StartsWith("fixtures/", StringComparison.Ordinal)
-        || path.StartsWith("tests/", StringComparison.Ordinal)
-        || path.StartsWith("docs/", StringComparison.Ordinal)
-        || path.StartsWith("src/", StringComparison.Ordinal)
-        || path.StartsWith("migrations/", StringComparison.Ordinal);
+    private static bool IsIntentionalProbe(string path, string marker)
+    {
+        if (string.Equals(
+            path,
+            "tests/MemSrv.Tests/RepositoryStructureTests.cs",
+            StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (string.Equals(
+            path,
+            "tests/MemSrv.Tests/PublicSurfaceRemovalTests.cs",
+            StringComparison.Ordinal))
+        {
+            return marker is "/capture/" or "memctl capture" or "MEMSRV_CAPTURE_" or "mcap_";
+        }
+
+        return string.Equals(
+                path,
+                "tests/MemSrv.Tests/HttpTransportTests.cs",
+                StringComparison.Ordinal)
+            && string.Equals(marker, "mcap_", StringComparison.Ordinal);
+    }
 
     private static bool IsGeneratedOutput(string path) =>
         path.Contains("/bin/", StringComparison.Ordinal)
         || path.Contains("/obj/", StringComparison.Ordinal)
         || path.Contains("/TestResults/", StringComparison.Ordinal);
+
+    private static string NormalizeWhitespace(string value) =>
+        string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 }

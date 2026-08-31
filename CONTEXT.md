@@ -4,10 +4,9 @@ Glossary of domain terms. Implementation details live in `docs/`, not here.
 
 ## Terms
 
-**Namespace** — the isolation unit for memories and traces. Every row belongs to
-exactly one namespace. Isolation is enforced server-side from the caller's
-identity, never trusted from tool arguments. Path-style names give hierarchy
-(`homelab`, `repo/<owner>/<name>`) without schema support.
+**Namespace** — the isolation unit for memories and traces. Every memory and
+trace belongs to exactly one namespace; the server enforces access from caller
+identity rather than trusting a tool argument.
 
 **Moraine** — the external system that owns durable external agent conversation
 and session evidence. It is outside Overmind's server and database boundary;
@@ -25,60 +24,54 @@ surface. It is not knowledge derivation or governance.
 Overmind may resolve and cite Moraine evidence when deriving governed knowledge.
 It does not make Overmind an owner or duplicate store of that evidence.
 
-**Agent identity (`agent_id`)** — who is acting. Derived by the server from the
-connection (bearer key over HTTP, process config over stdio), never
-self-asserted in tool arguments. It identifies the provisioned actor, not the
-model or provider used for a particular event. Codex and Claude Code are
-provisioned as separate actors even when the same person operates both.
+**Agent identity (`agent_id`)** — who is acting. Server-derived and never
+self-asserted, it identifies the provisioned actor rather than a model or
+provider; Codex and Claude Code remain distinct provisioned actors even when
+one person operates both.
 
-**Bearer key** — a static credential identifying one agent identity over HTTP.
-Each key maps to: one `agent_id`, one default namespace, and a list of allowed
-namespaces. Keys are provisioning-owned (Ansible), not managed by the app.
+**Bearer key** — a credential mapping one agent identity to its default
+namespace and allowed namespaces. Provisioning owns its lifecycle, not the
+application.
 
-**Default namespace** — the namespace a key's unqualified calls land in.
-Calls naming a namespace explicitly are validated against the key's allowed
-list.
+**Default namespace** — the namespace used by an unqualified call. An explicit
+namespace still requires authorization.
 
 **Trace session (`session_id`)** — the unit of replay: one contiguous agent
-run. Server-derived, never trusted from tool arguments (same rule as agent
-identity and namespace): the MCP protocol session over HTTP, process
-configuration or a generated per-process id over stdio. Every event from one
-run — agent-logged and server-logged alike — shares one session.
+run. Derived from trusted transport or process context rather than caller
+assertion, every event in the run shares that session.
 
 **Retrieval scope** — a versioned, operator-owned, read-only grouping of
 namespaces. It expands a grouped retrieval while authorization still applies to
 every member.
 
-**Review session** — a synthetic session (`review:<proposal_uuid>`) carrying an
-approval/rejection event. Its actor is the reviewer (`human:<name>`), never the
-proposing agent. No anonymous reviews.
+**Review session** — a synthetic `review:<proposal_uuid>` session carrying an
+approval or rejection event. Its actor is a named `human:<name>` reviewer,
+never the proposing agent or an anonymous actor.
 
-**Proposal** — a shared memory in `status='proposed'`; not yet trusted, not
-retrieved by default. Becomes shared knowledge only through operator approval
-(approve / edit-then-approve / reject), never through an agent-facing tool.
+**Proposal** — a shared memory with `status='proposed'`, not yet trusted and
+hidden by default. Operator approval or edit-then-approval is the only route to
+shared knowledge; rejection leaves it rejected, and agents cannot approve it.
 
 **Retirement** — an operator decision that withdraws a memory from normal
-retrieval without deleting it. The memory and the provenance of its retirement
-remain available for audit.
+retrieval without deleting it. The memory and decision provenance remain
+available for audit.
 _Avoid_: Deletion, removal
 
-**Private note** — a memory with `visibility='private'`: direct-write,
-auto-approved, only ever retrieved by its owning agent. Still traced and
-provenance-carrying.
+**Private note** — a directly written, auto-approved memory visible only to its
+owning agent. It remains traced and provenance-carrying.
 
 **Workstream** — a unit of inflight work used for parallel-session
-coordination. Lifecycle: open → checked_out → open | done | abandoned.
-Checked out by exactly one agent at a time; only the owner checks in.
-Checking in with status `open` is a handoff: the notes become the summary the
-next agent starts from.
+coordination with lifecycle open → checked_out → open | done | abandoned and
+exactly one checkout owner. Only its checkout owner may check in; an open
+check-in is a handoff whose notes become the next owner's summary.
 
 **Handoff** — a compact summary passed to a receiving agent, carrying
-reference uuids; the full trace stays retrievable by reference, never inlined.
-Created as a workstream in `open`.
+reference uuids through an open workstream. The full trace remains retrievable
+by reference and is never inlined.
 
-**Canonical ledger** — traces + proposals + approved memories. Everything else
-(FTS index, future vector index, exports) is a derived projection, rebuildable
-from the ledger, never the only place truth exists.
+**Canonical ledger** — traces, proposals, and approved memories. Everything
+outside that ledger is a derived, rebuildable projection and never the sole
+place truth exists.
 
 **Write safety** — the generic never-store boundary on all memory and trace
 writes. Memory writes reject matched secrets; trace writes persist only the

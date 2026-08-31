@@ -73,3 +73,6 @@ merely because they were implemented.
 - `make test-db-reset` — recreate the test database and apply migrations
 - `make migrate-dev` — migrate the development database
 - Interactive development uses `memory_dev`, never `memory_test` or production.
+- Databases created from the removed capture migration history are unsupported.
+  Recreate development and test databases from the retained migration set; do
+  not attempt an upgrade or forward drop migration.

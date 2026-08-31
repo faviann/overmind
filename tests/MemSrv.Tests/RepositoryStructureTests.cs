@@ -3,6 +3,16 @@ namespace MemSrv.Tests;
 public sealed class RepositoryStructureTests
 {
     [Fact]
+    public void ForbiddenPropositionContractRejectsRetiredPresentTenseResponsibility()
+    {
+        Assert.ThrowsAny<Xunit.Sdk.XunitException>(() =>
+            AssertForbiddenPropositionsAbsent(
+                "synthetic active document",
+                "Overmind operates capture ingestion.",
+                ["Overmind operates capture ingestion"]));
+    }
+
+    [Fact]
     public void BindingAuthorityRecordsTheCleanCutPreservationLayer()
     {
         string root = TestProcessRunner.RepoRoot;
@@ -16,11 +26,28 @@ public sealed class RepositoryStructureTests
             StringComparison.Ordinal);
         Assert.Contains("Git history", boundary, StringComparison.Ordinal);
         Assert.Contains("durable issues and pull requests", boundary, StringComparison.Ordinal);
+        AssertForbiddenPropositionsAbsent(
+            "docs/evidence-and-knowledge-boundary.md",
+            boundary,
+            [
+                "The superseded Phase 2 specification must remain in the working tree",
+                "The superseded Phase 2 specification stays in the working tree",
+                "The historical Phase 2 specification must remain in the active tree",
+                "requires that historical specification to remain",
+                "capture documents stay while the shipped code"
+            ]);
 
         Assert.Contains(
             "Git history and durable issues and pull requests preserve the retired architecture",
             decisions,
             StringComparison.Ordinal);
+        AssertForbiddenPropositionsAbsent(
+            "docs/decisions.md",
+            decisions,
+            [
+                "The superseded Phase 2 specification must remain in the active tree",
+                "The active-tree retention exception remains in force"
+            ]);
     }
 
     [Fact]
@@ -63,6 +90,24 @@ public sealed class RepositoryStructureTests
             "Import-time external-session preservation is not an Overmind requirement",
             phaseOneSpec,
             StringComparison.Ordinal);
+        AssertForbiddenPropositionsAbsent(
+            "docs/decisions.md",
+            decisions,
+            [
+                "The old Overmind import-time session-preservation requirement remains binding",
+                "The old Overmind import-time session-preservation requirement blocks v1.0.0",
+                "The import-time session-preservation requirement stands, uncancelled",
+                "requirement itself stands, uncancelled"
+            ]);
+        AssertForbiddenPropositionsAbsent(
+            "docs/memory-server-phase1-spec.md",
+            phaseOneSpec,
+            [
+                "Import-time external-session preservation is an Overmind requirement",
+                "Import-time session preservation must land before the v1.0.0 tag",
+                "Must land before the v1.0.0 tag",
+                "The requirement itself stands, uncancelled"
+            ]);
     }
 
     [Fact]
@@ -89,6 +134,35 @@ public sealed class RepositoryStructureTests
             "conversation-capture-phase2-spec.md",
             "local-codex-claude-capture-surfaces.md"
         ];
+        string[] retiredResponsibilityPropositions =
+        [
+            "Overmind owns external conversation evidence",
+            "Overmind stores external conversation evidence",
+            "Overmind captures external conversations",
+            "Overmind ingests external conversations",
+            "Overmind owns capture ingestion",
+            "Overmind operates capture ingestion",
+            "Overmind provides capture ingestion",
+            "Capture ingestion is an Overmind responsibility",
+            "Overmind owns capture routing",
+            "Overmind operates capture routing",
+            "Overmind provides capture routing",
+            "Capture routing is an Overmind responsibility",
+            "Overmind routes captured conversations",
+            "Overmind owns capture pairing",
+            "Overmind operates capture pairing",
+            "Overmind provides capture pairing",
+            "Capture pairing is an Overmind responsibility",
+            "Overmind pairs capture sources",
+            "Overmind enrolls capture sources",
+            "Overmind issues capture credentials",
+            "Overmind manages capture credentials",
+            "Overmind provisions capture credentials",
+            "Overmind ships a capture runtime",
+            "Overmind operates a capture runtime",
+            "Overmind runs capture hooks",
+            "Capture runtime is an Overmind responsibility"
+        ];
 
         foreach (string path in activeDocuments)
         {
@@ -97,6 +171,7 @@ public sealed class RepositoryStructureTests
             {
                 Assert.DoesNotContain(retiredRoute, content, StringComparison.Ordinal);
             }
+            AssertForbiddenPropositionsAbsent(path, content, retiredResponsibilityPropositions);
         }
 
         string glossary = File.ReadAllText(Path.Combine(root, "CONTEXT.md"));
@@ -382,4 +457,18 @@ public sealed class RepositoryStructureTests
 
     private static string NormalizeWhitespace(string value) =>
         string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private static void AssertForbiddenPropositionsAbsent(
+        string source,
+        string content,
+        IReadOnlyList<string> forbiddenPropositions)
+    {
+        string normalizedContent = NormalizeWhitespace(content);
+        foreach (string proposition in forbiddenPropositions)
+        {
+            Assert.False(
+                normalizedContent.Contains(proposition, StringComparison.OrdinalIgnoreCase),
+                $"Forbidden retired proposition found in {source}: {proposition}");
+        }
+    }
 }

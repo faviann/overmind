@@ -47,17 +47,10 @@ what happened, Overmind owns what was concluded and governed.
   Phase 2 capture authorizations are withdrawn (Phase 1 spec §11). Where the
   frozen capture vocabulary restates one of the invariants above, the binding
   force is Phase 1's, not the capture term's.
-- **Credential and identity separation remains binding** for the legacy
-  capture endpoints that are still deployed. A capture credential grants no MCP
-  tool access, no operator action, and no read of captured content; an agent
-  bearer key imports no capture observations and performs no capture-console
-  action. Agent identity, capture source binding, capture credential, and
-  interactive operator identity stay separate authorities, and imported content
-  grants none of them. This is a **transitional** binding safety invariant over
-  those endpoints, not a Phase 1 invariant and not of Phase 1 origin: it binds
-  while the endpoints exist, authorizes no new capture architecture or capture
-  feature work, and lapses when the legacy capture endpoints and their code are
-  retired after the Moraine replacement is proven.
+- **The transitional capture credential and identity-separation rule has
+  lapsed.** It bound only the legacy public endpoints, which have been removed.
+  The remaining capture ledger/core and schema are inaccessible residue pending
+  contraction; they grant no packaged server or operator capability.
 - **The datastore rules still bind Overmind's own persistence.** Phase 1 spec
   §11 ("additional datastores", naming ClickHouse) and §13 ("ClickHouse …
   never as the system of record") govern what Overmind stores: Overmind keeps

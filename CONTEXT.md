@@ -4,8 +4,10 @@ Glossary of domain terms. Implementation details live in `docs/`, not here.
 
 ## Terms
 
-Capture terminology anywhere in this glossary describes the shipped, frozen
-capture code and grants nothing. Current authority for capture is
+Capture terminology anywhere in this glossary is historical/internal vocabulary
+for inaccessible legacy ledger/core/schema residue. It grants no capability:
+no actor can import, enroll, pair, route, authorize, or read capture state through
+a packaged application. Current authority for capture is
 [`docs/evidence-and-knowledge-boundary.md`](docs/evidence-and-knowledge-boundary.md),
 which governs on any conflict. The memory, identity, and governance vocabulary
 is unaffected and still binding.
@@ -35,51 +37,41 @@ Capture Proof and is not knowledge derivation or governance.
 Overmind resolves and cites Moraine evidence when deriving governed knowledge.
 It does not make Overmind an owner or duplicate store of the cited evidence.
 
-**Unscoped capture namespace (`capture/unscoped`)** — the fallback namespace
-for a captured conversation whose repository or configured semantic route
-cannot be determined. It records an unknown destination; it does not imply
-that the conversation is personal context.
+**Unscoped capture namespace (`capture/unscoped`)** — the legacy fallback
+namespace stored when retired routing logic could not determine a repository or
+semantic destination. It is an inert schema/bootstrap concept, not an available
+write destination.
 
-**Capture route** — the operator-owned assignment of a captured source session
-to one namespace. It is fixed on first import and reused by all later catch-up.
+**Capture route** — the legacy ledger assignment of one captured source stream
+to one namespace. The retained value explains existing core/schema relationships
+only; no packaged interface can create, inspect, or change it.
 
-**Capture route policy** — the operator-owned rules that derive a capture route
-from repository and directory evidence, constrain the namespaces a capture
-source binding may reach, and fall back to `capture/unscoped`. A route override
-maps matching evidence to a semantic namespace; it is not a namespace alias.
-Automatic repository routing uses the normalized `origin` remote only; other
-remotes remain provenance unless an operator explicitly overrides the route.
+**Capture route policy** — the legacy internal policy model that derived a route
+from repository and directory evidence and constrained a source binding's
+namespace. No operator command or packaged routing operation remains.
 
 **Retrieval scope** — a versioned, operator-owned, read-only grouping of
 namespaces. It expands a grouped retrieval while authorization still applies to
 every member; it is never a capture route or write destination.
 
-**Capture import capability** — the operator-provisioned authority to append
-canonical capture observations and their derived events. It is distinct from
-an agent tool capability: imported payloads provide source evidence but cannot
-expand the identity, session, or routing authority granted to the importer.
-Live capture, catch-up, historical backfill, and recovery all use this same
-capability rather than a privileged database or safety-gate bypass.
+**Capture import capability** — the retired authority concept that once
+permitted observations to enter the legacy ledger. It is no longer issued or
+reachable through a packaged application; the name remains only to navigate
+inaccessible core code.
 
-**Capture source binding** — the operator-provisioned association of one
-harness installation with its capture credential, harness kind, agent identity,
-and routing authority. Different harnesses and installations have distinct
-bindings so their provenance, revocation, and session identities cannot collide.
-Its stable identity survives credential rotation, upgrades, and explicit
-single-installation recovery; a human-readable device/harness name is metadata.
+**Capture source binding** — the legacy ledger record that associated a harness
+installation, capture credential, harness kind, agent identity, and routing
+metadata. No packaged enrollment, binding lifecycle, or source-management
+interface remains.
 
-**Capture credential** — a credential granting one capture source binding
-access only to the capture import capability. It grants neither ordinary agent
-tools nor human operator actions, and those other credential classes cannot use
-it to import captured history. It may receive its own import receipts and, only
-if required, its own operational stream status; it never grants captured-content
-reads.
+**Capture credential** — the retired credential form formerly resolved for
+capture import. It grants no current packaged authority, is not reserved by
+agent-key provisioning, and remains only as an internal input needed by residue
+tests pending contraction.
 
-**Capture pairing request** — short-lived server coordination state connecting
-one runtime-detected machine/installation to an OIDC-authenticated operator's
-approval. Its displayed code locates the request but grants no authority; a
-separate secret polling capability can receive the capture credential once.
-Approval creates at most one durable binding for a Codex installation.
+**Capture pairing request** — legacy short-lived coordination state retained in
+the schema. No packaged pairing flow, console approval, polling capability, or
+credential delivery path can reach it.
 
 **Agent identity (`agent_id`)** — who is acting. Derived by the server from the
 connection (bearer key over HTTP, process config over stdio), never
@@ -87,16 +79,14 @@ self-asserted in tool arguments. It identifies the provisioned actor, not the
 model or provider used for a particular event. Codex and Claude Code are
 provisioned as separate actors even when the same person operates both.
 
-**Capture provenance** — origin information observed for an imported trace
-event: the authenticated capture source binding, source harness and version,
-provider and model when exposed, source session and event identifiers, and
-capture-adapter version. It supplements agent identity; unavailable values
-remain unknown rather than being inferred.
+**Capture provenance** — legacy origin fields stored with inaccessible
+observations and events: source binding, harness and version, provider/model
+when exposed, source session/event identifiers, and adapter version.
+Unavailable values remain unknown rather than inferred.
 
-**Source observation** — one immutable hook invocation or persisted harness
-record accepted by capture. One observation may yield multiple captured events,
-but each captured event has exactly one primary source observation; correlated
-observations are linked rather than merged.
+**Source observation** — one immutable record in the legacy internal capture
+ledger. It may own several captured events, while each event retains exactly
+one primary observation.
 
 **Source record** — one harness-emitted unit before Overmind accepts it, such
 as a persisted JSONL entry or one hook invocation. It is source material for an
@@ -107,20 +97,17 @@ identifies one source record within a capture source stream. Its harness-specifi
 mechanics may vary, but network request and batch identities never substitute
 for it.
 
-**Capture source stream** — the append-only sequence of source observations
-for one trusted harness session or subagent. Native source identifiers locate
-observations when available; otherwise a verified transcript position does,
-and any changed prefix stops capture rather than creating a new stream history.
+**Capture source stream** — the legacy append-only internal sequence used to
+group source observations and enforce source position. It is not a live import
+channel.
 
-**Capture checkpoint** — the server-owned position through the contiguous
-accepted prefix of one capture source stream. It advances atomically with an
-observation and its derived ledger rows, and never advances across a failure or
-unaccepted gap.
+**Capture checkpoint** — the legacy internal position through a stream's
+contiguous accepted prefix. The retained core advances it atomically with
+ledger rows and never across a failed or missing position.
 
-**Import receipt** — the server's per-source-record outcome within a delivery
-batch, distinguishing newly accepted, already accepted, failed, and blocked by
-an earlier stream gap. It reports the effective namespace and route basis;
-delivery-batch boundaries do not affect ledger identity.
+**Import receipt** — the legacy internal result model for one source record. It
+remains usable only at the authorized core/module test seam; no packaged
+operator receipt command or public response exposes it.
 
 **Content fidelity limit** — a deterministic property of source content that
 prevents complete safe persistence, such as an accepted size ceiling or an
@@ -134,44 +121,35 @@ boundary, such as missing or invalid scanner rules or an internal scanner
 error. No canonical observation is accepted and source progress does not
 advance until the failure is repaired.
 
-**Capture outcome projection** — a content-free operational view that keeps
-capture health separate from capture fidelity. It groups only closed reasons
-by harness and bounded size band; it contains no content, exact byte count,
-credential, request, locator, digest, or source identity. It is rebuilt from
-canonical receipt evidence or accompanies local safe runtime state rather than
-forming another datastore.
+**Capture outcome projection** — the legacy content-free internal
+health/fidelity model. It groups only closed reasons and bounded size bands and
+contains no content, exact byte count, credential, locator, digest, or source
+identity. No packaged diagnostics surface exposes it.
 
-**Safe source payload** — source content after the universal deterministic
-pre-append gate. Recognized textual secrets are replaced even when supplied by
-the user; the payload never retains the matched value or a reversible
-fingerprint of it.
+**Safe source payload** — the sanitized payload stored inside the inaccessible
+legacy ledger after deterministic write safety. Recognized textual secrets are
+replaced; no packaged capture write or read can reach the value.
 
 **Incomplete source record** — a source record that may still be extended by
 its harness, such as an unterminated final JSONL line in an active transcript.
 It is deferred without advancing source progress.
 
-**Malformed source record** — a terminal source record that capture cannot
-interpret under its observed source variant. Capture preserves it as an opaque
-event when it can be scanned safely, otherwise records an explicit omission,
-then advances with a visible warning.
+**Malformed source record** — a legacy internal classification for terminal
+records the retained core cannot interpret. Its persistence/omission semantics
+remain tested only to protect the residue until contraction.
 
-**Captured event** — a trace event imported from one source observation into
-the canonical ledger. Each event has a deterministic part key within its source
-observation. Conversation and tool records drive replay, duplicate UI or
-lifecycle views are annotations, and unsupported records remain opaque,
-redacted-safe events.
+**Captured event** — an immutable event row in the inaccessible legacy ledger,
+keyed to one source observation and deterministic part key. It is not a Phase 1
+trace or a packaged replay artifact.
 
-**Captured event envelope** — the self-contained retrieval view assembled from
-one captured event and its source observation. Storage remains normalized so
-capture provenance has one authoritative home; the wire response joins only
-immutable ledger provenance to the event's semantic payload and source-stated
-relationships. Resolved context, relationship targets, and display order are
-future read models, not part of the canonical envelope.
+**Captured event envelope** — the legacy internal join model over one event and
+its immutable observation provenance. No packaged wire response exposes it; it
+remains solely for core/schema navigation and tests.
 
-**Conversation reconstruction** — replay of the captured conversation, its
-source observations, and the provenance of any attachment. It does not promise
-byte-perfect retention of opaque binary attachments or reconstruction of
-provider-internal media preprocessing.
+**Conversation reconstruction** — the retired capture read concept for
+replaying legacy observations and provenance. No packaged replay or navigation
+read exists; the definition survives only to interpret inaccessible internal
+models.
 
 **Event kind** — what a captured event represents, such as a message, tool
 call, tool result, compaction, lifecycle event, annotation, or opaque record.
@@ -188,9 +166,9 @@ derived from that observation.
 **Occurrence time** — an optional timestamp explicitly stated for one semantic
 event. When the source supplies no event-specific time, it remains unknown.
 
-**Capture time** — the required server timestamp at which Overmind accepted a
-source observation. It records ingestion, not when the represented activity
-occurred.
+**Capture time** — the legacy ledger timestamp recording when an observation
+was accepted. It is inert historical data, not evidence that an import
+interface remains.
 
 **Source order** — the exact order established within one verified capture
 source stream, plus source-stated order among the semantic parts of one
@@ -215,13 +193,10 @@ present in the captured ledger. It differs from a legitimate root, for which
 the source stated no parent. A dangling relationship is retained as evidence
 of incomplete capture rather than dropped or repaired by inference.
 
-**Captured session navigation** — an authorization-aware operator read model
-over captured stream identity and immutable source relationships. It resolves
-an exact, unambiguous permitted target at read time and otherwise reports the
-stored edge as unavailable without target session identity or namespace.
-Incoming edges expose only permitted source sessions. Late capture changes the
-answer, not the canonical relationship, and navigation adds no inferred edge,
-confidence, chronology, or global order.
+**Captured session navigation** — the legacy authorization-aware read model
+over stored stream identity and relationships. It has no packaged operator
+command or server route; late ledger changes and authorization rules matter
+only to internal residue awaiting contraction.
 
 **Canonical event header** — the small relational portion of a captured event
 containing stable, frequently queried invariants such as observation identity,
@@ -272,11 +247,10 @@ list.
 run. Server-derived, never trusted from tool arguments (same rule as agent
 identity and namespace): the MCP protocol session over HTTP, process
 configuration or a generated per-process id over stdio. Every event from one
-run — agent-logged and server-logged alike — shares one session. Preserving an
-external or historical session identity (imports) is an operator-path concern,
-not an agent-tool capability. A captured session is derived from its trusted
-capture source, external session identifier, and optional subagent identifier;
-the original source identifiers remain capture provenance.
+run — agent-logged and server-logged alike — shares one session. The
+inaccessible legacy residue derived captured-session identity from stored
+source, external-session, and optional subagent identifiers. No operator
+import path remains; the original identifiers survive only as inert provenance.
 
 **Review session** — a synthetic session (`review:<proposal_uuid>`) carrying an
 approval/rejection event. Its actor is the reviewer (`human:<name>`), never the

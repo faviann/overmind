@@ -1,5 +1,4 @@
 using MemSrv.Core;
-using System.Text.Json;
 
 var root = Directory.GetCurrentDirectory();
 var options = Configuration.Load(root);
@@ -84,10 +83,6 @@ try
             RequireArgs(args, 2);
             await TraceAsync(options, args[1]);
             return 0;
-
-        case "capture":
-            RequireArgs(args, 2);
-            return await CaptureAsync(options, args);
 
         default:
             Usage();
@@ -278,107 +273,6 @@ static async Task TraceAsync(MemSrvOptions options, string sessionId)
     }
 }
 
-static async Task<int> CaptureAsync(MemSrvOptions options, string[] args)
-{
-    switch (args[1])
-    {
-        case "enroll":
-            RequireArgs(args, 3);
-            var enrollment = new CaptureEnrollment(
-                options.ConnectionString, new WriteSafetyGate(options.NeverStorePath, options.NeverStoreLiteralsPath));
-            string credentialPath = RequireOption(args, "--credential-file");
-            string credential = (await File.ReadAllTextAsync(credentialPath)).Trim();
-            string harness = RequireOption(args, "--harness");
-            var bindingUuid = await enrollment.EnrollAsync(
-                args[2],
-                harness,
-                RequireOption(args, "--agent-id"),
-                credential);
-            Console.WriteLine($"enrolled {bindingUuid} stable_name={args[2]}");
-            if (!string.Equals(harness, "codex", StringComparison.Ordinal))
-            {
-                Console.WriteLine("warning: no supported capture adapter; enrollment is retained for future capture support");
-            }
-            return 0;
-
-        case "receipt":
-            RequireArgs(args, 3);
-            var envelopes = await new OperatorCaptureReads(options.ConnectionString)
-                .ReadCapturedEventEnvelopesAsync(Guid.Parse(args[2]));
-            foreach (var envelope in envelopes)
-            {
-                Console.WriteLine(JsonSerializer.Serialize(
-                    envelope, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-            }
-            return 0;
-
-        case "replay":
-            RequireArgs(args, 3);
-            var replay = await new OperatorCaptureReads(options.ConnectionString)
-                .ReplaySourceStreamAsync(Guid.Parse(args[2]));
-            Console.WriteLine(JsonSerializer.Serialize(
-                replay, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-            return 0;
-
-        case "navigate":
-            RequireArgs(args, 3);
-            string[] allowedNamespaces = FindOptions(args, "--namespace").ToArray();
-            if (allowedNamespaces.Length == 0)
-            {
-                throw new ArgumentException("--namespace is required.");
-            }
-            var navigation = await new OperatorCaptureReads(options.ConnectionString)
-                .NavigateCapturedSessionAsync(Guid.Parse(args[2]), allowedNamespaces);
-            Console.WriteLine(JsonSerializer.Serialize(
-                navigation, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-            return 0;
-
-        case "route-policy":
-            RequireArgs(args, 3);
-            var remoteOverrides = FindOptions(args, "--remote-override")
-                .Select(value =>
-                {
-                    var pair = ParseMapping(value, "--remote-override");
-                    return new CaptureRouteOverride(
-                        pair.Key,
-                        pair.Value);
-                })
-                .ToArray();
-            var directoryRoutes = FindOptions(args, "--directory-route")
-                .Select(value =>
-                {
-                    var pair = ParseMapping(value, "--directory-route");
-                    return new CaptureDirectoryRoute(
-                        pair.Key,
-                        pair.Value);
-                })
-                .ToArray();
-            var specialNamespaces = FindOptions(args, "--special-namespace")
-                .Select(value =>
-                {
-                    var pair = ParseMapping(value, "--special-namespace");
-                    return new CaptureSpecialNamespace(pair.Key, pair.Value);
-                })
-                .ToArray();
-            var policy = new CaptureRoutingPolicy(
-                FindOptions(args, "--allow-repository")
-                    .ToArray(),
-                remoteOverrides,
-                directoryRoutes,
-                specialNamespaces);
-            Guid policyUuid = await new CaptureRoutePolicyStore(
-                    options.ConnectionString,
-                    new WriteSafetyGate(
-                        options.NeverStorePath, options.NeverStoreLiteralsPath))
-                .ReplaceAsync(args[2], policy);
-            Console.WriteLine($"capture route policy {policyUuid} binding={args[2]}");
-            return 0;
-
-        default:
-            throw new ArgumentException($"Unknown capture command '{args[1]}'.");
-    }
-}
-
 static string? FindOption(string[] args, string name)
 {
     for (var i = 0; i < args.Length - 1; i++)
@@ -393,28 +287,6 @@ static string? FindOption(string[] args, string name)
 }
 
 static bool HasOption(string[] args, string name) => args.Contains(name, StringComparer.Ordinal);
-
-static IEnumerable<string> FindOptions(string[] args, string name)
-{
-    for (var i = 0; i < args.Length - 1; i++)
-    {
-        if (args[i] == name && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
-        {
-            yield return args[i + 1];
-        }
-    }
-}
-
-static KeyValuePair<string, string> ParseMapping(string value, string option)
-{
-    int separator = value.LastIndexOf('=');
-    if (separator <= 0 || separator == value.Length - 1)
-    {
-        throw new ArgumentException($"{option} requires key=value.");
-    }
-    return new KeyValuePair<string, string>(
-        value[..separator].Trim(), value[(separator + 1)..].Trim());
-}
 
 static string RequireOption(string[] args, string name) =>
     FindOption(args, name) ?? throw new ArgumentException($"{name} is required.");
@@ -441,18 +313,4 @@ static void Usage()
     Console.Error.WriteLine("memctl why <uuid>");
     Console.Error.WriteLine("memctl consumed <session_id>");
     Console.Error.WriteLine("memctl trace <session_id>");
-    Console.Error.WriteLine(
-        "memctl capture enroll <stable_name> --harness harness --agent-id id " +
-        "--credential-file path");
-    Console.Error.WriteLine("memctl capture receipt <observation_uuid>");
-    Console.Error.WriteLine("memctl capture replay <source_stream_uuid>");
-    Console.Error.WriteLine(
-        "memctl capture navigate <source_stream_uuid> --namespace namespace " +
-        "[--namespace namespace ...]");
-    Console.Error.WriteLine(
-        "memctl capture route-policy <stable_name> " +
-        "[--allow-repository owner/name-pattern] " +
-        "[--remote-override remote=repo/owner/name|special:alias] " +
-        "[--directory-route /path=repo/owner/name|special:alias] " +
-        "[--special-namespace alias=existing_namespace]");
 }

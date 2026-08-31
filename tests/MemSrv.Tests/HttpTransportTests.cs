@@ -63,6 +63,53 @@ public sealed class HttpTransportTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ConstructorLoadedCapturePrefixedKeyAuthenticatesAsOrdinaryAgent()
+    {
+        const string key = "mcap_0123456789abcdef0123456789abcdef";
+        const string agentId = "constructor-key-agent";
+        await using WebApplication app = HttpServerHost.Build(
+            RuntimeOptions(),
+            new AgentKeyStore(
+            [
+                new AgentKey(key, agentId, "memory-system", ["memory-system"]),
+            ]));
+        app.Urls.Add("http://127.0.0.1:0");
+        await app.StartAsync();
+
+        try
+        {
+            string baseUrl = app.Services.GetRequiredService<IServer>()
+                .Features.Get<IServerAddressesFeature>()!.Addresses.First();
+            var transport = new HttpClientTransport(new HttpClientTransportOptions
+            {
+                Endpoint = new Uri($"{baseUrl}/mcp"),
+                Name = "MemSrv.Server",
+                AdditionalHeaders = new Dictionary<string, string>
+                {
+                    ["Authorization"] = $"Bearer {key}",
+                },
+            });
+
+            await using McpClient client = await McpClient.CreateAsync(transport);
+            Assert.Contains(await client.ListToolsAsync(), tool => tool.Name == "checkout_workstream");
+            JsonElement checkout = await CallToolAsync(
+                client,
+                "checkout_workstream",
+                new Dictionary<string, object?>
+                {
+                    ["title"] = $"constructor-key-{Guid.NewGuid():N}",
+                });
+            JsonElement workstream = checkout.GetProperty("data").GetProperty("workstream");
+            Assert.Equal(agentId, workstream.GetProperty("ownerAgent").GetString());
+            Assert.Equal("memory-system", workstream.GetProperty("namespace").GetString());
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task KeyedHttpAgentRunsFullMemoryLifecycleOnOneArtifact()
     {
         var term = $"lifecycle-{Guid.NewGuid():N}";

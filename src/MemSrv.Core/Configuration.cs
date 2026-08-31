@@ -29,15 +29,6 @@ public static class Configuration
         options.AllowedNamespaces = ParseNamespaces(Environment.GetEnvironmentVariable("MEMSRV_ALLOWED_NAMESPACES"), options.AllowedNamespaces);
         options.AgentKeysPath = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_AGENT_KEYS_PATH"), options.AgentKeysPath);
         options.HttpUrl = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_HTTP_URL"), options.HttpUrl);
-        options.CaptureConsoleOidc.Authority = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("MEMSRV_CAPTURE_CONSOLE_OIDC_AUTHORITY"),
-            options.CaptureConsoleOidc.Authority);
-        options.CaptureConsoleOidc.ClientId = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID"),
-            options.CaptureConsoleOidc.ClientId);
-        options.CaptureConsoleOidc.ClientSecret = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET"),
-            options.CaptureConsoleOidc.ClientSecret);
         options.Transport = FirstNonEmpty(Environment.GetEnvironmentVariable("MEMSRV_TRANSPORT"), options.Transport);
         options.NeverStorePath = FirstNonEmpty(
             Environment.GetEnvironmentVariable("MEMSRV_NEVER_STORE_PATH"), options.NeverStorePath);

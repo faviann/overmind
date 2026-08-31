@@ -11,8 +11,7 @@ Authority order (identical to `AGENTS.md`):
 
 1. `docs/evidence-and-knowledge-boundary.md` ("the boundary") — binding for
    the evidence / knowledge / governance ownership split, for the Phase 1
-   invariants it preserves, and for the transitional legacy-capture credential
-   and identity separation it keeps in force
+   invariants it preserves
 2. `docs/memory-server-phase1-spec.md` ("the Phase 1 spec", cited by §) —
    binding for Phase 1 contracts and every area whose ownership the boundary
    does not decide
@@ -23,10 +22,10 @@ Authority order (identical to `AGENTS.md`):
 ## Scope boundaries
 
 - **The Phase 1 Do Not Build list remains binding** (Phase 1 spec §11). The
-  Phase 2 capture spec's narrow exceptions for a capture runtime, harness
-  hooks, and an OIDC-authenticated capture console are superseded and no longer
-  authorize anything new (see the boundary). The workstation-side code has
-  been removed; the transitional server capture interface remains frozen.
+  Phase 2 capture spec's narrow exceptions are superseded and no longer
+  authorize anything new (see the boundary). No packaged capture interface or
+  workstation-side producer remains; only inaccessible ledger/core and schema
+  residue awaits contraction.
 - **Overmind does not own external conversation evidence.** Moraine is the
   intended substrate for durable capture of external agent conversations
   (adoption tracked by #206); Overmind stays authoritative for governed

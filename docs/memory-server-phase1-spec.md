@@ -1,4 +1,4 @@
-# Memory Server — Phase 1 Build Spec (v1.9)
+# Memory Server — Phase 1 Build Spec (v1.10)
 
 This is a build spec for a Claude Code session. It is deliberately narrow. The **Do Not Build** section is as binding as the requirements. The goal is a working v0 spine in 1–2 sessions that the homelab project can consume immediately.
 
@@ -37,8 +37,15 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > **v1.9 changelog (2026-08-30 — workstation capture producer retired, issue #222):**
 > The workstation-side capture producer, adapters, scheduling/runtime state,
 > wake hooks, fixtures, packaging, and operational instructions are removed.
-> The transitional server-side capture HTTP, credential, console, operator,
-> ingestion, ledger, schema, and migration surfaces remain for later removal.
+> This records the issue #222 sequencing; the next changelog entry states the
+> current server-side boundary.
+
+> **v1.10 changelog (2026-08-30 — server capture surface retired, issue #223):**
+> Packaged capture import, pairing, and console HTTP routes; `memctl` capture
+> commands; capture-console OIDC and runtime configuration; and the capture-only
+> agent-key reservation are removed. The legacy capture ledger/core and its
+> schema and migrations remain only as inaccessible residue for the next
+> contraction; they expose no packaged public or operator capability.
 
 Where this spec is silent and `evidence-and-knowledge-boundary.md` does not decide ownership, nothing else decides for it — do not infer authority from an older or informational document. Raise the gap with the operator only when it is a **material policy or architecture decision**: one that changes a contract, an invariant, or a binding scope. Ordinary implementation choices this spec deliberately leaves open stay with the implementer.
 
@@ -352,8 +359,9 @@ harness-hook, and OIDC capture-console authorization that
 `conversation-capture-phase2-spec.md` once granted is **superseded and no
 longer in force** (2026-08-20 course-correction, #203/#205 — see
 `evidence-and-knowledge-boundary.md`). The workstation-side producer code it
-produced has been removed; the transitional server-side capture interface still
-exists and remains frozen. The list below applies unamended to new work. The
+produced has been removed, as has the transitional packaged server-side capture
+interface. Its ledger/core and schema/migrations remain frozen and inaccessible
+pending contraction. The list below applies unamended to new work. The
 italic scope notes on the datastore entry below and on the §13 scale-out seam
 clarify what those entries already govern; they amend nothing.
 

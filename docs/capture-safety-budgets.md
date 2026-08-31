@@ -1,7 +1,7 @@
 # Legacy capture observation-size and fidelity contract
 
 Status: **frozen — capture-only**. This document exists only to maintain the
-legacy capture code that still ships. It authorizes no new capture work and is
+inaccessible legacy capture core. It authorizes no new capture work and is
 not the Phase 1 write-safety contract. General never-store rule loading,
 scanning, markers, failure codes, and numeric scan budgets are binding in
 [`write-safety.md`](write-safety.md).
@@ -39,12 +39,10 @@ failures are mapped outside the write-safety boundary to health `blocked`.
 Counters expose only the closed harness, reason, and size-band vocabulary, not
 exact sizes, record identity, credentials, locators, excerpts, or digests.
 
-## Transport policy
+## Source identity policy
 
-`POST /capture/v1/observations` retains its independent 1,000,000-byte request
-cap. That cap is a denial-of-service guard, not a write-safety scan budget.
-Runtime transport compaction may only advance a verified `byte_range` record,
-whose source digest participates in the binding-keyed signature. An over-limit
+Only a verified `byte_range` record may advance through content compaction;
+its source digest participates in the binding-keyed signature. An over-limit
 `native_id` record fails closed before claim because it lacks stable content
 identity for changed-content detection.
 

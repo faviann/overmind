@@ -5,11 +5,9 @@ stated here is not a contract. Every section is now **FINAL**: the Session 2
 HTTP transport has landed, so the service runtime shape (port, health, bind
 address, key file) is defined below rather than deferred.
 
-The capture material in this document — capture schema verification, the
-capture-console OIDC variables, and the `/capture/console`, pairing, and
-observation endpoints — describes the transitional server-side capture
-interface that still ships. The workstation producer has been removed. This
-document authorizes no new capture work. Current authority for capture is
+Capture schema verification below covers inaccessible legacy residue only.
+No capture endpoint, credential class, operator command, or configuration is
+part of the deployed application. Current authority for that residue is
 [evidence-and-knowledge-boundary.md](evidence-and-knowledge-boundary.md).
 
 ## Image — FINAL
@@ -169,15 +167,6 @@ HTTP transport (default mode):
 | Variable | Purpose |
 | --- | --- |
 | `MEMSRV_AGENT_KEYS_PATH` | Path to the provisioning-owned bearer-key YAML, mounted into the container. Required in HTTP mode; the server fails fast at startup if it is missing. |
-| `MEMSRV_CAPTURE_CONSOLE_OIDC_AUTHORITY` | Optional HTTPS OpenID Connect issuer/authority for interactive capture-console operators. For Authentik, use the provider's application slug authority. |
-| `MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_ID` | Optional confidential OIDC client identifier registered for the capture console. |
-| `MEMSRV_CAPTURE_CONSOLE_OIDC_CLIENT_SECRET` | Optional confidential OIDC client secret. Supply it through deployment secret handling; never commit it. |
-
-The three capture-console OIDC variables form one optional configuration set.
-When all three are absent, the console is disabled and the existing HTTP
-surface remains available. Supplying only part of the set, or an invalid
-authority, fails server startup with a secret-free configuration error. A
-complete valid set enables the console.
 
 Optional:
 
@@ -187,14 +176,12 @@ Optional:
 | `MEMSRV_HTTP_URL` | Kestrel bind address; defaults to `http://0.0.0.0:8080`. |
 | `MEMSRV_AGENT_ID`, `MEMSRV_NAMESPACE`, `MEMSRV_SESSION_ID` | stdio-mode identity/session (defaults are sensible for a single-agent local setup). Ignored in HTTP mode, where identity comes from the bearer key and the session is transport-derived. |
 | `MEMSRV_ALLOWED_NAMESPACES` | Comma-separated stdio-mode namespace allowlist. Unset confines the process to its default `MEMSRV_NAMESPACE`. Ignored in HTTP mode. |
-| `MEMSRV_NEVER_STORE_PATH` | General Phase 1 write-safety rule file. Defaults to `config/never_store.yaml`, which ships in the image. A missing, empty, or invalid rule file makes the policy unusable and fails every governed Overmind write closed. The transitional server capture effects remain: enrollment and ingestion refuse. |
+| `MEMSRV_NEVER_STORE_PATH` | General Phase 1 write-safety rule file. Defaults to `config/never_store.yaml`, which ships in the image. A missing, empty, or invalid rule file makes the policy unusable and fails every governed Overmind write closed. |
 | `MEMSRV_NEVER_STORE_LITERALS_PATH` | **Operator-owned** general Phase 1 write-safety file of exact credential values the installation already knows, one per line, mounted read-only. Unset, absent, or empty is valid and is not a fail-closed condition; an invalid file makes the policy unusable and fails every governed Overmind write closed. Never commit this file; the tracked rule file must never contain a real credential. |
 
-No other application configuration is required; `config/never_store.yaml` ships in the
-image. The numeric scan budgets are versioned runtime constants, not
-configuration — see [write safety](write-safety.md). The separate legacy
-128 MiB capture observation-size and fidelity ceiling remains governed by
-[capture safety budgets](capture-safety-budgets.md).
+No other application configuration is required; `config/never_store.yaml`
+ships in the image. The numeric scan budgets are versioned runtime constants,
+not configuration — see [write safety](write-safety.md).
 
 ## Postgres — FINAL
 
@@ -224,50 +211,11 @@ modes run from the same image.
   container,
   path via `MEMSRV_AGENT_KEYS_PATH`. Plaintext entries under a top-level `keys:`
   list, each `{key, agent_id, default_namespace, allowed_namespaces[]}`.
-  Rotation is a redeploy; there is no key CRUD in the app.
-  Values beginning with the reserved capture credential prefix `mcap_` are
-  invalid agent keys and fail startup rather than acquiring MCP authority.
-- **Capture console:** `GET /capture/console`, interactive OIDC authentication.
-  Register `/capture/console/signin-oidc` as the client's callback path at the
-  provider. The initial supported provider is Authentik using the standard
-  authorization-code flow and `openid` scope. The server derives the audited
-  operator identity from the provider's `sub` claim; request parameters, agent
-  bearer keys, and capture credentials cannot supply operator identity. The
-  console cookie is secure, HTTP-only, and restricted to `/capture/console`.
-  It expires after a fixed eight hours and never uses sliding renewal. A
-  locally validated session therefore continues during an OIDC outage only
-  until that expiration; new sign-ins and renewals fail while the provider is
-  unavailable.
-  Credentialless enrollment additionally exposes
-  `GET /capture/console/pair/{userCode}` and
-  `POST /capture/console/pair/{userCode}/approve` under the same operator
-  policy. The page identifies the exact pending request by its displayed code,
-  shows the runtime-detected machine and Codex installation, and accepts only
-  the operator-owned label, allowed repository route patterns, and special
-  namespace mappings. Operator JSON inspection/approval and cancellation under
-  `/capture/console/api/pairing/{requestId}` use the same OIDC policy. Every
-  operator action derives its audit identity from the provider `sub`; no form,
-  query, agent key, or capture credential can supply it.
-  The server accepts one `X-Forwarded-Proto` hop so Traefik's external HTTPS
-  scheme is used in the OIDC callback URI; Traefik remains the TLS owner.
-  An unavailable OIDC authority prevents unauthenticated console entry but is
-  not consulted by `/capture/v1/observations`, `/mcp`, or `/healthz`.
-- **Capture pairing:** `POST /capture/v1/pairing-requests` creates a short-lived
-  request from detected machine/installation evidence without an existing
-  credential. `GET` and `DELETE /capture/v1/pairing-requests/{requestId}` use
-  the returned secret polling bearer capability, not MCP, capture, or operator
-  authority. The creation response contains a non-secret
-  `/capture/console/pair/{userCode}` URL; it never embeds the polling token.
-  Approval creates at most one binding for a Codex installation, including
-  concurrent requests. The approved capture credential is held as ephemeral
-  server coordination state, returned by one authenticated poll, and cleared
-  atomically at delivery. Polling tokens are stored only as hashes. Pairing
-  request state and its append-only audit are in PostgreSQL so server restarts
-  preserve an in-flight request; expired or cancelled requests cannot be
-  approved into authority.
+  Rotation is a redeploy; there is no key CRUD in the app. Key material has no
+  reserved capture-only prefix or interpretation.
 - **Day-1 agent URL:** `http://overmind.faviann.vms:8080/mcp` — DNS name, plain
-  HTTP on the LAN. The backend remains plain HTTP; external Traefik/TLS must
-  supply the documented forwarded scheme and OIDC callback configuration.
+  HTTP on the LAN. The backend remains plain HTTP; external Traefik/TLS may
+  terminate HTTPS independently.
 
 ## Release verification
 

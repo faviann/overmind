@@ -49,23 +49,42 @@ public static class SchemaVerifier
         ("search_tsv", "YES")
     ];
 
-    private static readonly (string Name, string Definition)[] RequiredMemoryConstraints =
+    private static readonly (string Name, string Type, string Definition)[] RequiredMemoryConstraints =
     [
         (
             "memories_status_check",
+            "c",
             "CHECK ((status = ANY (ARRAY['proposed'::text, 'approved'::text, 'rejected'::text, 'superseded'::text, 'retired'::text])))"
         ),
         (
             "memories_tier_check",
+            "c",
             "CHECK ((tier = ANY (ARRAY['hot'::text, 'warm'::text, 'cold'::text])))"
         ),
         (
             "memories_type_check",
+            "c",
             "CHECK ((type = ANY (ARRAY['decision'::text, 'fact'::text, 'preference'::text, 'task'::text, 'adr'::text, 'runbook'::text, 'note'::text, 'constraint'::text, 'open_question'::text, 'warning'::text])))"
         ),
         (
             "memories_visibility_check",
+            "c",
             "CHECK ((visibility = ANY (ARRAY['private'::text, 'shared'::text])))"
+        ),
+        (
+            "memories_pkey",
+            "p",
+            "PRIMARY KEY (id)"
+        ),
+        (
+            "memories_uuid_key",
+            "u",
+            "UNIQUE (uuid)"
+        ),
+        (
+            "memories_namespace_fkey",
+            "f",
+            "FOREIGN KEY (namespace) REFERENCES namespaces(name)"
         )
     ];
 
@@ -151,19 +170,21 @@ public static class SchemaVerifier
             }
         }
 
-        var constraints = (await conn.QueryAsync<(string Name, string Definition)>(
+        var constraints = (await conn.QueryAsync<(string Name, string Type, string Definition)>(
             """
-            SELECT conname AS Name, pg_get_constraintdef(oid) AS Definition
+            SELECT conname AS Name, contype::text AS Type,
+                   pg_get_constraintdef(oid) AS Definition
             FROM pg_constraint
-            WHERE conrelid = 'public.memories'::regclass AND contype = 'c'
-            """)).ToDictionary(row => row.Name, row => row.Definition, StringComparer.Ordinal);
-        foreach (var (name, definition) in RequiredMemoryConstraints)
+            WHERE conrelid = 'public.memories'::regclass
+            """)).ToDictionary(row => row.Name, StringComparer.Ordinal);
+        foreach (var (name, type, definition) in RequiredMemoryConstraints)
         {
             if (!constraints.TryGetValue(name, out var actual))
             {
                 result.Fail($"Missing required constraint 'public.{name}'.");
             }
-            else if (!string.Equals(actual, definition, StringComparison.Ordinal))
+            else if (!string.Equals(actual.Type, type, StringComparison.Ordinal) ||
+                     !string.Equals(actual.Definition, definition, StringComparison.Ordinal))
             {
                 result.Fail($"Constraint 'public.{name}' does not match the retained Phase 1 definition.");
             }

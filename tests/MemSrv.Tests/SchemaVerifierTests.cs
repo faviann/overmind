@@ -247,6 +247,25 @@ public sealed class SchemaVerifierTests
         });
     }
 
+    [Theory]
+    [InlineData("memories_pkey")]
+    [InlineData("memories_uuid_key")]
+    [InlineData("memories_namespace_fkey")]
+    public async Task MemCtlVerifySchemaFailsWhenRequiredMemoryKeyConstraintIsMissing(string constraint)
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, $"ALTER TABLE memories DROP CONSTRAINT {constraint}");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains(
+                $"Missing required constraint 'public.{constraint}'",
+                stderr,
+                StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task MemCtlVerifySchemaFailsWhenMemsrvGrantIsRevoked()
     {

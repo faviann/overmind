@@ -69,9 +69,9 @@ check-in is a handoff whose notes become the next owner's summary.
 reference uuids through an open workstream. The full trace remains retrievable
 by reference and is never inlined.
 
-**Canonical ledger** — traces, proposals, and approved memories. Everything
-outside that ledger is a derived, rebuildable projection and never the sole
-place truth exists.
+**Canonical ledger** — traces, proposals, and approved memories. Indexes,
+exports, and other representations of ledger content are derived, rebuildable
+projections and never the sole place ledger truth exists.
 
 **Write safety** — the generic never-store boundary on all memory and trace
 writes. Memory writes reject matched secrets; trace writes persist only the

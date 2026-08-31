@@ -153,9 +153,10 @@ public sealed class RepositoryStructureTests
         Assert.Contains("an open check-in is a handoff", glossary, StringComparison.Ordinal);
         Assert.Contains("full trace remains retrievable by reference and is never inlined", glossary, StringComparison.Ordinal);
         Assert.Contains(
-            "Everything outside that ledger is a derived, rebuildable projection and never the sole place truth exists",
+            "Indexes, exports, and other representations of ledger content are derived, rebuildable projections and never the sole place ledger truth exists",
             glossary,
             StringComparison.Ordinal);
+        Assert.DoesNotContain("Everything outside that ledger", glossary, StringComparison.Ordinal);
 
         Assert.Contains("No retired capture caller remains", decisions, StringComparison.Ordinal);
         Assert.Contains(

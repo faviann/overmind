@@ -235,6 +235,73 @@ public sealed class SchemaVerifierTests
     }
 
     [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenMemoryContentHashTypeDrifts()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, "ALTER TABLE memories ALTER COLUMN content_hash TYPE varchar(1)");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains(
+                "Column 'public.memories.content_hash' does not match the retained Phase 1 definition",
+                stderr,
+                StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenMemoryStatusDefaultIsMissing()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, "ALTER TABLE memories ALTER COLUMN status DROP DEFAULT");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains(
+                "Column 'public.memories.status' does not match the retained Phase 1 definition",
+                stderr,
+                StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenMemorySearchVectorIsNoLongerGenerated()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(
+                admin,
+                "ALTER TABLE memories DROP COLUMN search_tsv; " +
+                "ALTER TABLE memories ADD COLUMN search_tsv tsvector");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains(
+                "Column 'public.memories.search_tsv' does not match the retained Phase 1 definition",
+                stderr,
+                StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task MemCtlVerifySchemaFailsWhenMemoryIdLosesIdentityMode()
+    {
+        await WithDisposableDbAsync(async admin =>
+        {
+            await ExecuteAsync(admin, "ALTER TABLE memories ALTER COLUMN id DROP IDENTITY");
+
+            var (exitCode, _, stderr) = await RunVerifySchemaAsync(admin);
+            Assert.NotEqual(0, exitCode);
+            Assert.Contains(
+                "Column 'public.memories.id' does not match the retained Phase 1 definition",
+                stderr,
+                StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public async Task MemCtlVerifySchemaFailsWhenMemoryVisibilityConstraintIsMissing()
     {
         await WithDisposableDbAsync(async admin =>

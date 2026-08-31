@@ -24,29 +24,44 @@ public static class SchemaVerifier
 
     private static readonly string[] BootstrapNamespaces = ["memory-system", "homelab"];
 
-    private static readonly (string Name, string IsNullable)[] RequiredMemoryColumns =
+    private static readonly (
+        string Name,
+        string FormattedType,
+        string IsNullable,
+        string? DefaultExpression,
+        string IdentityMode,
+        string GeneratedMode,
+        string? GeneratedExpression)[] RequiredMemoryColumns =
     [
-        ("id", "NO"),
-        ("uuid", "NO"),
-        ("namespace", "NO"),
-        ("type", "NO"),
-        ("visibility", "NO"),
-        ("status", "NO"),
-        ("tier", "NO"),
-        ("content", "NO"),
-        ("content_hash", "NO"),
-        ("metadata", "NO"),
-        ("source_type", "NO"),
-        ("source_id", "YES"),
-        ("agent_id", "NO"),
-        ("session_id", "YES"),
-        ("version", "NO"),
-        ("supersedes", "YES"),
-        ("created_at", "NO"),
-        ("approved_by", "YES"),
-        ("approved_at", "YES"),
-        ("retired_at", "YES"),
-        ("search_tsv", "YES")
+        ("id", "bigint", "NO", null, "a", "", null),
+        ("uuid", "uuid", "NO", "gen_random_uuid()", "", "", null),
+        ("namespace", "text", "NO", null, "", "", null),
+        ("type", "text", "NO", null, "", "", null),
+        ("visibility", "text", "NO", "'shared'::text", "", "", null),
+        ("status", "text", "NO", "'proposed'::text", "", "", null),
+        ("tier", "text", "NO", "'warm'::text", "", "", null),
+        ("content", "text", "NO", null, "", "", null),
+        ("content_hash", "text", "NO", null, "", "", null),
+        ("metadata", "jsonb", "NO", "'{}'::jsonb", "", "", null),
+        ("source_type", "text", "NO", null, "", "", null),
+        ("source_id", "text", "YES", null, "", "", null),
+        ("agent_id", "text", "NO", null, "", "", null),
+        ("session_id", "text", "YES", null, "", "", null),
+        ("version", "integer", "NO", "1", "", "", null),
+        ("supersedes", "uuid", "YES", null, "", "", null),
+        ("created_at", "timestamp with time zone", "NO", "now()", "", "", null),
+        ("approved_by", "text", "YES", null, "", "", null),
+        ("approved_at", "timestamp with time zone", "YES", null, "", "", null),
+        ("retired_at", "timestamp with time zone", "YES", null, "", "", null),
+        (
+            "search_tsv",
+            "tsvector",
+            "YES",
+            null,
+            "",
+            "s",
+            "to_tsvector('english'::regconfig, content)"
+        )
     ];
 
     private static readonly (string Name, string Type, string Definition)[] RequiredMemoryConstraints =
@@ -150,23 +165,53 @@ public static class SchemaVerifier
             return;
         }
 
-        var columns = (await conn.QueryAsync<(string Name, string IsNullable)>(
+        var columns = (await conn.QueryAsync<(
+            string Name,
+            string FormattedType,
+            string IsNullable,
+            string? DefaultExpression,
+            string IdentityMode,
+            string GeneratedMode,
+            string? GeneratedExpression)>(
             """
-            SELECT column_name AS Name, is_nullable AS IsNullable
-            FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'memories'
-            """)).ToDictionary(row => row.Name, row => row.IsNullable, StringComparer.Ordinal);
-        foreach (var (name, isNullable) in RequiredMemoryColumns)
+            SELECT a.attname AS Name,
+                   format_type(a.atttypid, a.atttypmod) AS FormattedType,
+                   CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS IsNullable,
+                   CASE WHEN a.attgenerated = ''
+                     THEN pg_get_expr(d.adbin, d.adrelid)
+                   END AS DefaultExpression,
+                   a.attidentity::text AS IdentityMode,
+                   a.attgenerated::text AS GeneratedMode,
+                   CASE WHEN a.attgenerated <> ''
+                     THEN pg_get_expr(d.adbin, d.adrelid)
+                   END AS GeneratedExpression
+            FROM pg_attribute a
+            LEFT JOIN pg_attrdef d
+              ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+            WHERE a.attrelid = 'public.memories'::regclass
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            """)).ToDictionary(row => row.Name, StringComparer.Ordinal);
+        foreach (var expected in RequiredMemoryColumns)
         {
-            if (!columns.TryGetValue(name, out var actualNullability))
+            if (!columns.TryGetValue(expected.Name, out var actual))
             {
-                result.Fail($"Missing required column 'public.memories.{name}'.");
+                result.Fail($"Missing required column 'public.memories.{expected.Name}'.");
             }
-            else if (!string.Equals(actualNullability, isNullable, StringComparison.Ordinal))
+            else if (!string.Equals(actual.IsNullable, expected.IsNullable, StringComparison.Ordinal))
             {
                 result.Fail(
-                    $"Column 'public.memories.{name}' has nullability '{actualNullability}'; " +
-                    $"expected '{isNullable}'.");
+                    $"Column 'public.memories.{expected.Name}' has nullability '{actual.IsNullable}'; " +
+                    $"expected '{expected.IsNullable}'.");
+            }
+            else if (!string.Equals(actual.FormattedType, expected.FormattedType, StringComparison.Ordinal) ||
+                     !string.Equals(actual.DefaultExpression, expected.DefaultExpression, StringComparison.Ordinal) ||
+                     !string.Equals(actual.IdentityMode, expected.IdentityMode, StringComparison.Ordinal) ||
+                     !string.Equals(actual.GeneratedMode, expected.GeneratedMode, StringComparison.Ordinal) ||
+                     !string.Equals(actual.GeneratedExpression, expected.GeneratedExpression, StringComparison.Ordinal))
+            {
+                result.Fail(
+                    $"Column 'public.memories.{expected.Name}' does not match the retained Phase 1 definition.");
             }
         }
 

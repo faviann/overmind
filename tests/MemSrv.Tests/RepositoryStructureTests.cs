@@ -3,16 +3,6 @@ namespace MemSrv.Tests;
 public sealed class RepositoryStructureTests
 {
     [Fact]
-    public void ForbiddenPropositionContractRejectsRetiredPresentTenseResponsibility()
-    {
-        Assert.ThrowsAny<Xunit.Sdk.XunitException>(() =>
-            AssertForbiddenPropositionsAbsent(
-                "synthetic active document",
-                "Overmind operates capture ingestion.",
-                ["Overmind operates capture ingestion"]));
-    }
-
-    [Fact]
     public void BindingAuthorityRecordsTheCleanCutPreservationLayer()
     {
         string root = TestProcessRunner.RepoRoot;

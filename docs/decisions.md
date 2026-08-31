@@ -1,5 +1,18 @@
 # Decisions
 
+## 2026-08-31 — The capture-free Phase 1 baseline is authoritative (#210, #225)
+
+- The Local Capture Proof completed in #206, and the retired Overmind capture
+  implementation has been removed. The prior exception retaining its
+  superseded Phase 2 specification in the active tree is reversed.
+  Git history and durable issues and pull requests preserve the retired architecture.
+- Moraine owns durable external conversation and session evidence. Overmind
+  retains its own server-derived trace sessions, but it does not import an
+  external harness session into that ledger.
+- The old Overmind import-time session-preservation requirement deferred by
+  #15 is cancelled. It no longer blocks the v1.0.0 tag. Any future knowledge
+  provenance integration with Moraine requires a fresh design and authority.
+
 ## 2026-08-30 — Phase 1 write safety is independent of capture (#221)
 
 - The retained never-store boundary is general Overmind write safety, governed
@@ -11,13 +24,9 @@
 - General write-safety failures expose only closed failure codes and safe
   wording. Temporary capture callers map those codes into capture health and
   fidelity projections outside the retained boundary.
-- The 128 MiB whole-observation ceiling is not a Phase 1 scan budget. It remains
-  capture-only under `CaptureFidelityPolicy`, with its frozen maintenance
-  contract in `docs/capture-safety-budgets.md`.
-- This atomically supersedes the 2026-08-20 decision's narrow statement that
-  `capture-safety-budgets.md` remained binding for every write. The binding
-  general contract is now `write-safety.md`; the older document retains only
-  capture observation/fidelity authority while that code ships.
+- The retired whole-observation ceiling is not a Phase 1 scan budget.
+- This atomically supersedes the 2026-08-20 decision's narrower safety
+  authority. The binding general contract is now `write-safety.md`.
 
 ## 2026-08-22 — The project handoff leaves the authority chain
 
@@ -65,9 +74,9 @@
   slice summary, the write-time adoption order, the tiering/demotion position
   (superseded by the north star's deferral), the Pi harness directive, and the
   build sequencing. Git history is the archive; nothing is frozen in the tree.
-- Unlike `conversation-capture-phase2-spec.md`, no decision required this
-  document to remain on `main`, so the freeze-in-place treatment does not apply
-  (the boundary: "Marking a document frozen is not a decision to keep it").
+- No decision required this document to remain on `main`, so the former
+  freeze-in-place treatment did not apply (the boundary: "Marking a document
+  frozen is not a decision to keep it").
 
 ## 2026-08-20 — Capture is evidence; Moraine owns it (#203, #205)
 
@@ -81,8 +90,8 @@
   harnesses emit move to **Moraine** (adoption tracked by #206). Overmind's own
   append-only `traces` ledger is unaffected. Overmind does not own duplicate
   canonical conversation storage for that external evidence.
-- `docs/conversation-capture-phase2-spec.md` and its subordinate capture
-  documents are **superseded/frozen**. Per #203's recorded guardrails, the
+- The Phase 2 specification and its subordinate documents are
+  **superseded/frozen**. Per #203's recorded guardrails, the
   capture code is not deleted before #206 proves the replacement path; its
   existence alone justifies no new capture work. Retention in the active tree
   is narrow, not a general provenance allowance: the Phase 2 spec stays because
@@ -91,9 +100,9 @@
   the shipped code they describe still exists. Research notes, plans,
   intermediate analyses, and process artifacts are not entitled to remain on
   `main` merely for their history — Git history, issues, and PRs preserve those.
-  `docs/capture-safety-budgets.md` is the one exception to the freeze: it
-  remains binding, because spec §5 cites it for the never-store gate on every
-  Overmind write path.
+  At that revision the capture-only safety document was the one exception to
+  the freeze because spec §5 cited it for every Overmind write path. The
+  2026-08-30 decision replaced that authority with general write safety.
 - Phase 1 memory and governance invariants remain binding; capture-specific
   Phase 2 amendments do not remain binding merely because they were
   implemented. Current authority is

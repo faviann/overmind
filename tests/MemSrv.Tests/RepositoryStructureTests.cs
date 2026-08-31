@@ -3,6 +3,202 @@ namespace MemSrv.Tests;
 public sealed class RepositoryStructureTests
 {
     [Fact]
+    public void BindingAuthorityRecordsTheCleanCutPreservationLayer()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string boundary = File.ReadAllText(
+            Path.Combine(root, "docs/evidence-and-knowledge-boundary.md"));
+        string decisions = File.ReadAllText(Path.Combine(root, "docs/decisions.md"));
+
+        Assert.Contains(
+            "The superseded Phase 2 specification may be removed from the working tree",
+            boundary,
+            StringComparison.Ordinal);
+        Assert.Contains("Git history", boundary, StringComparison.Ordinal);
+        Assert.Contains("durable issues and pull requests", boundary, StringComparison.Ordinal);
+
+        Assert.Contains(
+            "Git history and durable issues and pull requests preserve the retired architecture",
+            decisions,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RetiredCaptureDocumentsAreAbsent()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string[] retiredDocuments =
+        [
+            "docs/capture-safety-budgets.md",
+            "docs/conversation-capture-phase2-spec.md",
+            "docs/research/local-codex-claude-capture-surfaces.md"
+        ];
+
+        foreach (string path in retiredDocuments)
+        {
+            Assert.False(
+                File.Exists(Path.Combine(root, path)),
+                $"Retired capture document still exists: {path}");
+        }
+    }
+
+    [Fact]
+    public void MoraineOwnershipCancelsTheImportTimeSessionPreservationBlocker()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string decisions = File.ReadAllText(Path.Combine(root, "docs/decisions.md"));
+        string phaseOneSpec = File.ReadAllText(
+            Path.Combine(root, "docs/memory-server-phase1-spec.md"));
+
+        Assert.Contains(
+            "Moraine owns durable external conversation and session evidence",
+            decisions,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "The old Overmind import-time session-preservation requirement",
+            decisions,
+            StringComparison.Ordinal);
+        Assert.Contains("It no longer blocks the v1.0.0 tag", decisions, StringComparison.Ordinal);
+        Assert.Contains(
+            "Import-time external-session preservation is not an Overmind requirement",
+            phaseOneSpec,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ActiveDocumentationRoutesOnlyToRetainedResponsibilities()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string[] activeDocuments =
+        [
+            "AGENTS.md",
+            "CONTEXT.md",
+            "README.md",
+            "docs/agents/domain.md",
+            "docs/testing.md",
+            "docs/deployment-contract.md",
+            "docs/design-rules.md",
+            "docs/evidence-and-knowledge-boundary.md",
+            "docs/memory-server-phase1-spec.md",
+            "docs/decisions.md",
+            "docs/write-safety.md"
+        ];
+        string[] retiredRoutes =
+        [
+            "capture-safety-budgets.md",
+            "conversation-capture-phase2-spec.md",
+            "local-codex-claude-capture-surfaces.md"
+        ];
+
+        foreach (string path in activeDocuments)
+        {
+            string content = File.ReadAllText(Path.Combine(root, path));
+            foreach (string retiredRoute in retiredRoutes)
+            {
+                Assert.DoesNotContain(retiredRoute, content, StringComparison.Ordinal);
+            }
+        }
+
+        string glossary = File.ReadAllText(Path.Combine(root, "CONTEXT.md"));
+        Assert.Contains("**Moraine**", glossary, StringComparison.Ordinal);
+        Assert.Contains("**Local Capture Proof**", glossary, StringComparison.Ordinal);
+        Assert.Contains("**Central Evidence Aggregation**", glossary, StringComparison.Ordinal);
+        Assert.Contains("**Knowledge Provenance Integration**", glossary, StringComparison.Ordinal);
+        Assert.DoesNotContain("**Capture ", glossary, StringComparison.Ordinal);
+        Assert.DoesNotContain("**Captured ", glossary, StringComparison.Ordinal);
+        Assert.DoesNotContain("inaccessible legacy", glossary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RetiredCaptureCategoriesAreAbsentFromRepositoryAndPackageInputs()
+    {
+        string root = TestProcessRunner.RepoRoot;
+        string[] inspectedPaths =
+        [
+            "src",
+            "migrations",
+            "packages",
+            "AGENTS.md",
+            "CONTEXT.md",
+            "README.md",
+            "docs/agents/domain.md",
+            "docs/testing.md",
+            "docs/deployment-contract.md",
+            "docs/design-rules.md",
+            "docs/evidence-and-knowledge-boundary.md",
+            "docs/memory-server-phase1-spec.md",
+            "docs/decisions.md",
+            "docs/write-safety.md",
+            ".gitignore",
+            "memsrv.sln",
+            "Makefile",
+            "Dockerfile",
+            "compose.yaml",
+            ".github/workflows/ci.yml"
+        ];
+        string[] retiredCategoryMarkers =
+        [
+            "CaptureAdapters",
+            "CodexCaptureTracer",
+            "/capture/",
+            "memctl capture",
+            "MEMSRV_CAPTURE_",
+            ".env.capture",
+            "mcap_",
+            "CaptureCredential",
+            "CaptureSourceBinding",
+            "capture/unscoped",
+            "capture_sources",
+            "capture_observations",
+            "captured_events",
+            "capture_pairing",
+            "capture-runtime",
+            "capture-console",
+            "CaptureWake",
+            "capture-hook",
+            "capture_hook",
+            "codex-capture-hooks",
+            "smoke-capture-runtime"
+        ];
+
+        foreach (string relativePath in inspectedPaths)
+        {
+            string absolutePath = Path.Combine(root, relativePath);
+            if (!Directory.Exists(absolutePath) && !File.Exists(absolutePath))
+            {
+                foreach (string marker in retiredCategoryMarkers)
+                {
+                    Assert.DoesNotContain(
+                        marker,
+                        relativePath,
+                        StringComparison.OrdinalIgnoreCase);
+                }
+
+                continue;
+            }
+
+            IEnumerable<string> files = Directory.Exists(absolutePath)
+                ? Directory.EnumerateFiles(absolutePath, "*", SearchOption.AllDirectories)
+                    .Where(path => !path.Contains("/bin/", StringComparison.Ordinal)
+                        && !path.Contains("/obj/", StringComparison.Ordinal))
+                : [absolutePath];
+
+            foreach (string file in files)
+            {
+                string repositoryEntry = Path.GetRelativePath(root, file);
+                string content = File.ReadAllText(file);
+                foreach (string marker in retiredCategoryMarkers)
+                {
+                    Assert.False(
+                        repositoryEntry.Contains(marker, StringComparison.OrdinalIgnoreCase)
+                            || content.Contains(marker, StringComparison.OrdinalIgnoreCase),
+                        $"Retired capture category marker '{marker}' found in {repositoryEntry}");
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void RetiredCaptureSubstrateIsAbsentFromRepositoryGraph()
     {
         string root = TestProcessRunner.RepoRoot;

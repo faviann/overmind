@@ -2,7 +2,7 @@
 
 Status: **binding**. Phase 1 spec §5 requires every Overmind memory and trace
 write to cross this boundary. This contract is independent of conversation
-capture; inaccessible legacy capture core consumes it but does not define it.
+evidence and remains part of the retained Phase 1 substrate.
 
 The boundary is implemented by `WriteSafetyGate`, `WriteSafetyBudgets`, the
 compiled secret rule set, and the deterministic secret scanner. A caller passes

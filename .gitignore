@@ -2,7 +2,6 @@ bin/
 obj/
 appsettings.Development.json
 .env
-.env.capture
 agent-keys.yaml
 node_modules/
 .sandcastle/logs/

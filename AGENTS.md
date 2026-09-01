@@ -26,10 +26,9 @@ that changes a contract, an invariant, or a binding scope. Ordinary
 implementation choices that the binding documents deliberately leave open stay
 with the implementer.
 
-The Phase 2 capture spec (`docs/conversation-capture-phase2-spec.md`) is
-superseded and no longer binding. Phase 1 memory and governance invariants
-remain binding; capture-specific Phase 2 amendments do not remain binding
-merely because they were implemented.
+The retired Phase 2 capture architecture is preserved in Git history and
+durable tracker artifacts, not the active tree. Phase 1 memory and governance
+invariants remain binding.
 
 ## Always-on invariants
 
@@ -52,13 +51,10 @@ merely because they were implemented.
   `reference/csharp-sdk/`. Trust that evidence over memory. Remote transport
   uses Streamable HTTP, never legacy SSE.
 - Tests or refactors → `docs/testing.md`
-- Conversation evidence or the inaccessible legacy capture residue →
-  `docs/evidence-and-knowledge-boundary.md`. It decides who owns what; no
-  capture product or workstation-side producer ships in this repo.
+- External conversation evidence → `docs/evidence-and-knowledge-boundary.md`.
+  It decides who owns what; no external-evidence producer ships in this repo.
 - Never-store rules, write-scan budgets, failure codes, or redaction markers →
   `docs/write-safety.md`
-- Legacy capture observation-size/fidelity policy →
-  `docs/capture-safety-budgets.md` (capture-only and frozen)
 - Schema, retrieval, dependencies, or scope → `docs/design-rules.md`
 - Deployment or deployment configuration → `docs/deployment-contract.md`
 - Domain terminology or domain documentation → `CONTEXT.md` and

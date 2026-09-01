@@ -22,14 +22,14 @@ Authority order (identical to `AGENTS.md`):
 ## Scope boundaries
 
 - **The Phase 1 Do Not Build list remains binding** (Phase 1 spec §11). The
-  Phase 2 capture spec's narrow exceptions are superseded and no longer
-  authorize anything new (see the boundary). No packaged capture interface or
-  workstation-side producer remains; only inaccessible ledger/core and schema
-  residue awaits contraction.
+  former Phase 2 exceptions are superseded and no longer authorize anything
+  new (see the boundary). The repository contains only the retained Phase 1
+  memory, trace, retrieval, identity, governance, and write-safety substrate.
 - **Overmind does not own external conversation evidence.** Moraine is the
-  intended substrate for durable capture of external agent conversations
-  (adoption tracked by #206); Overmind stays authoritative for governed
-  knowledge and governance history (the boundary).
+  owner of durable external agent conversation evidence; its Local Capture
+  Proof completed in #206. Central Evidence Aggregation and Knowledge
+  Provenance Integration remain prospective milestones. Overmind stays
+  authoritative for governed knowledge and governance history (the boundary).
 - **Forward seams are documented, not built** (spec §13): vector lane,
   `memctl export` projection boundary, nightly reconciliation worker,
   event-date recency, trigram-lane completion, tiering mechanics, dedup,
@@ -164,8 +164,7 @@ Committed — do not re-litigate without the maintainer:
   and compacted views are derived artifacts that point back into it and never
   replace it (spec §4, `trace_snapshots`; `AGENTS.md` always-on invariants).
 - **Harnesses remain thin clients.** Memory logic stays behind the MCP surface.
-  No workstation capture hook, adapter, or local runtime ships in this
-  repository (the boundary).
+  External evidence production is outside this repository (the boundary).
 - **Source-of-truth hierarchy resolves conflicts**: the current authoritative
   source (Git/IaC and equivalents) > approved memory > proposed memory > raw
   trace inference. It decides which record wins and mandates no mechanism;

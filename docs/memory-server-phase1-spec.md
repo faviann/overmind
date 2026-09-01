@@ -1,4 +1,4 @@
-# Memory Server — Phase 1 Build Spec (v1.11)
+# Memory Server — Phase 1 Build Spec (v1.12)
 
 This is a build spec for a Claude Code session. It is deliberately narrow. The **Do Not Build** section is as binding as the requirements. The goal is a working v0 spine in 1–2 sessions that the homelab project can consume immediately.
 
@@ -16,13 +16,13 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > Postgres major pinned to **18** everywhere (was "15+"). Migrations no longer create the `memsrv` role — provisioning owns roles (Ansible in prod, the Compose bootstrap in dev/CI). Image contract: `ghcr.io/faviann/overmind:<version>`, immutable tags. Service runtime contract (HTTP port/health) explicitly deferred to Session 2.
 
 > **v1.3 changelog (2026-07-10 — `log_trace` session selection, issue #17, see `docs/decisions.md`):**
-> `session_id` removed from the `log_trace` input schema; session identity is always server-derived (Mcp-Session-Id over HTTP; `MEMSRV_SESSION_ID` or a generated per-process id over stdio). A caller-supplied `session_id` is ignored; the response now returns `{traceUuid, sessionId}`. Import-time session preservation is an operator-path feature deferred to the conversation-capture wayfinder (#15). Must land before the v1.0.0 tag.
+> `session_id` removed from the `log_trace` input schema; session identity is always server-derived (Mcp-Session-Id over HTTP; `MEMSRV_SESSION_ID` or a generated per-process id over stdio). A caller-supplied `session_id` is ignored; the response now returns `{traceUuid, sessionId}`. At this revision, import-time session preservation was deferred to #15; v1.12 records its final disposition.
 
 > **v1.4 changelog (2026-07-10 — provenance-carrying retirement, issue #18):**
 > Retirement joins the trace taxonomy as a distinct operator action. `memctl retire` now requires operator identity and a reason, and atomically records the `approved` → `retired` transition with its trace event. See §6c.
 
 > **v1.6 changelog (2026-08-20 — capture authorization withdrawn, issue #205, see `docs/decisions.md`):**
-> §11's narrow authorization of a capture runtime, harness hooks, and an OIDC capture console — granted by `conversation-capture-phase2-spec.md`, now superseded — is withdrawn; the Do Not Build list applies unamended to new work, and the code that authorization produced still exists and is frozen. Italic scope notes added to §11's additional-datastores entry and §13's scale-out seam: both govern Overmind's own persistence, and an external system owning external evidence Overmind does not store is not what they prohibit. See `evidence-and-knowledge-boundary.md`. Consequence for v1.3: the #15 conversation-capture wayfinder that import-time session preservation was deferred to is superseded, so that deferral no longer has a live destination; the requirement itself stands, uncancelled, and needs re-triage to a current tracker.
+> The former Phase 2 authorization is withdrawn; the Do Not Build list applies unamended to new work. Italic scope notes added to §11's additional-datastores entry and §13's scale-out seam: both govern Overmind's own persistence, and an external system owning external evidence Overmind does not store is not what they prohibit. See `evidence-and-knowledge-boundary.md`. The v1.3 session-preservation question is resolved by v1.12.
 
 > **v1.7 changelog (2026-08-22 — the handoff leaves the authority chain, see `docs/decisions.md`):**
 > `agent-memory-handoff-v4.md` is deleted and no longer decides anything. Two clauses that were binding nowhere else are absorbed here: the **source-of-truth hierarchy** (§5, conflict resolution only — no new mechanism) and **no auto-injection** (§11). A third, the handoff's **seeding discipline**, is *not* absorbed: it contradicts this spec's own `save_note` contract, so it is recorded as an unresolved maintainer decision (`docs/decisions.md`, `design-rules.md` open boundaries) and runtime behavior is unchanged. Everything else the handoff held was already stated by this spec, `evidence-and-knowledge-boundary.md`, `north-star.md`, `CONTEXT.md`, or `deferred-knowledge-and-dispatcher-notes.md`, or was framing that decided nothing current. Git history is its archive. Consequence: no document now decides "where the spec is silent" — an unresolved *material* policy or architecture question goes to the operator.
@@ -31,8 +31,7 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > The never-store detector is a capture-independent Phase 1 capability governed
 > by `write-safety.md`. Its rule loading, scanner, markers, failure vocabulary,
 > and numeric scan budgets no longer depend on capture outcomes or fidelity.
-> The legacy 128 MiB whole-observation policy remains capture-only in
-> `CaptureFidelityPolicy` and `capture-safety-budgets.md` while that code ships.
+> The retired whole-observation policy is not part of Phase 1 write safety.
 
 > **v1.9 changelog (2026-08-30 — workstation capture producer retired, issue #222):**
 > The workstation-side capture producer, adapters, scheduling/runtime state,
@@ -42,7 +41,7 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 
 > **v1.10 changelog (2026-08-30 — server capture surface retired, issue #223):**
 > Packaged capture import, pairing, and console HTTP routes; `memctl` capture
-> commands; capture-console OIDC and runtime configuration; and the capture-only
+> commands; former console OIDC and runtime configuration; and the retired
 > agent-key reservation are removed. The legacy capture ledger/core and its
 > schema and migrations remain only as inaccessible residue for the next
 > contraction; they expose no packaged public or operator capability.
@@ -55,6 +54,14 @@ This is a build spec for a Claude Code session. It is deliberately narrow. The *
 > capture-bearing upgrade, compatibility, forward drop migration, or legacy-row
 > preservation path exists. Retained Phase 1 behavior and write safety are
 > unchanged.
+
+> **v1.12 changelog (2026-08-31 — clean-cut authority, issue #225):**
+> Moraine owns durable external conversation and session evidence.
+> Import-time external-session preservation is not an Overmind requirement and
+> no longer blocks v1.0.0. The superseded Phase 2 specification and its final
+> operational documents are removed; Git history and durable issues and pull
+> requests preserve the retired architecture. Overmind retains only its Phase 1
+> memory, trace, retrieval, identity, governance, and write-safety contracts.
 
 Where this spec is silent and `evidence-and-knowledge-boundary.md` does not decide ownership, nothing else decides for it — do not infer authority from an older or informational document. Raise the gap with the operator only when it is a **material policy or architecture decision**: one that changes a contract, an invariant, or a binding scope. Ordinary implementation choices this spec deliberately leaves open stay with the implementer.
 
@@ -363,12 +370,10 @@ Plus mechanical tests: UPDATE/DELETE on traces fails **both** via trigger and vi
 ## 11. Do Not Build (binding)
 
 These restrictions remain binding for Phase 1 and for all later work unless an
-applicable binding spec explicitly amends one. The capture-runtime,
-harness-hook, and OIDC capture-console authorization that
-`conversation-capture-phase2-spec.md` once granted is **superseded and no
-longer in force** (2026-08-20 course-correction, #203/#205 — see
-`evidence-and-knowledge-boundary.md`). The capture substrate it produced has
-been removed in full. The list below applies unamended to new work. The
+applicable binding spec explicitly amends one. The former Phase 2 authorization
+is **superseded and no longer in force** (2026-08-20 course-correction,
+#203/#205 — see `evidence-and-knowledge-boundary.md`), and the implementation it
+produced has been removed in full. The list below applies unamended to new work. The
 italic scope notes on the datastore entry below and on the §13 scale-out seam
 clarify what those entries already govern; they amend nothing.
 

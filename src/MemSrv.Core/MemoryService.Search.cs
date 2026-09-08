@@ -1,11 +1,24 @@
 using System.Text.Json;
 using Dapper;
+using static MemSrv.Core.NamespaceAuthorization;
 
 namespace MemSrv.Core;
 
 public sealed partial class MemoryService
 {
     private const double RrfK = 60;
+
+    // Both ranking lanes use the same eligibility rules. Namespace access is
+    // still authorized before either lane runs, through AuthorizeNamespace.
+    private const string SearchEligibilitySql =
+        """
+        WHERE namespace = ANY(@Namespaces)
+            AND (@HasTypes = false OR type = ANY(@Types))
+            AND (
+              (visibility = 'shared' AND (status = 'approved' OR (@IncludeProposed AND status = 'proposed')))
+              OR (visibility = 'private' AND status = 'approved' AND agent_id = @AgentId)
+            )
+        """;
 
     public async Task<ToolEnvelope<IReadOnlyList<SearchMemoryResult>>> SearchMemoryAsync(
         MemoryContext context,
@@ -22,7 +35,7 @@ public sealed partial class MemoryService
         }
 
         await ValidateOrLogBlockedAsync(context, context.DefaultNamespace, "search_memory", new { query, namespaces, types, limit }, cancellationToken);
-        await InsertTraceRawAsync(context.AgentId, context.DefaultNamespace, context.SessionId, "tool_call", new
+        await _database.InsertTraceRawAsync(context.AgentId, context.DefaultNamespace, context.SessionId, "tool_call", new
         {
             tool = "search_memory",
             @params = new { query, namespaces, types, limit }
@@ -83,7 +96,7 @@ public sealed partial class MemoryService
 
     private async Task<RetrievalConfig> GetRetrievalConfigAsync(string agentId, string @namespace, CancellationToken cancellationToken)
     {
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<RetrievalConfigRow>(
             """
             SELECT lanes::text AS LanesJson, recency_half_life_h AS RecencyHalfLifeH,
@@ -122,20 +135,15 @@ public sealed partial class MemoryService
         int limit,
         CancellationToken cancellationToken)
     {
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<LaneRow>(
-            """
+            $"""
             WITH scored AS (
               SELECT uuid, namespace, type, tier, status, content, source_type AS SourceType,
                      source_id AS SourceId, version, created_at AS CreatedAt,
                      ts_rank_cd(search_tsv, websearch_to_tsquery('english', @Query))::float8 AS Score
               FROM memories
-              WHERE namespace = ANY(@Namespaces)
-                AND (@HasTypes = false OR type = ANY(@Types))
-                AND (
-                  (visibility = 'shared' AND (status = 'approved' OR (@IncludeProposed AND status = 'proposed')))
-                  OR (visibility = 'private' AND status = 'approved' AND agent_id = @AgentId)
-                )
+              {SearchEligibilitySql}
                 AND search_tsv @@ websearch_to_tsquery('english', @Query)
             )
             SELECT *, row_number() OVER (ORDER BY Score DESC, CreatedAt DESC)::int AS Rank
@@ -164,20 +172,15 @@ public sealed partial class MemoryService
         int limit,
         CancellationToken cancellationToken)
     {
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<LaneRow>(
-            """
+            $"""
             WITH scored AS (
               SELECT uuid, namespace, type, tier, status, content, source_type AS SourceType,
                      source_id AS SourceId, version, created_at AS CreatedAt,
                      exp((-ln(2) * extract(epoch from (now() - created_at)) / 3600.0) / @HalfLife)::float8 AS Score
               FROM memories
-              WHERE namespace = ANY(@Namespaces)
-                AND (@HasTypes = false OR type = ANY(@Types))
-                AND (
-                  (visibility = 'shared' AND (status = 'approved' OR (@IncludeProposed AND status = 'proposed')))
-                  OR (visibility = 'private' AND status = 'approved' AND agent_id = @AgentId)
-                )
+              {SearchEligibilitySql}
             )
             SELECT *, row_number() OVER (ORDER BY Score DESC, CreatedAt DESC)::int AS Rank
             FROM scored

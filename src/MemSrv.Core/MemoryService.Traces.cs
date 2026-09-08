@@ -1,6 +1,6 @@
 using System.Text.Json;
 using Dapper;
-using Npgsql;
+using static MemSrv.Core.NamespaceAuthorization;
 
 namespace MemSrv.Core;
 
@@ -15,7 +15,7 @@ public sealed partial class MemoryService
         CancellationToken cancellationToken = default)
     {
         var targetNamespace = ResolveNamespace(context, @namespace);
-        var traceUuid = await InsertTraceRawAsync(context.AgentId, targetNamespace, context.SessionId, eventType, content, refs, cancellationToken);
+        var traceUuid = await _database.InsertTraceRawAsync(context.AgentId, targetNamespace, context.SessionId, eventType, content, refs, cancellationToken);
         return new ToolEnvelope<TraceResult>(
             new TraceResult(traceUuid, context.SessionId),
             "If this event contains a durable decision or fact, call propose_memory referencing this trace_uuid as source_id.");
@@ -26,7 +26,7 @@ public sealed partial class MemoryService
         Guid traceUuid,
         CancellationToken cancellationToken = default)
     {
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<TraceRecord>(
             """
             SELECT trace_uuid AS TraceUuid, session_id AS SessionId, agent_id AS AgentId, namespace,
@@ -48,7 +48,7 @@ public sealed partial class MemoryService
 
         // Mirror of memory_consumed: the grounding read is provenance too, in
         // the trace's own namespace, with the read uuid in refs.
-        await InsertTraceRawAsync(context.AgentId, row.Namespace, context.SessionId, "trace_consumed", new
+        await _database.InsertTraceRawAsync(context.AgentId, row.Namespace, context.SessionId, "trace_consumed", new
         {
             uuid = traceUuid
         }, [traceUuid], cancellationToken);
@@ -69,39 +69,5 @@ public sealed partial class MemoryService
             ? $"This trace references refs=[{string.Join(", ", record.Refs)}]; call get_by_id (memories) or retrieve_trace (traces) on them for surrounding context."
             : "This trace carries no refs; the provenance walk ends here. Call search_memory for related context, or propose_memory if it holds a durable fact worth keeping.";
         return new ToolEnvelope<RetrievedTraceRecord>(record, next);
-    }
-
-    private async Task<Guid> InsertTraceRawAsync(
-        string agentId,
-        string @namespace,
-        string sessionId,
-        string eventType,
-        object content,
-        Guid[]? refs,
-        CancellationToken cancellationToken,
-        NpgsqlConnection? existingConnection = null,
-        NpgsqlTransaction? transaction = null)
-    {
-        var contentJson = writeSafety.RedactJson(JsonSerializer.Serialize(content, _jsonOptions));
-        if (existingConnection is not null)
-        {
-            return await existingConnection.QuerySingleAsync<Guid>(
-                """
-                INSERT INTO traces (session_id, agent_id, namespace, event_type, content, refs)
-                VALUES (@SessionId, @AgentId, @Namespace, @EventType, CAST(@ContentJson AS jsonb), @Refs)
-                RETURNING trace_uuid
-                """,
-                new { SessionId = sessionId, AgentId = agentId, Namespace = @namespace, EventType = eventType, ContentJson = contentJson, Refs = refs },
-                transaction);
-        }
-
-        await using var connection = await OpenAsync(cancellationToken);
-        return await connection.QuerySingleAsync<Guid>(
-            """
-            INSERT INTO traces (session_id, agent_id, namespace, event_type, content, refs)
-            VALUES (@SessionId, @AgentId, @Namespace, @EventType, CAST(@ContentJson AS jsonb), @Refs)
-            RETURNING trace_uuid
-            """,
-            new { SessionId = sessionId, AgentId = agentId, Namespace = @namespace, EventType = eventType, ContentJson = contentJson, Refs = refs });
     }
 }

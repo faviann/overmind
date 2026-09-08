@@ -6,7 +6,7 @@ public sealed partial class MemoryService
 {
     public async Task<IReadOnlyList<ConsumedEntry>> ConsumedAsync(string sessionId)
     {
-        await using var connection = await OpenAsync();
+        await using var connection = await _database.OpenAsync();
         var rows = await connection.QueryAsync<ConsumedRow>(
             """
             SELECT t.ts AS Ts, 'memory' AS Kind, m.uuid AS Uuid, m.type AS Type,
@@ -30,7 +30,7 @@ public sealed partial class MemoryService
 
     public async Task<IReadOnlyList<WhyStep>> WhyAsync(Guid uuid)
     {
-        await using var connection = await OpenAsync();
+        await using var connection = await _database.OpenAsync();
         var steps = new List<WhyStep>();
         var seen = new HashSet<Guid>();
         Guid? current = uuid;
@@ -77,7 +77,7 @@ public sealed partial class MemoryService
 
     public async Task<IReadOnlyList<TraceRecord>> TraceAsync(string sessionId)
     {
-        await using var connection = await OpenAsync();
+        await using var connection = await _database.OpenAsync();
         var rows = await connection.QueryAsync<TraceRecord>(
             """
             SELECT trace_uuid AS TraceUuid, session_id AS SessionId, agent_id AS AgentId, namespace,

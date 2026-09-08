@@ -6,7 +6,7 @@ public sealed partial class MemoryService
 {
     public async Task<IReadOnlyList<MemoryRecord>> PendingAsync(string? @namespace = null)
     {
-        await using var connection = await OpenAsync();
+        await using var connection = await _database.OpenAsync();
         var rows = await connection.QueryAsync<MemoryRow>(
             """
             SELECT uuid, namespace, type, visibility, status, tier, content, source_type AS SourceType,
@@ -25,7 +25,7 @@ public sealed partial class MemoryService
     public async Task ApproveAsync(Guid uuid, string approvedBy, CancellationToken cancellationToken = default)
     {
         var reviewer = NormalizeReviewerIdentity(approvedBy);
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var row = await connection.QuerySingleAsync<MemoryRow>(
             """
@@ -49,7 +49,7 @@ public sealed partial class MemoryService
                 transaction);
         }
 
-        await InsertTraceRawAsync(
+        await _database.InsertTraceRawAsync(
             reviewer,
             row.Namespace,
             ReviewSessionId(uuid),
@@ -74,7 +74,7 @@ public sealed partial class MemoryService
         }
 
         var reviewer = NormalizeReviewerIdentity(approvedBy);
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var proposal = await connection.QuerySingleAsync<MemoryRow>(
             """
@@ -92,11 +92,11 @@ public sealed partial class MemoryService
 
         try
         {
-            writeSafety.AssertAllowed(amendedContent);
+            _writeSafety.AssertAllowed(amendedContent);
         }
         catch (WriteSafetyRejectedException ex)
         {
-            await InsertTraceRawAsync(
+            await _database.InsertTraceRawAsync(
                 reviewer,
                 proposal.Namespace,
                 ReviewSessionId(proposalUuid),
@@ -105,7 +105,7 @@ public sealed partial class MemoryService
                 {
                     blockedWrite = "approve_amendment",
                     rule = ex.RuleName,
-                    payload = writeSafety.RedactObject(new { content = amendedContent })
+                    payload = _writeSafety.RedactObject(new { content = amendedContent })
                 },
                 [proposalUuid],
                 cancellationToken,
@@ -148,7 +148,7 @@ public sealed partial class MemoryService
             },
             transaction);
 
-        await InsertTraceRawAsync(
+        await _database.InsertTraceRawAsync(
             reviewer,
             proposal.Namespace,
             ReviewSessionId(proposalUuid),
@@ -170,7 +170,7 @@ public sealed partial class MemoryService
         }
 
         var reviewer = NormalizeReviewerIdentity(rejectedBy);
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var row = await connection.QuerySingleAsync<MemoryRow>(
             """
@@ -186,7 +186,7 @@ public sealed partial class MemoryService
             new { Uuid = uuid },
             transaction);
 
-        await InsertTraceRawAsync(
+        await _database.InsertTraceRawAsync(
             reviewer,
             row.Namespace,
             ReviewSessionId(uuid),
@@ -211,7 +211,7 @@ public sealed partial class MemoryService
         }
 
         var @operator = NormalizeOperatorIdentity(retiredBy);
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<MemoryRow>(
             """
@@ -239,7 +239,7 @@ public sealed partial class MemoryService
             new { Uuid = uuid },
             transaction);
 
-        await InsertTraceRawAsync(
+        await _database.InsertTraceRawAsync(
             @operator,
             row.Namespace,
             $"retirement:{uuid}",

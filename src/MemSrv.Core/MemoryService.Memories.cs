@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Security.Cryptography;
 using System.Text;
 using Dapper;
+using static MemSrv.Core.NamespaceAuthorization;
 
 namespace MemSrv.Core;
 
@@ -12,7 +13,7 @@ public sealed partial class MemoryService
         Guid uuid,
         CancellationToken cancellationToken = default)
     {
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<MemoryRow>(
             """
             SELECT uuid, namespace, type, visibility, status, tier, content, source_type AS SourceType,
@@ -39,7 +40,7 @@ public sealed partial class MemoryService
             "SELECT uuid FROM memories WHERE supersedes = @Uuid ORDER BY created_at DESC LIMIT 1",
             new { Uuid = uuid });
 
-        await InsertTraceRawAsync(context.AgentId, row.Namespace, context.SessionId, "memory_consumed", new
+        await _database.InsertTraceRawAsync(context.AgentId, row.Namespace, context.SessionId, "memory_consumed", new
         {
             uuid
         }, [uuid], cancellationToken);
@@ -85,7 +86,7 @@ public sealed partial class MemoryService
         AuthorizeNamespace(context, @namespace);
         await ValidateOrLogBlockedAsync(context, @namespace, "propose_memory", new { type, content, sourceType, sourceId, supersedes }, cancellationToken);
         var uuid = await InsertMemoryAsync(context, @namespace, type, "shared", "proposed", content, sourceType, sourceId, supersedes, cancellationToken);
-        await InsertTraceRawAsync(context.AgentId, @namespace, context.SessionId, "memory_proposed", new { uuid, type, sourceType, sourceId }, [uuid], cancellationToken);
+        await _database.InsertTraceRawAsync(context.AgentId, @namespace, context.SessionId, "memory_proposed", new { uuid, type, sourceType, sourceId }, [uuid], cancellationToken);
         return new ToolEnvelope<MemoryWriteResult>(
             new MemoryWriteResult(uuid, "proposed"),
             "Proposal recorded; an operator must approve before it becomes shared knowledge. Continue your task.");
@@ -103,7 +104,7 @@ public sealed partial class MemoryService
         AuthorizeNamespace(context, @namespace);
         await ValidateOrLogBlockedAsync(context, @namespace, "save_note", new { type, content, sourceType, sourceId }, cancellationToken);
         var uuid = await InsertMemoryAsync(context, @namespace, type, "private", "approved", content, sourceType, sourceId, null, cancellationToken);
-        await InsertTraceRawAsync(context.AgentId, @namespace, context.SessionId, "memory_written", new { uuid, type, sourceType, sourceId }, [uuid], cancellationToken);
+        await _database.InsertTraceRawAsync(context.AgentId, @namespace, context.SessionId, "memory_written", new { uuid, type, sourceType, sourceId }, [uuid], cancellationToken);
         return new ToolEnvelope<MemoryWriteResult>(
             new MemoryWriteResult(uuid, "approved"),
             "Private note saved. If other agents need this, propose_memory instead.");
@@ -111,7 +112,7 @@ public sealed partial class MemoryService
 
     public async Task<MemoryRecord> ShowAsync(Guid uuid)
     {
-        await using var connection = await OpenAsync();
+        await using var connection = await _database.OpenAsync();
         var row = await connection.QuerySingleOrDefaultAsync<MemoryRow>(
             """
             SELECT uuid, namespace, type, visibility, status, tier, content, source_type AS SourceType,
@@ -148,7 +149,7 @@ public sealed partial class MemoryService
         Guid? supersedes,
         CancellationToken cancellationToken)
     {
-        await using var connection = await OpenAsync(cancellationToken);
+        await using var connection = await _database.OpenAsync(cancellationToken);
         return await connection.QuerySingleAsync<Guid>(
             """
             INSERT INTO memories (namespace, type, visibility, status, content, content_hash, source_type, source_id, agent_id, session_id, version, supersedes)
